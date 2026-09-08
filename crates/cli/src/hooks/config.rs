@@ -3,8 +3,10 @@
 
 //! Private, installer-owned configuration for generated coding-agent hooks.
 
-use std::io::Read;
 use std::path::{Path, PathBuf};
+
+#[cfg(unix)]
+use std::io::Read;
 
 use serde::{Deserialize, Serialize};
 
