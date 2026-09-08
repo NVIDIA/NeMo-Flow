@@ -279,7 +279,7 @@ jobs:
           fi
           just set-cargo-version "$version"
           # Refresh workspace package versions without changing resolved dependencies.
-          cargo metadata --offline --format-version 1 > /dev/null
+          cargo metadata --offline --filter-platform "${{ matrix.target }}" --format-version 1 > /dev/null
           printf 'NEMO_RELAY_CLI_PACKAGE_VERSION=%s\n' "$version" >> "$GITHUB_ENV"
 
       - name: Install musl tools
