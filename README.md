@@ -328,7 +328,7 @@ or plugin hooks that preserve enough lifecycle fidelity.
 | LangChain | Yes | Yes | Yes | Wrapped tool and LLM calling. |
 | LangGraph | Yes | Yes | Yes | Wrapped tool and LLM calling. |
 | Deep Agents | Yes | Yes | Yes | Wrapped tool and LLM calling. |
-| OpenClaw | Yes | Partial | No | Hook-backed telemetry with pre-tool guardrails. Public hooks do not expose managed execution rewrites. |
+| OpenClaw | Yes | Yes | Yes | In-process `nemo-relay/*` provider with live lineage. Tool execution intercepts are not available through public hooks. |
 
 The Python `nemo-relay` package ships extras for LangChain, LangGraph, and Deep
 Agents:

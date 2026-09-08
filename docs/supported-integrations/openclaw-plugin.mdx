@@ -1,71 +1,57 @@
 ---
 title: "OpenClaw Plugin Guide"
-description: "Install and configure the OpenClaw plugin for NeMo Relay observability and policy hooks."
+description: "Route OpenClaw model calls through the in-process NeMo Relay provider with live execution lineage."
 position: 2
 ---
 {/* SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0 */}
 
-Use the OpenClaw plugin when OpenClaw owns the agent, tool, and LLM lifecycle
-that needs NeMo Relay observability. The plugin observes supported OpenClaw
-plugin hooks and converts them into NeMo Relay sessions, LLM spans, tool spans,
-and marks that the generic NeMo Relay observability component can export as
-Agent Trajectory Interchange Format (ATIF) JSON, typed OpenTelemetry spans
-including the OpenInference projection for Phoenix, and adaptive telemetry
-inputs.
+Use the `nemo-relay-openclaw` plugin to apply NeMo Relay middleware and
+observability to OpenClaw model calls in process. OpenClaw's original stream
+function continues to own authentication and network transport. The plugin
+wraps that function with NeMo Relay and does not use the NeMo Relay Gateway, a
+plugin endpoint, or destination headers.
 
-This public OpenClaw plugin uses OpenClaw public hooks. It can initialize
-generic NeMo Relay plugin components such as `observability` and `adaptive`, and
-it can run pre-tool conditional guardrails when OpenClaw invokes the before-tool
-hook. Hook-backed mode does not rewrite provider routing or model requests. For
-middleware-backed behavior that changes execution, OpenClaw must expose the
-relevant invocation through a public plugin hook.
-
-Use this guide to install the plugin, enable it in OpenClaw, configure telemetry
-outputs, verify exported traces, and understand current LLM replay fidelity.
+Managed model calls support LLM guardrails, request intercepts, execution
+intercepts, stream execution intercepts, adaptive behavior, and observability.
+OpenClaw's public tool hooks also support tool guardrails, tool request
+intercepts, and live tool spans. Tool execution intercepts are unsupported
+because those hooks do not expose the tool execution callback.
 
 ## Requirements
 
-Required:
+The integration requires the following software:
 
-- OpenClaw `2026.7.1` or newer.
+- OpenClaw `2026.9.3` or newer and earlier than `2027`.
 - The OpenClaw CLI available as `openclaw`.
+- A host supported by the `nemo-relay-node` package.
 
-Optional:
+## Install the Plugin
 
-- Node.js and npm when installing or managing the package directly.
-- A Phoenix instance or OTLP collector when exporting OpenInference or
-  OpenTelemetry spans.
-
-## Install
-
-Install the plugin with OpenClaw so OpenClaw can register and manage it:
+Install the plugin through OpenClaw and restart the gateway:
 
 ```bash
-openclaw plugins install npm:nemo-relay-openclaw@0.9.0
+openclaw plugins install npm:nemo-relay-openclaw@0.8.0
 openclaw gateway restart
 ```
 
-OpenClaw uses the package `nemo-relay-openclaw` for installation and the plugin
-manifest ID `nemo-relay` for configuration. Use `nemo-relay` in
-`plugins.allow`, `plugins.entries`, `plugins inspect`, and gateway status
-commands.
+Use `nemo-relay-openclaw` as the package name. Use `nemo-relay` as the plugin
+ID in OpenClaw configuration, inspection, and gateway status commands. The
+OpenClaw peer dependency is optional, so installing this package does not
+install a second OpenClaw copy.
 
-If you manage OpenClaw plugin dependencies directly in a Node.js project,
-install the package with npm:
+For a project-local installation instead, run:
 
 ```bash
 npm install nemo-relay-openclaw@0.9.0
 ```
 
-Installing with npm makes the package available to that project. Use
-`openclaw plugins install` when you want OpenClaw to register and manage the
+Use `openclaw plugins install` when OpenClaw should register and manage the
 plugin.
 
-## Enable and Configure the Plugin
+## Configure the Provider
 
-Add the `nemo-relay` plugin ID to `plugins.allow`, grant conversation hook
-access, and place the OpenClaw plugin configuration under
+Add `nemo-relay` to `plugins.allow` and configure the plugin under
 `plugins.entries["nemo-relay"].config`:
 
 ```json
@@ -80,68 +66,15 @@ access, and place the OpenClaw plugin configuration under
         },
         "config": {
           "enabled": true,
-          "backend": "hooks",
           "plugins": {
             "version": 1,
-            "components": [
-              {
-                "kind": "observability",
-                "enabled": true,
-                "config": {
-                  "version": 3,
-                  "atif": {
-                    "enabled": true,
-                    "agent_name": "openclaw",
-                    "output_directory": "./nemo-relay-atif"
-                  },
-                  "opentelemetry": {
-                    "enabled": false,
-                    "endpoints": [
-                      {
-                        "type": "full",
-                        "transport": "http_binary",
-                        "endpoint": "http://localhost:4318/v1/traces",
-                        "service_name": "openclaw-nemo-relay"
-                      },
-                      {
-                        "type": "openinference",
-                        "transport": "http_binary",
-                        "endpoint": "http://localhost:6006/v1/traces",
-                        "service_name": "openclaw-nemo-relay"
-                      }
-                    ]
-                  }
-                }
-              },
-              {
-                "kind": "adaptive",
-                "enabled": true,
-                "config": {
-                  "version": 1,
-                  "agent_id": "openclaw",
-                  "state": {
-                    "backend": {
-                      "kind": "in_memory",
-                      "config": {}
-                    }
-                  },
-                  "telemetry": {
-                    "learners": ["tool_parallelism"]
-                  }
-                }
-              }
-            ]
+            "components": []
           },
-          "capture": {
-            "includePrompts": true,
-            "includeResponses": true,
-            "stripToolArgs": true,
-            "stripToolResults": true
+          "routing": {
+            "favorites": ["openai/gpt-5.4", "anthropic/claude-sonnet-4-5"]
           },
-          "correlation": {
-            "llmOutputGraceMs": 250,
-            "recordTtlMs": 600000,
-            "maxRecordsPerKey": 32
+          "fallback": {
+            "enabled": true
           }
         }
       }
@@ -150,39 +83,31 @@ access, and place the OpenClaw plugin configuration under
 }
 ```
 
-This example enables local ATIF export and leaves OTLP exporters disabled until
-you point them at a collector or Phoenix endpoint. Remove exporter sections you
-do not use, or set their `enabled` fields to `false`.
+The configuration fields have the following behavior:
 
-- `plugins.allow` controls OpenClaw plugin trust and loading. Include
-  `nemo-relay` when OpenClaw runs with restrictive plugin settings.
-- `plugins.entries["nemo-relay"].enabled` controls whether OpenClaw starts this
-  plugin entry.
-- `hooks.allowConversationAccess` lets trusted non-bundled plugins receive
-  conversation-sensitive hook payloads such as LLM prompts, LLM responses,
-  agent finalization messages, and tool payloads.
-- `config.enabled` disables or enables the NeMo Relay OpenClaw wrapper without
-  removing the plugin entry. `config.backend` currently supports only `hooks`.
-- `config.plugins` is the generic NeMo Relay plugin configuration document. Use
-  this object to configure built-in components such as `observability` and
-  `adaptive`.
-- `config.plugins.components[].config.atif` writes ATIF trajectory JSON files.
-  Set `output_directory` to the directory where OpenClaw should write files.
-- `config.plugins.components[].config.opentelemetry.endpoints` sends typed OTLP
-  spans when the OpenTelemetry section is enabled. Use `full` for the complete
-  NeMo Relay projection, `gen_ai` for standardized GenAI conventions, or
-  `openinference` for Phoenix and other OpenInference-compatible collectors.
-- `config.plugins.components[]` entries with `kind: "adaptive"` initialize the
-  Adaptive plugin. In hook-backed OpenClaw mode, adaptive telemetry can consume
-  replayed NeMo Relay events, while request-rewrite features such as adaptive
-  hints require a managed execution path.
-- `config.capture` controls prompt, response, tool argument, and tool result
-  capture. Tool arguments and tool results are stripped by default because they
-  often contain user data, local paths, tokens, or large payloads.
-- `config.correlation` controls bounded in-memory hook correlation. By default,
-  the plugin waits 250 ms for a matching `llm_input` after an `llm_output`,
-  keeps correlation records for 600 seconds, and keeps at most 32 records per
-  correlation key.
+- `enabled` enables the provider and lifecycle integration.
+- `plugins` contains the standard NeMo Relay plugin-host configuration for
+  guardrails, intercepts, adaptive behavior, subscribers, and exporters.
+- `routing.favorites` publishes selected upstream routes in the OpenClaw model
+  catalog. Compatible routes can still be entered manually.
+- `fallback.enabled` enables live, observability-only LLM handles for
+  unprefixed provider calls. It does not apply LLM middleware to those calls.
+- `hooks.allowConversationAccess` lets the plugin receive the conversation
+  payloads required by fallback capture.
+
+The integration passes live prompts, responses, tool arguments, and tool
+results into Relay. Configure Relay event sanitizers and observability
+components to filter or omit sensitive content. The OpenClaw plugin does not
+apply a separate capture policy.
+
+The legacy `backend` and `correlation` fields are accepted as deprecated no-ops
+for one release. The plugin logs a warning when either field is present.
+
+Refer to [Plugin Configuration
+Files](/configure-plugins/plugin-configuration-files) for generic component
+configuration and [Observability
+Configuration](/configure-plugins/observability/configuration) for exporter
+configuration.
 
 Restart the gateway after changing plugin configuration:
 
@@ -190,146 +115,142 @@ Restart the gateway after changing plugin configuration:
 openclaw gateway restart
 ```
 
-## Configuration Key Names
+## Select a Managed Model
 
-The OpenClaw wrapper owns `enabled`, `backend`, `capture`, and `correlation`.
-The top-level `plugins` object inside the wrapper is the generic NeMo Relay
-plugin configuration document.
+Use the following model syntax:
 
-<Note>
-OpenClaw wrapper fields such as `includePrompts` and `llmOutputGraceMs` follow
-the OpenClaw plugin schema. Fields inside `config.plugins` are NeMo Relay generic
-plugin configuration, so they use `snake_case` regardless of language.
+```text
+nemo-relay/<upstream-provider>/<upstream-model-id>
+```
 
-</Note>
+The model ID can contain slashes. For example,
+`nemo-relay/openrouter/vendor/model` selects provider `openrouter` and model ID
+`vendor/model`. Recursive routes such as `nemo-relay/nemo-relay/...` fail
+before execution.
 
-Missing observability sections are disabled. Plugin-host validation or
-initialization errors degrade the NeMo Relay runtime as a whole, and the status
-method reports configured output health from the generic observability
-component. Refer to
-[Observability Configuration](/configure-plugins/observability/configuration)
-for the complete `observability` component schema and exporter-specific fields.
+The initial verified routes are listed in the following table:
+
+| Upstream Provider | Supported OpenClaw API                   |
+| ----------------- | ---------------------------------------- |
+| `openai`          | `openai-responses`, `openai-completions` |
+| `openai-codex`    | `openai-chatgpt-responses`               |
+| `anthropic`       | `anthropic-messages`                     |
+| `google`          | `google-generative-ai`                   |
+| `google-vertex`   | `google-vertex`                          |
+| `openrouter`      | `openai-completions`                     |
+
+The provider takes a verified route snapshot for each invocation. A Relay
+request interceptor can select another model only when that route exists in
+the same snapshot and uses a supported provider and API combination. Unknown,
+recursive, custom-transport, and unsupported routes fail closed.
+
+OpenClaw's public provider-family compatibility hooks preserve replay
+sanitization, tool-schema normalization, reasoning payloads, and supported
+stream parameters. At execution time, OpenClaw resolves runtime authentication,
+base URL, and request transport overrides for the selected upstream model.
+
+## Understand Live Lineage
+
+The plugin opens every Relay scope before the corresponding work starts:
+
+```text
+OpenClaw session
+└── agent run
+    ├── Relay LLM call
+    │   └── upstream provider execution
+    ├── tool call
+    └── subagent session
+        └── subagent run
+```
+
+The coordinator stores live identifiers and Relay handles only. It does not
+store transcripts or reconstruct calls from message history, `agent_end`, or
+late timing events. Completed handles are removed immediately. Incomplete
+records have a five-minute time-to-live and a limit of 1,024 records per
+category. Gateway shutdown drains remaining handles from leaves to roots and
+marks them abandoned.
+
+OpenClaw does not pass `runId` directly to `wrapStreamFn`. The provider first
+uses an exact `requestId` and active-run match. Otherwise, it requires exactly
+one active run in the session. Managed execution fails closed when the parent
+is missing or ambiguous. The supported host invariant is one active agent run
+per OpenClaw session.
+
+Run-mode subagent sessions are children of the requester run. Long-lived
+subagent sessions are children of the requester session and include causal
+metadata for the requester run. A managed child waits up to one second for its
+authoritative spawn edge and fails closed instead of opening an orphan scope.
+Assistant tool-call IDs link sibling tool spans to the managed LLM call that
+produced them.
+
+All asynchronous work uses explicit scope stacks. Concurrent sessions,
+subagents, streams, and tools do not mutate a process-global current stack.
+
+## Understand Fallback Capture
+
+Unprefixed model calls can emit observability through the fallback hooks when
+`fallback.enabled` is `true`. `llm_input` opens a live LLM handle under the
+known run, and `llm_output` closes it. The plugin skips unmatched output and
+closes abandoned fallback handles at agent or gateway shutdown.
+
+Fallback capture is fail open and does not reconstruct calls from transcripts,
+message writes, model timing hooks, or grace timers. Fallback hooks ignore the
+`nemo-relay` provider to prevent duplicate LLM spans.
+
+## Understand Tool Policy
+
+Before a tool executes, the plugin resolves the exact parent run, applies Relay
+conditional guardrails and request intercepts, and opens a tool handle with the
+rewritten parameters. OpenClaw executes the tool with those rewritten
+parameters. The matching `after_tool_call` hook closes the handle with the
+actual result, error, and duration.
+
+Tool policy fails closed when the parent run is missing. Relay tool execution
+intercepts do not run because the public OpenClaw hook does not provide the
+execution callback. This is the only unsupported Relay interception type.
 
 ## Verify the Integration
 
-Inspect the plugin runtime:
+Inspect the installed plugin:
 
 ```bash
 openclaw plugins inspect nemo-relay --runtime --json
 ```
 
-This verifies that the plugin package is installed, enabled, importable, and
-exposes its config schema. It does not prove that every hook and gateway method
-surface is active in a running gateway.
-
-Run an OpenClaw session with the plugin enabled, then verify the configured
-sink:
-
-- ATIF: confirm JSON files appear in the configured
-  `config.plugins.components[].config.atif.output_directory`.
-- Typed OpenTelemetry: confirm spans arrive at every configured OTLP endpoint;
-  for an `openinference` endpoint, confirm the projected spans appear in
-  Phoenix or another OpenInference-compatible backend.
-
-The plugin also registers the `operator.admin` scoped gateway method
-`nemoRelay.status`. If your CLI is already paired with admin-capable gateway
-access, run:
+Run a managed model such as `nemo-relay/openai/gpt-5.4`, then inspect the
+admin-scoped runtime status:
 
 ```bash
 openclaw gateway call nemoRelay.status --json
 ```
 
-Otherwise, pass your normal admin-capable gateway auth options:
+The response reports whether the runtime is in process, whether the plugin host
+initialized, active handle counts, and counters for missing runs, ambiguous
+runs, orphan subagents, and ambiguous spawn tools. It also reports
+`toolExecutionIntercepts: false` and `gateway: false` as explicit capability
+boundaries.
 
-```bash
-openclaw gateway call nemoRelay.status --token "$OPENCLAW_GATEWAY_TOKEN" --json
-```
-
-If OpenClaw requests a device scope upgrade for `operator.admin`, approve it
-through the normal OpenClaw device approval flow and retry the status call.
-
-The status response reports backend state, output health for `atif`, `otel`,
-and `openInference`, replay counters, and the latest degraded or unavailable
-reason when present.
-
-## Runtime Mapping
-
-The plugin maps supported OpenClaw hook events into NeMo Relay telemetry,
-adaptive inputs, and pre-tool conditional guardrail checks.
-
-It does not rewrite provider routing or provider request payloads. Hook-backed
-adaptive telemetry can learn from replayed events, while request-rewrite
-features such as adaptive hints require a managed execution path.
-
-| OpenClaw hook | NeMo Relay behavior |
-| --- | --- |
-| `gateway_start` | Touches the replay backend early; session roots still open lazily from session-scoped hooks. |
-| `gateway_stop` | Drains open sessions, shuts down subscribers, and clears the NeMo Relay plugin host. |
-| `session_start` | Opens or aliases a NeMo Relay session scope. |
-| `session_end` | Closes the session and flushes pending replay state; the generic observability component exports ATIF when enabled. |
-| `model_call_started` / `model_call_ended` | Records provider timing for later LLM span correlation. |
-| `llm_input` / `llm_output` | Replays direct LLM spans when request and response hooks can be paired safely. |
-| `before_message_write` | Records assistant turns for ordered LLM replay when provider timing can be paired later. |
-| `after_tool_call` | Replays successful tool calls as tool spans; blocked tools emit marks. |
-| `agent_end` | Emits an agent lifecycle mark, flushes recorded assistant-turn LLM spans, and preserves the final assistant answer as the session output. |
-| `before_agent_finalize` | Preserves the last assistant message as fallback session output and emits a lifecycle mark without mutating the finalization payload. |
-| `subagent_spawned` / `subagent_ended` | Emits subagent lifecycle marks and nests child subagent session scopes under the requester session when stable lineage is available. |
-
-## LLM Replay Fidelity
-
-OpenClaw currently exposes request, response, message-write, and provider
-timing details through separate hook events. The plugin correlates those events
-within the same session, provider, model, and run.
-
-When model timing cannot be safely paired with an assistant turn, the plugin
-emits diagnostic marks instead of inventing latency. This keeps traces honest
-and makes current fidelity boundaries explicit.
-
-When OpenClaw provides usage data, the plugin maps input, output, total, cache
-read, and cache write fields into OpenInference token-count attributes, and
-maps explicit cost fields into OpenInference cost attributes.
+Verify the configured subscribers or exporters after the session ends. For
+example, confirm that ATIF output files exist or that typed OpenTelemetry spans
+arrived at the configured collector.
 
 ## Troubleshooting
 
-If the plugin does not load:
+If a managed model fails before execution, check the following conditions:
 
-- verify the package was installed with `openclaw plugins install`
-- verify `plugins.allow` includes `nemo-relay`
-- verify `plugins.entries["nemo-relay"].enabled` is not disabled
-- restart the gateway after config changes
+- The model uses `nemo-relay/<provider>/<model>` syntax.
+- The upstream model exists in OpenClaw's current model registry.
+- The provider and API combination appears in the verified route table.
+- The session has exactly one active run, or `requestId` exactly matches its
+  active `runId`.
+- A managed subagent has an unambiguous requester and spawning-tool edge.
 
-If conversation payloads are missing:
+If fallback output is absent, verify `fallback.enabled`,
+`hooks.allowConversationAccess`, and the availability of matching `llm_input`
+and `llm_output` hooks. Use `nemoRelay.status` counters to distinguish skipped
+fallback records from strict managed-lineage failures.
 
-- verify `hooks.allowConversationAccess` is enabled for the plugin
-- verify the OpenClaw session emits the relevant LLM, message-write, and tool
-  hooks
-
-If tool spans exist but LLM spans are incomplete:
-
-- verify `llm_input` and `llm_output` hooks are emitted
-- verify `before_message_write` hooks are emitted when relying on assistant-turn
-  replay
-- verify `model_call_started` and `model_call_ended` hooks are emitted when
-  timing attribution is expected
-- check diagnostic marks for ambiguous or unpaired timing records
-
-If no export output appears:
-
-- verify `config.plugins.components[].config.atif.output_directory`,
-  or each
-  `config.plugins.components[].config.opentelemetry.endpoints[].endpoint`
-- verify the configured collector or output directory is reachable
-- verify session end or gateway stop hooks fired so pending replay state can
-  drain
-
-If ambiguous timing marks appear, treat them as expected conservative behavior.
-The plugin avoids attaching unsafe latency when multiple timing candidates could
-match the same assistant turn.
-
-## Known Limitations
-
-Current OpenClaw public hooks are separate event streams, so some LLM timing
-attribution is best-effort. If a matching request hook is missing, the plugin
-can replay an LLM output with a placeholder request after the configured grace
-window. If timing is ambiguous, the plugin emits diagnostic marks instead of
-unsafe latency.
+If no exported output appears, verify the generic NeMo Relay plugin component
+configuration and the destination's availability. The OpenClaw integration
+runs entirely in process; starting a separate Relay Gateway does not affect its
+provider traffic.

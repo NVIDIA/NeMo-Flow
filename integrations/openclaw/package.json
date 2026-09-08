@@ -1,7 +1,7 @@
 {
   "name": "nemo-relay-openclaw",
   "version": "0.9.0",
-  "description": "NeMo Relay-authored observability plugin for OpenClaw.",
+  "description": "In-process NeMo Relay provider, middleware, and lineage integration for OpenClaw.",
   "type": "module",
   "repository": {
     "type": "git",
@@ -18,36 +18,20 @@
   },
   "files": [
     "dist/**",
-    "index.ts",
-    "src/config.ts",
-    "src/health.ts",
-    "src/hook-replay/correlation.ts",
-    "src/hook-replay/llm.ts",
-    "src/hook-replay/marks.ts",
-    "src/hook-replay/session.ts",
-    "src/hook-replay/tool.ts",
-    "src/hooks-backend.ts",
-    "src/modules.ts",
-    "src/openclaw-hook-types.ts",
-    "src/runtime-state.ts",
-    "src/types.ts",
     "openclaw.plugin.json",
     "README.md"
   ],
   "openclaw": {
     "extensions": [
-      "./index.ts"
-    ],
-    "runtimeExtensions": [
       "./dist/index.js"
     ],
     "compat": {
-      "pluginApi": ">=2026.7.1-2",
-      "minGatewayVersion": "2026.7.1-2"
+      "pluginApi": ">=2026.9.3",
+      "minGatewayVersion": "2026.9.3"
     },
     "build": {
-      "openclawVersion": "2026.7.1-2",
-      "pluginSdkVersion": "2026.7.1-2"
+      "openclawVersion": "2026.9.3",
+      "pluginSdkVersion": "2026.9.3"
     }
   },
   "scripts": {
@@ -60,13 +44,19 @@
     "test:live": "npm run build:test && node scripts/test-live.mjs"
   },
   "peerDependencies": {
-    "openclaw": "2026.7.1-2"
+    "openclaw": ">=2026.9.3 <2027"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": {
+      "optional": true
+    }
   },
   "dependencies": {
     "nemo-relay-node": "0.9.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "openclaw": "2026.9.3",
     "typescript": "^5.8.2"
   },
   "license": "Apache-2.0"

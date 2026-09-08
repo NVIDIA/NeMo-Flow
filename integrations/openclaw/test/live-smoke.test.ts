@@ -1,252 +1,139 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-/**
- * Opt-in live smoke test for exercising the real OpenClaw plugin runtime.
- */
 import assert from 'node:assert/strict';
-import * as fs from 'node:fs/promises';
-import * as os from 'node:os';
-import * as path from 'node:path';
 import { it } from 'node:test';
 
-import { registerNemoRelayPlugin } from '../src/runtime-state.js';
-import { defaultNemoRelayModuleLoader, type NemoRelayModuleLoader, type NemoRelayModules } from '../src/modules.js';
-import type { OpenClawPluginApi, PluginLogger } from 'openclaw/plugin-sdk/plugin-entry';
-import { callGatewayStatus, type TestGatewayMethodHandler } from './gateway-status.js';
+import type {
+  OpenClawPluginApi,
+  ProviderResolveDynamicModelContext,
+  ProviderWrapStreamFnContext,
+} from 'openclaw/plugin-sdk/plugin-entry';
 
-const liveSmokeEnabled = process.env.NEMO_RELAY_OPENCLAW_LIVE_SMOKE === '1';
+import { parseConfig } from '../src/config.js';
+import { LiveLineageCoordinator } from '../src/lineage.js';
+import { defaultNemoRelayModuleLoader } from '../src/modules.js';
+import { NemoRelayProvider } from '../src/provider.js';
+import { logger, model } from './helpers.js';
 
-async function waitForExportFile(outputDir: string, prefix: string, timeoutMs = 2_000): Promise<string | undefined> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const files = await fs.readdir(outputDir);
-    const exportedPath = files.find((file) => file.startsWith(prefix) && file.endsWith('.json'));
-    if (exportedPath) return exportedPath;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  return undefined;
-}
+const enabled = process.env.NEMO_RELAY_OPENCLAW_LIVE_SMOKE === '1';
 
-it(
-  'runs a live NeMo Relay binding smoke for session ATIF export and hook replay',
-  { skip: !liveSmokeEnabled },
-  async () => {
-    const outputDir = await fs.mkdtemp(path.join(os.tmpdir(), 'nemo-relay-openclaw-live-'));
-    const modules = await loadRealNemoRelayModules();
-    const api = createApi({
-      pluginConfig: {
-        plugins: {
-          version: 1,
-          components: [
-            {
-              kind: 'observability',
-              enabled: true,
-              config: {
-                version: 3,
-                atif: {
-                  enabled: true,
-                  agent_name: 'openclaw',
-                  output_directory: outputDir,
-                  filename_template: 'live-{session_id}.json',
-                },
-              },
-            },
-            {
-              kind: 'adaptive',
-              enabled: true,
-              config: {
-                version: 1,
-                agent_id: 'openclaw-live',
-                state: {
-                  backend: {
-                    kind: 'in_memory',
-                    config: {},
-                  },
-                },
-                telemetry: {
-                  learners: ['tool_parallelism'],
-                },
-              },
-            },
-          ],
-        },
-      },
-    });
-    const previousXdgConfigHome = process.env.XDG_CONFIG_HOME;
-    process.env.XDG_CONFIG_HOME = outputDir;
-    let serviceStarted = false;
-
-    try {
-      registerPlugin(api, async () => modules);
-
-      const service = api.calls.services[0];
-      assert.ok(service, 'expected OpenClaw service registration');
-      await service.start({
-        stateDir: outputDir,
-        config: {} as never,
-        logger: api.logger,
-      });
-      serviceStarted = true;
-
-      const sessionStart = api.calls.hooks.find((hook) => hook.hookName === 'session_start');
-      const llmInput = api.calls.hooks.find((hook) => hook.hookName === 'llm_input');
-      const llmOutput = api.calls.hooks.find((hook) => hook.hookName === 'llm_output');
-      const afterToolCall = api.calls.hooks.find((hook) => hook.hookName === 'after_tool_call');
-      const sessionEnd = api.calls.hooks.find((hook) => hook.hookName === 'session_end');
-      assert.ok(sessionStart, 'expected session_start hook registration');
-      assert.ok(llmInput, 'expected llm_input hook registration');
-      assert.ok(llmOutput, 'expected llm_output hook registration');
-      assert.ok(afterToolCall, 'expected after_tool_call hook registration');
-      assert.ok(sessionEnd, 'expected session_end hook registration');
-
-      await sessionStart.handler({ sessionId: '../live-session:1' }, { sessionId: '../live-session:1' });
-      await llmInput.handler(
-        {
-          runId: 'live-run-1',
-          sessionId: '../live-session:1',
-          provider: 'openai',
-          model: 'gpt-live',
-          systemPrompt: 'be concise',
-          prompt: 'hello',
-          historyMessages: [],
-          imagesCount: 0,
-        },
-        { runId: 'live-run-1', sessionId: '../live-session:1', agentId: 'agent-live' },
-      );
-      await llmOutput.handler(
-        {
-          runId: 'live-run-1',
-          sessionId: '../live-session:1',
-          provider: 'openai',
-          model: 'gpt-live',
-          assistantTexts: ['hi'],
-          usage: { input: 1, output: 1 },
-        },
-        { runId: 'live-run-1', sessionId: '../live-session:1', agentId: 'agent-live' },
-      );
-      await afterToolCall.handler(
-        {
-          toolName: 'read_file',
-          params: { path: 'README.md' },
-          runId: 'live-run-1',
-          toolCallId: 'tool-live-1',
-          result: { text: 'ok' },
-          durationMs: 2,
-        },
-        {
-          runId: 'live-run-1',
-          sessionId: '../live-session:1',
-          toolName: 'read_file',
-          toolCallId: 'tool-live-1',
-        },
-      );
-      await sessionEnd.handler(
-        { sessionId: '../live-session:1', messageCount: 1, reason: 'idle' },
-        { sessionId: '../live-session:1' },
-      );
-
-      const exportedPath = await waitForExportFile(outputDir, 'live-');
-      assert.ok(exportedPath, 'expected generic observability ATIF export');
-      const exported = JSON.parse(await fs.readFile(path.join(outputDir, exportedPath), 'utf8')) as unknown;
-      assert.equal(typeof exported, 'object');
-
-      const status = await callGatewayStatus(api.calls.gatewayMethods[0]?.handler);
-      assert.equal(status.outputs.atif, 'enabled');
-      assert.equal(status.counters.llmSpansReplayed, 1);
-      assert.equal(status.counters.toolSpansReplayed, 1);
-    } finally {
-      if (serviceStarted) {
-        await api.calls.services[0]?.stop?.({
-          stateDir: outputDir,
-          config: {} as never,
-          logger: api.logger,
-        });
-      }
-      if (previousXdgConfigHome === undefined) {
-        delete process.env.XDG_CONFIG_HOME;
-      } else {
-        process.env.XDG_CONFIG_HOME = previousXdgConfigHome;
-      }
-      await fs.rm(outputDir, { recursive: true, force: true });
-    }
-  },
-);
-
-type HookHandler = (event: unknown, ctx: unknown) => void | Promise<void>;
-
-type TestApi = {
-  id: string;
-  version?: string;
-  registrationMode: OpenClawPluginApi['registrationMode'];
-  pluginConfig?: Record<string, unknown>;
-  logger: PluginLogger;
-  resolvePath: OpenClawPluginApi['resolvePath'];
-  registerService: (service: Parameters<OpenClawPluginApi['registerService']>[0]) => void;
-  registerRuntimeLifecycle: (lifecycle: Parameters<OpenClawPluginApi['registerRuntimeLifecycle']>[0]) => void;
-  on: (hookName: string, handler: HookHandler) => void;
-  registerGatewayMethod: (method: string, handler: TestGatewayMethodHandler, opts?: { scope?: string }) => void;
-  calls: {
-    services: Parameters<OpenClawPluginApi['registerService']>[0][];
-    lifecycle: Parameters<OpenClawPluginApi['registerRuntimeLifecycle']>[0][];
-    gatewayMethods: Array<{
-      method: string;
-      handler: TestGatewayMethodHandler;
-    }>;
-    hooks: Array<{ hookName: string; handler: HookHandler }>;
-  };
-};
-
-function createApi(params: { pluginConfig: Record<string, unknown> }): TestApi {
-  const calls: TestApi['calls'] = {
-    services: [],
-    lifecycle: [],
-    gatewayMethods: [],
-    hooks: [],
-  };
-  const logger: PluginLogger = {
-    info: () => {},
-    warn: () => {},
-    error: () => {},
-  };
-
-  return {
-    id: 'nemo-relay',
-    version: 'live-smoke',
-    registrationMode: 'full',
-    pluginConfig: params.pluginConfig,
-    logger,
-    resolvePath: (input) => input,
-    registerService: (service) => calls.services.push(service),
-    registerRuntimeLifecycle: (lifecycle) => calls.lifecycle.push(lifecycle),
-    on: (hookName: string, handler: HookHandler) => calls.hooks.push({ hookName, handler }),
-    registerGatewayMethod: (method, handler) => calls.gatewayMethods.push({ method, handler }),
-    calls,
-  };
-}
-
-function registerPlugin(api: TestApi, moduleLoader: NemoRelayModuleLoader): void {
-  registerNemoRelayPlugin(api as unknown as OpenClawPluginApi, moduleLoader);
-}
-
-async function loadRealNemoRelayModules(): Promise<NemoRelayModules> {
+it('runs live session, agent, tool policy, and cleanup through nemo-relay-node', { skip: !enabled }, async () => {
+  const modules = await defaultNemoRelayModuleLoader();
+  const activation = await modules.pluginHost.initialize({ version: 1, components: [] });
+  const lineage = new LiveLineageCoordinator(modules.nf, parseConfig(undefined), logger);
   try {
-    return await defaultNemoRelayModuleLoader();
-  } catch (error) {
-    if (isMissingLocalNemoRelayNode(error)) {
-      throw new Error(
-        'Live smoke requires the nemo-relay-node native package for this platform. Install workspace dependencies, or build local bindings when testing an unpublished version, then rerun `npm run test:live --workspace=nemo-relay-openclaw`.',
-      );
-    }
-    throw error;
+    lineage.sessionStart({ sessionId: 'live-session', sessionKey: 'agent:main:live-session' });
+    assert.deepEqual(
+      await lineage.beforeAgentRun({
+        runId: 'live-run',
+        sessionId: 'live-session',
+        sessionKey: 'agent:main:live-session',
+        modelProviderId: 'nemo-relay',
+      }),
+      { outcome: 'pass' },
+    );
+    assert.deepEqual(
+      await lineage.beforeToolCall(
+        { toolName: 'read', params: { path: 'README.md' }, runId: 'live-run', toolCallId: 'live-tool' },
+        { runId: 'live-run', toolCallId: 'live-tool' },
+      ),
+      { params: { path: 'README.md' } },
+    );
+    lineage.afterToolCall({ runId: 'live-run', toolCallId: 'live-tool', result: { ok: true } });
+    await lineage.agentEnd({ runId: 'live-run', success: true }, {});
+    await lineage.sessionEnd({ sessionId: 'live-session', reason: 'shutdown' });
+    assert.equal(lineage.status().active.sessions, 0);
+  } finally {
+    await lineage.drain('live_smoke');
+    await activation.close();
   }
-}
+});
 
-function isMissingLocalNemoRelayNode(error: unknown): boolean {
-  return (
-    error instanceof Error &&
-    'code' in error &&
-    error.code === 'ERR_MODULE_NOT_FOUND' &&
-    error.message.includes('nemo-relay-node')
-  );
-}
+it('runs a managed OpenClaw stream through the native Relay codec', { skip: !enabled }, async () => {
+  const modules = await defaultNemoRelayModuleLoader();
+  const activation = await modules.pluginHost.initialize({ version: 1, components: [] });
+  const config = parseConfig(undefined);
+  const lineage = new LiveLineageCoordinator(modules.nf, config, logger);
+  const upstreamModel = model('anthropic', 'claude-sonnet-4-5', 'anthropic-messages');
+  const registry = {
+    getAll: () => [upstreamModel],
+    getAvailable: () => [upstreamModel],
+    find: (providerId: string, modelId: string) =>
+      providerId === upstreamModel.provider && modelId === upstreamModel.id ? upstreamModel : undefined,
+    hasConfiguredAuth: () => true,
+  };
+  const api = {
+    runtime: {
+      modelAuth: {
+        getRuntimeAuthForModel: async () => ({
+          apiKey: 'not-used-by-smoke',
+          source: 'test',
+          mode: 'api_key',
+        }),
+      },
+    },
+  } as unknown as OpenClawPluginApi;
+  const provider = new NemoRelayProvider(api, config, modules.nf, lineage);
+  const alias = provider.resolveDynamicModel({
+    provider: 'nemo-relay',
+    modelId: 'anthropic/claude-sonnet-4-5',
+    modelRegistry: registry,
+  } as ProviderResolveDynamicModelContext);
+  const assistant = {
+    role: 'assistant' as const,
+    content: [{ type: 'text' as const, text: 'native bridge ok' }],
+    api: 'anthropic-messages',
+    provider: 'anthropic',
+    model: upstreamModel.id,
+    usage: {
+      input: 1,
+      output: 1,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 2,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: 'stop' as const,
+    timestamp: Date.now(),
+  };
+  try {
+    lineage.sessionStart({ sessionId: 'managed-session' });
+    await lineage.beforeAgentRun({
+      runId: 'managed-run',
+      sessionId: 'managed-session',
+      modelProviderId: 'nemo-relay',
+    });
+    const wrapped = provider.wrapStreamFn({
+      provider: 'nemo-relay',
+      modelId: alias.id,
+      model: alias,
+      streamFn: async () => ({
+        async *[Symbol.asyncIterator]() {
+          yield { type: 'done' as const, reason: 'stop' as const, message: assistant };
+        },
+        async result() {
+          return assistant;
+        },
+      }),
+    } as ProviderWrapStreamFnContext);
+    const stream = await wrapped(
+      alias,
+      { systemPrompt: 'system', messages: [] },
+      {
+        sessionId: 'managed-session',
+        requestId: 'managed-run',
+      },
+    );
+    const events = [];
+    for await (const event of stream) events.push(event);
+    assert.equal(events.length, 1);
+    const result = await stream.result();
+    assert.equal(result.content[0]?.type, 'text');
+    assert.equal(result.content[0]?.type === 'text' ? result.content[0].text : undefined, 'native bridge ok');
+    assert.equal(lineage.status().counters.managedLlmCompleted, 1);
+  } finally {
+    await lineage.drain('live_smoke');
+    await activation.close();
+  }
+});

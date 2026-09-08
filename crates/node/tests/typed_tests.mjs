@@ -796,6 +796,27 @@ describe('typedLlmStreamExecute', () => {
     assert.equal(collected.length, 2);
   });
 
+  it('preserves a JavaScript producer error through iteration and close', async () => {
+    const passthrough = new JsonPassthrough();
+    async function* failingSource() {
+      yield { token: 'first' };
+      throw new Error('upstream provider failed');
+    }
+    const stream = await typedLlmStreamExecute(
+      'stream_producer_error',
+      makeNative(),
+      failingSource,
+      () => {},
+      () => null,
+      passthrough,
+      passthrough,
+    );
+
+    assert.deepEqual(await stream.next(), { token: 'first' });
+    await assert.rejects(() => stream.next(), /upstream provider failed/);
+    await assert.rejects(() => stream.close(), /upstream provider failed/);
+  });
+
   it('close waits for async-generator cleanup and exhausts subsequent reads', async () => {
     const passthrough = new JsonPassthrough();
     let releaseProducer;

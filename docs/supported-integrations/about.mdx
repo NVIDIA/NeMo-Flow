@@ -22,16 +22,16 @@ security middleware, and optimization features.
 | LangChain | Yes | Yes | Yes | Wrapped tool and LLM calling. |
 | LangGraph | Yes | Yes | Yes | Wrapped tool and LLM calling. |
 | Deep Agents | Yes | Yes | Yes | Wrapped tool and LLM calling. |
-| OpenClaw | Yes | Partial | No | Hook-backed telemetry with pre-tool guardrails. Public hooks do not expose managed execution rewrites. |
+| OpenClaw | Yes | Yes | Yes | In-process managed LLM execution and live lineage. Tool execution intercepts are unsupported. |
 
 ## Guides
 
 Use these guide links to move from the support matrix into setup and usage
 instructions.
 
-- [OpenClaw Plugin Guide](/supported-integrations/openclaw-plugin) covers configuring the OpenClaw
-  plugin, mapping OpenClaw hooks to NeMo Relay telemetry, and understanding
-  current LLM replay fidelity boundaries.
+- [OpenClaw Plugin Guide](/supported-integrations/openclaw-plugin) covers the
+  in-process provider, `nemo-relay` model routes, live lineage, fallback
+  capture, and the tool execution limitation.
 - [LangChain Integration Guide](/supported-integrations/langchain) covers installing the LangChain
   extra and adding NeMo Relay middleware and callbacks to LangChain agents.
 - [LangGraph Integration Guide](/supported-integrations/langgraph) covers installing the LangGraph
