@@ -1,0 +1,336 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+set -eu
+
+usage() {
+    cat <<'EOF'
+Remove the NeMo Relay CLI installed by install.sh.
+
+Usage:
+  uninstall.sh [--install-dir DIR] [--dry-run] [--force]
+  uninstall.sh --help
+
+Options:
+  --install-dir DIR    Installation directory (default: $HOME/.local/bin on Unix,
+                       %LOCALAPPDATA%\\nemo-relay\\bin on Git Bash/MSYS/Cygwin).
+  --dry-run            Print the binary that would be removed without removing it.
+  --force              Interactively offer to terminate active Relay client processes.
+  -h, --help           Show this help text.
+
+Examples:
+  curl -fsSL https://raw.githubusercontent.com/NVIDIA/NeMo-Relay/main/uninstall.sh | sh
+  curl -fsSL https://raw.githubusercontent.com/NVIDIA/NeMo-Relay/main/uninstall.sh | sh -s -- --install-dir "$HOME/bin"
+
+This removes only the installed CLI binary. It does not remove PATH entries,
+Relay configuration, observability output, or coding-agent integrations. It
+refuses removal while this CLI has active Relay processes unless --force is used.
+EOF
+}
+
+error() {
+    printf 'nemo-relay uninstaller: %s\n' "$*" >&2
+    exit 1
+}
+
+require_command() {
+    command -v "$1" >/dev/null 2>&1 || error "required command not found: $1"
+}
+
+process_command() {
+    ps -p "$1" -o command= 2>/dev/null | sed -n '1p'
+}
+
+process_name() {
+    ps -p "$1" -o comm= 2>/dev/null | sed -n '1p' | awk '{ print $1 }'
+}
+
+process_executable_path() {
+    if [ -L "/proc/$1/exe" ]; then
+        readlink "/proc/$1/exe" 2>/dev/null
+        return
+    fi
+    if command -v lsof >/dev/null 2>&1; then
+        lsof -a -p "$1" -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | sed -n '1p'
+    fi
+}
+
+canonical_path() {
+    canonical_directory=$(CDPATH= cd -P -- "$(dirname -- "$1")" && pwd) || return 1
+    printf '%s/%s\n' "$canonical_directory" "$(basename -- "$1")"
+}
+
+is_relay_process_name() {
+    case "$1" in
+        "$binary_name"|*/"$binary_name") return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+is_installed_relay_process() {
+    process_pid=$1
+    is_relay_process_name "$(process_name "$process_pid")" || return 1
+    process_args=$(process_command "$process_pid")
+    case "$process_args" in
+        *"$destination"*) return 0 ;;
+    esac
+    process_executable=$(process_executable_path "$process_pid")
+    [ "$process_executable" = "$destination_identity" ]
+}
+
+process_parent_pid() {
+    ps -p "$1" -o ppid= 2>/dev/null | awk 'NR == 1 { gsub(/[[:space:]]/, ""); print }'
+}
+
+is_coding_agent_command() {
+    case " $1 " in
+        *" codex "*|*" /codex "*|*"/codex/"*|*" claude "*|*" /claude "*|*"/claude/"*|*" pi "*|*" /pi "*|*"/pi/"*)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+is_mcp_command() {
+    case " $1 " in
+        *" mcp "*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+active_relay_process_pids() {
+    for process_pid in $(ps -axww -o pid=,comm=,command= | awk -v name="$binary_name" '
+        $2 == name || $2 ~ ("/" name "$") { print $1 }
+    '); do
+        if is_installed_relay_process "$process_pid"; then
+            printf '%s\n' "$process_pid"
+        fi
+    done
+}
+
+shutdown_target_pid() {
+    relay_pid=$1
+    relay_command=$(process_command "$relay_pid")
+    if ! is_mcp_command "$relay_command"; then
+        printf '%s\n' "$relay_pid"
+        return 0
+    fi
+
+    fallback_pid=$relay_pid
+    parent_pid=$(process_parent_pid "$relay_pid")
+    current_pid=$parent_pid
+    while [ -n "$current_pid" ] && [ "$current_pid" -gt 1 ] 2>/dev/null; do
+        [ "$fallback_pid" = "$relay_pid" ] && fallback_pid=$current_pid
+        current_command=$(process_command "$current_pid")
+        if is_coding_agent_command "$current_command"; then
+            printf '%s\n' "$current_pid"
+            return 0
+        fi
+        next_pid=$(process_parent_pid "$current_pid")
+        [ "$next_pid" = "$current_pid" ] && break
+        current_pid=$next_pid
+    done
+    printf '%s\n' "$fallback_pid"
+}
+
+active_shutdown_target_pids() {
+    for relay_pid in $(active_relay_process_pids); do
+        shutdown_target_pid "$relay_pid"
+    done | awk 'NF && !seen[$0]++ { print }'
+}
+
+active_shutdown_target_exists() {
+    expected_pid=$1
+    for relay_pid in $(active_relay_process_pids); do
+        [ "$(shutdown_target_pid "$relay_pid")" = "$expected_pid" ] && return 0
+    done
+    return 1
+}
+
+describe_process() {
+    process_pid=$1
+    process_args=$(process_command "$process_pid")
+    if [ -n "$process_args" ]; then
+        printf 'PID %s: %s\n' "$process_pid" "$process_args"
+    else
+        printf 'PID %s\n' "$process_pid"
+    fi
+}
+
+confirm_shutdown() {
+    process_pid=$1
+    if ! printf 'Terminate %s and its child processes? [y/N] ' "$(describe_process "$process_pid")" >/dev/tty 2>/dev/null; then
+        error "--force requires an interactive terminal to confirm each active process"
+    fi
+    if ! IFS= read -r response </dev/tty; then
+        error "could not read process shutdown confirmation"
+    fi
+    case "$response" in
+        y|Y|yes|YES|Yes) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+child_pids() {
+    ps -ax -o pid=,ppid= | awk -v parent="$1" '$2 == parent { print $1 }'
+}
+
+terminate_process_tree() {
+    for child_pid in $(child_pids "$1"); do
+        terminate_process_tree "$child_pid"
+    done
+    kill -TERM "$1" 2>/dev/null || true
+}
+
+wait_for_process_exit() {
+    wait_pid=$1
+    wait_attempt=0
+    while kill -0 "$wait_pid" 2>/dev/null; do
+        if [ "$wait_attempt" -ge 5 ]; then
+            error "process ${wait_pid} did not stop after termination was confirmed"
+        fi
+        sleep 1
+        wait_attempt=$((wait_attempt + 1))
+    done
+}
+
+stop_active_relay_processes() {
+    active_targets=$(active_shutdown_target_pids)
+    [ -n "$active_targets" ] || return 0
+
+    printf '%s\n' 'Active Relay processes prevent uninstallation:' >&2
+    for active_pid in $active_targets; do
+        describe_process "$active_pid" >&2
+    done
+    if [ "$dry_run" -eq 1 ]; then
+        printf '%s\n' 'Dry run would refuse removal until these processes exit.' >&2
+        return 0
+    fi
+    if [ "$force" -eq 0 ]; then
+        error "refusing to uninstall while active Relay processes exist; close the coding agents and retry, or rerun with --force to confirm each process shutdown"
+    fi
+    for active_pid in $active_targets; do
+        if ! confirm_shutdown "$active_pid"; then
+            error "uninstall cancelled; process ${active_pid} remains active"
+        fi
+        if ! active_shutdown_target_exists "$active_pid"; then
+            error "process ${active_pid} changed after confirmation; refusing to terminate it"
+        fi
+        terminate_process_tree "$active_pid"
+        wait_for_process_exit "$active_pid"
+    done
+
+    remaining_targets=$(active_shutdown_target_pids)
+    [ -z "$remaining_targets" ] || error "refusing to uninstall because Relay processes remain active"
+}
+
+install_dir=""
+install_dir_set=0
+dry_run=0
+force=0
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        --install-dir)
+            [ "$#" -ge 2 ] || error "--install-dir requires a directory"
+            install_dir=$2
+            install_dir_set=1
+            shift 2
+            ;;
+        --install-dir=*)
+            install_dir=${1#*=}
+            install_dir_set=1
+            shift
+            ;;
+        --dry-run)
+            dry_run=1
+            shift
+            ;;
+        --force)
+            force=1
+            shift
+            ;;
+        --)
+            shift
+            ;;
+        -*)
+            error "unknown option: $1"
+            ;;
+        *)
+            error "unexpected argument: $1"
+            ;;
+    esac
+done
+
+require_command uname
+require_command ps
+require_command awk
+require_command sed
+require_command sleep
+require_command readlink
+require_command dirname
+require_command basename
+os=$(uname -s)
+is_windows_shell=0
+
+case "$os" in
+    CYGWIN*|MINGW*|MSYS*)
+        is_windows_shell=1
+        ;;
+esac
+
+if [ "$install_dir_set" -eq 1 ]; then
+    [ -n "$install_dir" ] || error "install directory must not be empty"
+elif [ "$is_windows_shell" -eq 1 ]; then
+    [ -n "${LOCALAPPDATA:-}" ] || error "LOCALAPPDATA must be set to choose the default Windows install directory"
+    require_command cygpath
+    local_app_data=$(cygpath -u "$LOCALAPPDATA") || error "could not translate LOCALAPPDATA for this shell"
+    install_dir="${local_app_data}/nemo-relay/bin"
+else
+    install_dir="${HOME:+${HOME}/.local/bin}"
+    [ -n "$install_dir" ] || error "install directory must not be empty"
+fi
+
+case "$install_dir" in
+    -*)
+        error "install directory must not begin with '-': ${install_dir}"
+        ;;
+esac
+
+if [ -e "$install_dir" ] && [ ! -d "$install_dir" ]; then
+    error "install path is not a directory: ${install_dir}"
+fi
+
+binary_name="nemo-relay"
+if [ "$is_windows_shell" -eq 1 ]; then
+    binary_name="nemo-relay.exe"
+fi
+destination="${install_dir}/${binary_name}"
+
+if [ -d "$destination" ]; then
+    error "install target is a directory: ${destination}"
+fi
+
+if [ ! -e "$destination" ] && [ ! -L "$destination" ]; then
+    printf 'NeMo Relay CLI is not installed at %s\n' "$destination"
+    exit 0
+fi
+
+destination_identity=$(canonical_path "$destination") || error "could not resolve install path: ${destination}"
+
+stop_active_relay_processes
+
+if [ "$dry_run" -eq 1 ]; then
+    printf 'Would remove NeMo Relay CLI at %s\n' "$destination"
+    exit 0
+fi
+
+rm -f "$destination" || error "could not remove ${destination}"
+printf 'Removed NeMo Relay CLI from %s\n' "$destination"

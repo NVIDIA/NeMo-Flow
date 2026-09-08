@@ -177,6 +177,47 @@ persist the Windows user `PATH` update.
 Rerun the installer to upgrade or replace the existing binary. It verifies the
 new download before replacing the binary in the selected installation directory.
 
+### Remove a Script-Installed CLI
+
+To remove a CLI installed with the Unix shell installer, run:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/NVIDIA/NeMo-Relay/main/uninstall.sh | sh
+```
+
+For a non-default installation directory, pass the same directory used during
+installation:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/NVIDIA/NeMo-Relay/main/uninstall.sh | sh -s -- --install-dir "$HOME/bin"
+```
+
+To remove a CLI installed with the PowerShell installer, run:
+
+```powershell
+irm https://raw.githubusercontent.com/NVIDIA/NeMo-Relay/main/uninstall.ps1 | iex
+```
+
+The uninstall scripts remove only the installed CLI binary. They leave the
+installation directory, any `PATH` entry, Relay configuration and output, and
+coding-agent integrations unchanged. They refuse removal when the installed
+CLI has active Relay processes, including MCP clients owned by coding agents.
+Close those agents and retry, or use `--force` (`-Force` in PowerShell) to
+confirm termination of each detected process tree. Run `nemo-relay uninstall
+all` before removing the binary if you also want to remove Relay-managed
+coding-agent integrations.
+
+`--force` is intentionally interactive; it does not terminate a detected
+coding-agent process without its own confirmation.
+
+For CLI installations managed by a package manager, use that package manager
+instead:
+
+```bash
+pip uninstall nemo-relay-cli-bin
+cargo uninstall nemo-relay-cli
+```
+
 ### Alternative Installation Methods
 
 The PyPI and installer methods install the same CLI release with a binary
