@@ -135,12 +135,12 @@ function Stop-ActiveRelayProcesses([string]$Destination) {
         return
     }
 
-    Write-Error 'Active Relay processes prevent uninstallation:'
+    [Console]::Error.WriteLine('Active Relay processes prevent uninstallation:')
     foreach ($process in $activeTargets) {
-        Write-Error (Format-ProcessDescription $process)
+        [Console]::Error.WriteLine((Format-ProcessDescription $process))
     }
     if ($DryRun) {
-        Write-Error 'Dry run would refuse removal until these processes exit.'
+        [Console]::Error.WriteLine('Dry run would refuse removal until these processes exit.')
         return
     }
     if (-not $Force) {

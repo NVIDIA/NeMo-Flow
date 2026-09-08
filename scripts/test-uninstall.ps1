@@ -93,9 +93,9 @@ try {
         $ActiveDir = Join-Path $TestRoot 'active-bin'
         $ActiveDestination = Join-Path $ActiveDir 'nemo-relay.exe'
         New-Item -ItemType Directory -Force -Path $ActiveDir | Out-Null
-        New-Item -ItemType HardLink -Path $ActiveDestination -Target $PowerShell | Out-Null
+        Copy-Item -LiteralPath $env:ComSpec -Destination $ActiveDestination
         $ActiveProcess = Start-Process -FilePath $ActiveDestination -ArgumentList @(
-            '-NoProfile', '-NonInteractive', '-Command', 'Start-Sleep -Seconds 30'
+            '/d', '/c', 'timeout /t 30 /nobreak >NUL'
         ) -PassThru
         try {
             Start-Sleep -Milliseconds 500
