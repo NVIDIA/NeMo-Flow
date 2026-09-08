@@ -103,7 +103,7 @@ pub(super) fn plugin_mcp_config(
     host.plugin_mcp_config(server)
 }
 
-fn absolute_or_self(path: &Path) -> Result<std::path::PathBuf, String> {
+pub(super) fn absolute_or_self(path: &Path) -> Result<std::path::PathBuf, String> {
     if path.is_absolute() {
         return Ok(path.to_owned());
     }
