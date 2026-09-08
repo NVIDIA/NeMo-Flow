@@ -10,18 +10,10 @@ use serde_json::Value;
 
 use crate::agents::CodingAgent;
 
-#[test]
-fn private_hook_config_round_trips_and_rejects_agent_mismatch() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("hook.json");
-    HookCommandConfig::transparent(CodingAgent::Codex, "http://127.0.0.1:1234")
-        .write(&path)
-        .unwrap();
-
-    let config = HookCommandConfig::load(&path).unwrap();
-    let mut request = HookForwardRequest {
-        agent: CodingAgent::ClaudeCode,
-        hook_config: Some(path),
+fn hook_request(agent: CodingAgent) -> HookForwardRequest {
+    HookForwardRequest {
+        agent,
+        hook_config: None,
         gateway_url: None,
         generation_file: None,
         generation_token: None,
@@ -31,12 +23,82 @@ fn private_hook_config_round_trips_and_rejects_agent_mismatch() {
         session_metadata: None,
         gateway_mode: None,
         failure_policy: HookFailurePolicy::Default,
-    };
+    }
+}
+
+#[test]
+fn private_hook_config_round_trips_and_hydrates_a_hook_request() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("hook.json");
+    HookCommandConfig::transparent(CodingAgent::Codex, "http://127.0.0.1:1234")
+        .write(&path)
+        .unwrap();
+
+    let config = HookCommandConfig::load(&path).unwrap();
+    let mut request = hook_request(CodingAgent::Codex);
+    config.apply(&mut request).unwrap();
+    assert_eq!(
+        request.gateway_url.as_deref(),
+        Some("http://127.0.0.1:1234")
+    );
+    assert!(request.transparent_run);
+    assert!(request.generation_file.is_none());
+    assert!(request.generation_token.is_none());
+}
+
+#[test]
+fn private_hook_config_rejects_agent_mismatch_and_inline_configuration() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("hook.json");
+    HookCommandConfig::transparent(CodingAgent::Codex, "http://127.0.0.1:1234")
+        .write(&path)
+        .unwrap();
+
+    let mut agent_mismatch = hook_request(CodingAgent::ClaudeCode);
     assert!(
-        config
-            .apply(&mut request)
+        HookCommandConfig::load(&path)
+            .unwrap()
+            .apply(&mut agent_mismatch)
             .unwrap_err()
             .contains("requested claude")
+    );
+
+    let mut inline_configuration = hook_request(CodingAgent::Codex);
+    inline_configuration.gateway_url = Some("http://127.0.0.1:5678".into());
+    assert!(
+        HookCommandConfig::load(&path)
+            .unwrap()
+            .apply(&mut inline_configuration)
+            .unwrap_err()
+            .contains("cannot be combined")
+    );
+}
+
+#[test]
+fn private_hook_config_rejects_unknown_and_incomplete_values() {
+    let directory = tempfile::tempdir().unwrap();
+    let unknown = directory.path().join("unknown.json");
+    std::fs::write(
+        &unknown,
+        r#"{"version":1,"agent":"codex","gateway_url":"http://127.0.0.1:1234","forward_only":false,"transparent_run":true,"unexpected":true}"#,
+    )
+    .unwrap();
+    assert!(
+        HookCommandConfig::load(&unknown)
+            .unwrap_err()
+            .contains("failed to parse")
+    );
+
+    let incomplete = directory.path().join("incomplete.json");
+    std::fs::write(
+        &incomplete,
+        r#"{"version":1,"agent":"codex","gateway_url":"http://127.0.0.1:1234","generation_file":"generation","generation_token":null,"forward_only":false,"transparent_run":false}"#,
+    )
+    .unwrap();
+    assert!(
+        HookCommandConfig::load(&incomplete)
+            .unwrap_err()
+            .contains("both generation file and token")
     );
 }
 
