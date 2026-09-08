@@ -83,14 +83,21 @@ process_parent_pid() {
     ps -p "$1" -o ppid= 2>/dev/null | awk 'NR == 1 { gsub(/[[:space:]]/, ""); print }'
 }
 
-is_coding_agent_command() {
-    case " $1 " in
-        *" codex "*|*" /codex "*|*"/codex/"*|*" claude "*|*" /claude "*|*"/claude/"*|*" pi "*|*" /pi "*|*"/pi/"*)
+is_coding_agent_process() {
+    agent_name=$(process_name "$1")
+    agent_name=${agent_name##*/}
+    case "$agent_name" in
+        codex|codex.exe|Codex|Codex.exe|claude|claude.exe|pi|pi.exe)
             return 0
             ;;
-        *)
-            return 1
-            ;;
+    esac
+
+    agent_command=$(process_command "$1")
+    case " $agent_command " in
+        *" codex "*|*" codex.exe "*|*"/codex "*|*"/codex.exe "*|*"/codex/"*|*"/@openai/codex/"*|\
+        *" claude "*|*" claude.exe "*|*"/claude "*|*"/claude.exe "*|*"/claude/"*|\
+        *" pi "*|*" pi.exe "*|*"/pi "*|*"/pi.exe "*|*"/pi/"*) return 0 ;;
+        *) return 1 ;;
     esac
 }
 
@@ -119,13 +126,10 @@ shutdown_target_pid() {
         return 0
     fi
 
-    fallback_pid=$relay_pid
     parent_pid=$(process_parent_pid "$relay_pid")
     current_pid=$parent_pid
     while [ -n "$current_pid" ] && [ "$current_pid" -gt 1 ] 2>/dev/null; do
-        [ "$fallback_pid" = "$relay_pid" ] && fallback_pid=$current_pid
-        current_command=$(process_command "$current_pid")
-        if is_coding_agent_command "$current_command"; then
+        if is_coding_agent_process "$current_pid"; then
             printf '%s\n' "$current_pid"
             return 0
         fi
@@ -133,7 +137,7 @@ shutdown_target_pid() {
         [ "$next_pid" = "$current_pid" ] && break
         current_pid=$next_pid
     done
-    printf '%s\n' "$fallback_pid"
+    printf '%s\n' "$relay_pid"
 }
 
 active_shutdown_target_pids() {

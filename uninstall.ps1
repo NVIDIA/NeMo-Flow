@@ -75,15 +75,11 @@ function Get-ActiveRelayShutdownTargets([string]$Destination) {
 
         $target = $relayProcess
         if (Test-RelayMcpProcess $commandLine) {
-            $fallback = $null
             $currentId = [string]$relayProcess.ParentProcessId
             while ($currentId -and $currentId -ne '0') {
                 $current = $processesById[$currentId]
                 if ($null -eq $current) {
                     break
-                }
-                if ($null -eq $fallback) {
-                    $fallback = $current
                 }
                 if (-not [string]::IsNullOrEmpty($current.CommandLine) -and (Test-CodingAgentProcess $current.CommandLine)) {
                     $target = $current
@@ -94,9 +90,6 @@ function Get-ActiveRelayShutdownTargets([string]$Destination) {
                     break
                 }
                 $currentId = $nextId
-            }
-            if ($target.ProcessId -eq $relayProcess.ProcessId -and $null -ne $fallback) {
-                $target = $fallback
             }
         }
         $targets[[string]$target.ProcessId] = $target
