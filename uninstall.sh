@@ -182,6 +182,19 @@ child_pids() {
     ps -ax -o pid=,ppid= | awk -v parent="$1" '$2 == parent { print $1 }'
 }
 
+process_is_ancestor_of_uninstaller() {
+    ancestor_pid=$1
+    current_pid=$$
+    while [ -n "$current_pid" ] && [ "$current_pid" -gt 1 ] 2>/dev/null; do
+        [ "$current_pid" = "$ancestor_pid" ] && return 0
+        next_pid=$(process_parent_pid "$current_pid")
+        [ -z "$next_pid" ] && break
+        [ "$next_pid" = "$current_pid" ] && break
+        current_pid=$next_pid
+    done
+    return 1
+}
+
 terminate_process_tree() {
     for child_pid in $(child_pids "$1"); do
         terminate_process_tree "$child_pid"
@@ -217,6 +230,9 @@ stop_active_relay_processes() {
         error "refusing to uninstall while active Relay processes exist; close the coding agents and retry, or rerun with --force to confirm each process shutdown"
     fi
     for active_pid in $active_targets; do
+        if process_is_ancestor_of_uninstaller "$active_pid"; then
+            error "cannot terminate process ${active_pid} from within its own process tree; rerun the uninstaller from an independent terminal"
+        fi
         if ! confirm_shutdown "$active_pid"; then
             error "uninstall cancelled; process ${active_pid} remains active"
         fi

@@ -108,7 +108,30 @@ function Format-ProcessDescription($Process) {
     return "PID $($Process.ProcessId): $($Process.CommandLine)"
 }
 
+function Test-ProcessIsAncestorOfUninstaller([uint32]$AncestorId) {
+    $currentId = [uint32]$PID
+    while ($currentId -gt 0) {
+        if ($currentId -eq $AncestorId) {
+            return $true
+        }
+        try {
+            $current = Get-CimInstance Win32_Process -Filter "ProcessId = $currentId"
+        }
+        catch {
+            Fail "could not inspect the uninstaller process tree: $($_.Exception.Message)"
+        }
+        if ($null -eq $current -or $current.ParentProcessId -eq $currentId) {
+            return $false
+        }
+        $currentId = [uint32]$current.ParentProcessId
+    }
+    return $false
+}
+
 function Stop-ConfirmedProcessTree($Process, [string]$Destination) {
+    if (Test-ProcessIsAncestorOfUninstaller $Process.ProcessId) {
+        Fail "cannot terminate process $($Process.ProcessId) from within its own process tree; rerun the uninstaller from an independent terminal"
+    }
     $answer = Read-Host "Terminate $(Format-ProcessDescription $Process) and its child processes? [y/N]"
     if ($answer -notmatch '^(?i:y|yes)$') {
         Fail "uninstall cancelled; process $($Process.ProcessId) remains active"
