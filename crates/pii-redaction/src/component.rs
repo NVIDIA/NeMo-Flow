@@ -1293,7 +1293,7 @@ fn register_builtin_backend(
             sanitizer,
         )?;
     }
-    if config.input {
+    if config.input && !compiled.is_trajectory() {
         ctx.register_llm_sanitize_request_guardrail(
             &registration_name(profile_name, "input"),
             config.priority,
@@ -1318,7 +1318,7 @@ fn register_builtin_backend(
             ),
         )?;
     }
-    if config.output {
+    if config.output && !compiled.is_trajectory() {
         ctx.register_llm_sanitize_response_guardrail(
             &registration_name(profile_name, "output"),
             config.priority,

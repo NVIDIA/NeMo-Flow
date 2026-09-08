@@ -12,8 +12,8 @@ use crate::api::event::{
     ScopeEvent,
 };
 use crate::api::llm::{
-    LlmCallExecuteParams, LlmCallParams, LlmRequest, LlmStreamCallExecuteParams, llm_call,
-    llm_call_execute, llm_stream_call_execute,
+    LlmCallEndParams, LlmCallExecuteParams, LlmCallParams, LlmRequest, LlmStreamCallExecuteParams,
+    llm_call, llm_call_end, llm_call_execute, llm_stream_call_execute,
 };
 use crate::api::runtime::{
     BuiltinLlmCodec, LlmCodecIdentity, LlmExecutionNextFn, LlmJsonStream,
@@ -686,10 +686,7 @@ fn trajectory_typed_api_specific_variants_fail_closed() {
             .unwrap();
         let serialized = serde_json::to_string(&sanitized).unwrap();
         assert!(!serialized.contains("SECRET"), "{serialized}");
-        assert_eq!(
-            serde_json::to_value(&sanitized).unwrap()["finish_reason"],
-            json!({"unknown": "[REDACTED]"})
-        );
+        assert!(serde_json::to_value(&sanitized).unwrap()["finish_reason"].is_null());
     }
 }
 
@@ -1311,6 +1308,59 @@ async fn trajectory_preset_uses_empty_payloads_when_codec_projection_fails() {
     assert!(request.headers.is_empty());
     assert_eq!(request.content, json!({}));
 
+    let openai_responses_request = json!({
+        "model": "gpt-5",
+        "input": "SECRET"
+    });
+    let anthropic_request = json!({
+        "model": "claude-sonnet-4-6",
+        "system": "SECRET",
+        "messages": [{"role": "user", "content": "SECRET"}],
+        "max_tokens": 32
+    });
+    for (codec, wrong_surface) in [
+        ("openai_chat", anthropic_request.clone()),
+        ("openai_responses", anthropic_request.clone()),
+        ("anthropic_messages", openai_responses_request.clone()),
+        ("oci_genai", anthropic_request.clone()),
+        ("gemini_generate_content", anthropic_request.clone()),
+    ] {
+        let callback = crate::builtin::llm_sanitize_request_callback(trajectory_backend(
+            Some(codec),
+            "preserve",
+        ));
+        for content in [json!({}), json!({"error": "SECRET"}), wrong_surface] {
+            let sanitized = callback(
+                LlmRequest {
+                    headers: serde_json::Map::from_iter([(
+                        "authorization".into(),
+                        json!("SECRET"),
+                    )]),
+                    content,
+                },
+                no_codec_request_context(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(sanitized.headers.is_empty(), "codec={codec}");
+            assert_eq!(sanitized.content, json!({}), "codec={codec}");
+        }
+    }
+
+    let unsupported =
+        crate::builtin::llm_sanitize_request_callback(trajectory_backend(None, "preserve"))(
+            LlmRequest {
+                headers: serde_json::Map::new(),
+                content: openai_responses_request,
+            },
+            no_codec_request_context(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(unsupported.content, json!({}));
+
     let response = crate::builtin::llm_sanitize_response_callback(trajectory_backend(
         Some("openai_chat"),
         "preserve",
@@ -1319,6 +1369,49 @@ async fn trajectory_preset_uses_empty_payloads_when_codec_projection_fails() {
     .unwrap()
     .unwrap();
     assert_eq!(response, json!({}));
+
+    let provider_error = json!({
+        "error": {"message": "SECRET", "type": "provider_error"}
+    });
+    let openai_response = json!({
+        "choices": [{
+            "message": {"role": "assistant", "content": "SECRET"},
+            "finish_reason": "stop"
+        }]
+    });
+    let anthropic_response = json!({
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "text", "text": "SECRET"}],
+        "stop_reason": "end_turn"
+    });
+    for (codec, wrong_surface) in [
+        ("openai_chat", anthropic_response.clone()),
+        ("openai_responses", anthropic_response.clone()),
+        ("anthropic_messages", openai_response.clone()),
+        ("oci_genai", anthropic_response.clone()),
+        ("gemini_generate_content", anthropic_response.clone()),
+    ] {
+        let callback = crate::builtin::llm_sanitize_response_callback(trajectory_backend(
+            Some(codec),
+            "preserve",
+        ));
+        for payload in [json!({}), provider_error.clone(), wrong_surface] {
+            let sanitized = callback(payload, no_codec_context())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(sanitized, json!({}), "codec={codec}");
+        }
+    }
+
+    let unsupported = crate::builtin::llm_sanitize_response_callback(trajectory_backend(
+        None, "preserve",
+    ))(openai_response, no_codec_context())
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(unsupported, json!({}));
 }
 
 #[tokio::test]
@@ -2625,6 +2718,116 @@ async fn trajectory_profile_preserves_typed_llm_accounting_while_redacting_annot
             .is_none()
     );
     assert_eq!(sanitized.data, Some(json!({})));
+}
+
+#[test]
+fn trajectory_component_preserves_normalized_cost_source_and_optimization_summary() {
+    let _guard = crate::plugins::pii_redaction::test_mutex().lock().unwrap();
+    reset_runtime();
+    setup_isolated_thread();
+
+    futures::executor::block_on(initialize_plugins(plugin_config(json!({
+        "codec": "openai_chat",
+        "mode": "builtin",
+        "builtin": {"preset": "trajectory_context"}
+    }))))
+    .unwrap();
+
+    let captured = capture_events("trajectory-normalized-accounting");
+    let request = LlmRequest {
+        headers: serde_json::Map::new(),
+        content: json!({
+            "model": "gpt-4o-mini",
+            "messages": [{"role": "user", "content": "SECRET request"}]
+        }),
+    };
+    let response = json!({
+        "id": "SECRET-id",
+        "model": "gpt-4o-mini",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "SECRET response"},
+            "finish_reason": "stop"
+        }],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14}
+    });
+    let mut annotated_response = OpenAIChatCodec.decode_response(&response).unwrap();
+    annotated_response.usage.as_mut().unwrap().cost = Some(crate::codec::response::CostEstimate {
+        total: Some(0.125),
+        currency: "USD".into(),
+        input: Some(0.1),
+        output: Some(0.025),
+        cache_read: None,
+        cache_write: None,
+        source: crate::codec::response::CostSource::ModelPricing,
+        pricing_provider: Some("SECRET-provider".into()),
+        pricing_model: Some("SECRET-model".into()),
+        pricing_as_of: Some("SECRET-date".into()),
+        pricing_source: Some("SECRET-source".into()),
+    });
+    annotated_response.optimization_summary = Some(
+        serde_json::from_value(json!({
+            "schema_version": "1",
+            "calculation_version": "1",
+            "status": "complete",
+            "tokens_saved": {"prompt_tokens": 4, "total_tokens": 4},
+            "estimated_cost_saved": 0.25,
+            "currency": "USD",
+            "contributions": []
+        }))
+        .unwrap(),
+    );
+
+    let handle = llm_call(
+        LlmCallParams::builder()
+            .name("openai")
+            .request(&request)
+            .annotated_request(Arc::new(OpenAIChatCodec.decode(&request).unwrap()))
+            .build(),
+    )
+    .unwrap();
+    llm_call_end(
+        LlmCallEndParams::builder()
+            .handle(&handle)
+            .response(response.clone())
+            .annotated_response(Arc::new(annotated_response))
+            .build(),
+    )
+    .unwrap();
+
+    let events = captured_events_snapshot(&captured);
+    let end = events
+        .iter()
+        .find(|event| event.scope_category() == Some(ScopeCategory::End))
+        .expect("LLM end event");
+    let projected = end.data().unwrap();
+    assert_eq!(projected["id"], "[REDACTED]");
+    assert_eq!(projected["choices"][0]["message"]["content"], "[REDACTED]");
+    assert_eq!(projected["usage"]["total_tokens"], 14);
+    assert!(!serde_json::to_string(end).unwrap().contains("SECRET"));
+
+    let annotated = end.annotated_response().unwrap();
+    let cost = annotated.usage.as_ref().unwrap().cost.as_ref().unwrap();
+    assert_eq!(
+        cost.source,
+        crate::codec::response::CostSource::ModelPricing
+    );
+    assert_eq!(cost.total, Some(0.125));
+    assert!(cost.pricing_provider.is_none());
+    assert!(cost.pricing_model.is_none());
+    assert!(cost.pricing_as_of.is_none());
+    assert!(cost.pricing_source.is_none());
+    let summary = annotated.optimization_summary.as_ref().unwrap();
+    assert_eq!(summary.tokens_saved.prompt_tokens, Some(4));
+    assert_eq!(summary.estimated_cost_saved, Some(0.25));
+
+    assert_eq!(response["id"], "SECRET-id");
+    assert_eq!(
+        response["choices"][0]["message"]["content"],
+        "SECRET response"
+    );
+    assert!(deregister_subscriber("trajectory-normalized-accounting").unwrap());
+    clear_plugin_configuration().unwrap();
 }
 
 #[tokio::test]

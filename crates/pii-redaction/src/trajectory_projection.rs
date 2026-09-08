@@ -11,7 +11,10 @@ use serde_json::{Map, Value as Json, json};
 
 use nemo_relay::api::llm::LlmRequest;
 use nemo_relay::codec::request::{AnnotatedLlmRequest, ContentPart, MessageContent};
-use nemo_relay::codec::resolve::{ProviderSurface, request_codec};
+use nemo_relay::codec::resolve::{
+    ProviderSurface, detect_request_surface_with_hint, detect_response_surface, request_codec,
+    response_codec,
+};
 use nemo_relay::codec::response::{AnnotatedLlmResponse, FinishReason, ResponseToolCall, Usage};
 
 /// Render a sanitized request through a fresh, provider-specific empty template.
@@ -29,6 +32,16 @@ pub(super) fn render_request(
     };
     let mut rendered = request_codec(surface).encode(request, &template).ok()?;
     rendered.headers.clear();
+    let provider_hint = match surface {
+        ProviderSurface::AnthropicMessages => Some("anthropic.messages"),
+        ProviderSurface::OCIGenAI => Some("oci.genai"),
+        ProviderSurface::OpenAIChat
+        | ProviderSurface::OpenAIResponses
+        | ProviderSurface::GeminiGenerateContent => None,
+    };
+    (detect_request_surface_with_hint(&rendered.content, provider_hint) == Some(surface))
+        .then_some(())?;
+    request_codec(surface).decode(&rendered).ok()?;
     Some(rendered)
 }
 
@@ -37,24 +50,29 @@ pub(super) fn render_request(
 /// No source-derived field is copied into the result. A source response with
 /// multiple choices or candidates is therefore represented by at most the one
 /// normalized result that Relay models.
-pub(super) fn render_response(surface: ProviderSurface, response: &AnnotatedLlmResponse) -> Json {
-    match surface {
+pub(super) fn render_response(
+    surface: ProviderSurface,
+    response: &AnnotatedLlmResponse,
+) -> Option<Json> {
+    let rendered = match surface {
         ProviderSurface::OpenAIChat => render_openai_chat_response(response),
         ProviderSurface::OpenAIResponses => render_openai_responses_response(response),
         ProviderSurface::AnthropicMessages => render_anthropic_response(response),
         ProviderSurface::OCIGenAI => render_oci_response(response),
         ProviderSurface::GeminiGenerateContent => render_gemini_response(response),
-    }
+    };
+    (detect_response_surface(&rendered) == Some(surface)).then_some(())?;
+    response_codec(surface).decode_response(&rendered).ok()?;
+    Some(rendered)
 }
 
 fn request_template(surface: ProviderSurface) -> Json {
     match surface {
-        ProviderSurface::OpenAIChat
-        | ProviderSurface::AnthropicMessages
-        | ProviderSurface::OCIGenAI => {
+        ProviderSurface::OpenAIChat | ProviderSurface::AnthropicMessages => {
             json!({"messages": []})
         }
         ProviderSurface::OpenAIResponses => json!({"input": []}),
+        ProviderSurface::OCIGenAI => json!({"apiFormat": "GENERIC", "messages": []}),
         ProviderSurface::GeminiGenerateContent => json!({"contents": []}),
     }
 }
@@ -513,7 +531,8 @@ mod tests {
                     panic!("request projection was not decodable for {surface:?}: {err}")
                 });
 
-            let rendered_response = render_response(surface, &response);
+            let rendered_response = render_response(surface, &response)
+                .unwrap_or_else(|| panic!("response projection failed for {surface:?}"));
             let serialized = serde_json::to_string(&rendered_response).unwrap();
             assert!(!serialized.contains("SECRET"), "{surface:?}: {serialized}");
             response_codec(surface)

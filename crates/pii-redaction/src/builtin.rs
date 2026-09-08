@@ -18,8 +18,8 @@ use nemo_relay::api::runtime::{
 };
 use nemo_relay::codec::request::AnnotatedLlmRequest;
 use nemo_relay::codec::resolve::{
-    ProviderSurface, detect_response_surface, request_codec as build_request_codec,
-    response_codec as build_response_codec,
+    ProviderSurface, detect_request_surface_with_hint, detect_response_surface,
+    request_codec as build_request_codec, response_codec as build_response_codec,
 };
 use nemo_relay::codec::traits::{LlmCodec, LlmResponseCodec};
 use nemo_relay::plugin::{PluginError, Result as PluginResult};
@@ -622,6 +622,10 @@ impl CompiledBuiltinBackend {
         }
     }
 
+    pub(super) fn is_trajectory(&self) -> bool {
+        self.trajectory.is_some()
+    }
+
     fn uses_compatible_legacy_response_codec(&self, payload: &Json) -> bool {
         self.legacy_surface
             .is_some_and(|surface| detect_response_surface(payload) == Some(surface))
@@ -652,6 +656,15 @@ impl CompiledBuiltinBackend {
         surface: ProviderSurface,
         request: &LlmRequest,
     ) -> Option<LlmRequest> {
+        let provider_hint = match surface {
+            ProviderSurface::AnthropicMessages => Some("anthropic.messages"),
+            ProviderSurface::OCIGenAI => Some("oci.genai"),
+            ProviderSurface::OpenAIChat
+            | ProviderSurface::OpenAIResponses
+            | ProviderSurface::GeminiGenerateContent => None,
+        };
+        (detect_request_surface_with_hint(&request.content, provider_hint) == Some(surface))
+            .then_some(())?;
         let annotated = build_request_codec(surface).decode(request).ok()?;
         let sanitized = trajectory.sanitize_annotated_request(annotated)?;
         render_trajectory_request(surface, &sanitized)
@@ -783,11 +796,12 @@ impl CompiledBuiltinBackend {
         surface: ProviderSurface,
         payload: Json,
     ) -> Option<Json> {
+        (detect_response_surface(&payload) == Some(surface)).then_some(())?;
         let annotated = build_response_codec(surface)
             .decode_response(&payload)
             .ok()?;
         let sanitized = trajectory.sanitize_annotated_response(annotated)?;
-        Some(render_trajectory_response(surface, &sanitized))
+        render_trajectory_response(surface, &sanitized)
     }
 
     fn normalized_response_targets_match(
@@ -934,7 +948,8 @@ pub(super) fn llm_sanitize_request_callback(
                     context.codec(),
                     "unsupported surface, codec decode, typed sanitize, or projection failure",
                 );
-                request.content = trajectory.sanitize_provider_payload(request.content);
+                request.headers.clear();
+                request.content = Json::Object(Map::new());
                 return Ok(Some(request));
             }
             request.headers = backend.sanitize_request_headers(request.headers);
@@ -976,7 +991,7 @@ pub(super) fn llm_sanitize_response_callback(
         Box::pin(async move {
             if let Some(trajectory) = backend.trajectory.as_ref() {
                 let Some(surface) = backend.selected_surface(context.codec()) else {
-                    return Ok(Some(trajectory.sanitize_provider_payload(payload)));
+                    return Ok(Some(Json::Object(Map::new())));
                 };
                 let sanitized = backend.sanitize_trajectory_response(trajectory, surface, payload);
                 if let Some(sanitized) = sanitized {

@@ -16,11 +16,11 @@ use nemo_relay::api::llm::LlmRequest;
 use nemo_relay::codec::optimization::LlmOptimizationSummary;
 use nemo_relay::codec::request::{
     AnnotatedLlmRequest, ApiSpecificRequest, ContentPart, FunctionCall, FunctionDefinition,
-    Message, MessageContent, OpenAiImageUrl, ProviderNativeComponent, ToolCall, ToolChoice,
-    ToolChoiceFunction, ToolChoiceFunctionName, ToolDefinition,
+    GenerationParams, Message, MessageContent, OpenAiImageUrl, ProviderNativeComponent, ToolCall,
+    ToolChoice, ToolChoiceFunction, ToolChoiceFunctionName, ToolDefinition,
 };
 use nemo_relay::codec::resolve::{
-    ProviderSurface, detect_request_surface, detect_response_surface,
+    ProviderSurface, detect_request_surface_with_hint, detect_response_surface,
 };
 use nemo_relay::codec::response::{
     AnnotatedLlmResponse, ApiSpecificResponse, CostEstimate, FinishReason, ResponseToolCall, Usage,
@@ -52,6 +52,12 @@ pub(super) struct TrajectorySanitizer {
     metric_string_attribute_allowlist: Arc<BTreeMap<String, BTreeSet<String>>>,
 }
 
+struct ProjectedLlmEvent {
+    data: Json,
+    annotated_request: Option<Arc<AnnotatedLlmRequest>>,
+    annotated_response: Option<Arc<AnnotatedLlmResponse>>,
+}
+
 impl TrajectorySanitizer {
     pub(super) fn new(
         replacement: String,
@@ -80,77 +86,103 @@ impl TrajectorySanitizer {
 
     pub(super) fn sanitize_annotated_request(
         &self,
-        mut request: AnnotatedLlmRequest,
+        request: AnnotatedLlmRequest,
     ) -> Option<AnnotatedLlmRequest> {
-        request.messages = request
-            .messages
-            .into_iter()
-            .map(|message| sanitize_message(message, &self.replacement))
-            .collect();
-        request.instructions = request
-            .instructions
-            .map(|content| sanitize_message_content(content, &self.replacement));
-        if let Some(params) = request.params.as_mut() {
-            params.stop = params.stop.take().map(|values| {
-                values
-                    .into_iter()
-                    .map(|_| (*self.replacement).clone())
-                    .collect()
-            });
-        }
-        request.tools = request.tools.map(|tools| {
-            tools
+        let AnnotatedLlmRequest {
+            messages,
+            instructions,
+            model,
+            params,
+            tools,
+            tool_choice,
+            store,
+            previous_response_id,
+            truncation,
+            reasoning,
+            include,
+            user,
+            metadata,
+            service_tier: _,
+            parallel_tool_calls,
+            max_output_tokens,
+            max_tool_calls,
+            top_logprobs,
+            stream,
+            api_specific: _,
+            extra: _,
+        } = request;
+        Some(AnnotatedLlmRequest {
+            messages: messages
                 .into_iter()
-                .map(|tool| sanitize_tool_definition(tool, &self.replacement))
-                .collect()
-        });
-        request.tool_choice = request
-            .tool_choice
-            .map(|choice| sanitize_tool_choice(choice, &self.replacement));
-        replace_optional_string(&mut request.previous_response_id, &self.replacement);
-        replace_optional_json(&mut request.truncation);
-        replace_optional_json(&mut request.reasoning);
-        replace_optional_json(&mut request.include);
-        replace_optional_string(&mut request.user, &self.replacement);
-        replace_optional_json(&mut request.metadata);
-        request.service_tier = None;
-        // Provider-specific annotations describe the source payload. The
-        // contract-first projector builds a fresh provider wire shape from
-        // normalized fields, so retaining them would both risk leakage and
-        // make an otherwise empty encode template depend on source state.
-        request.api_specific = None;
-        request.extra.clear();
-        Some(request)
+                .map(|message| sanitize_message(message, &self.replacement))
+                .collect(),
+            instructions: instructions
+                .map(|content| sanitize_message_content(content, &self.replacement)),
+            model,
+            params: params.map(|params| sanitize_generation_params(params, &self.replacement)),
+            tools: tools.map(|tools| {
+                tools
+                    .into_iter()
+                    .map(|tool| sanitize_tool_definition(tool, &self.replacement))
+                    .collect()
+            }),
+            tool_choice: tool_choice.map(|choice| sanitize_tool_choice(choice, &self.replacement)),
+            store,
+            previous_response_id: marked_option(previous_response_id, &self.replacement),
+            truncation: opaque_option(truncation),
+            reasoning: opaque_option(reasoning),
+            include: opaque_option(include),
+            user: marked_option(user, &self.replacement),
+            metadata: opaque_option(metadata),
+            service_tier: None,
+            parallel_tool_calls,
+            max_output_tokens,
+            max_tool_calls,
+            top_logprobs,
+            stream,
+            // Provider-specific annotations describe the source payload. The
+            // contract-first projector builds a fresh provider wire shape.
+            api_specific: None,
+            extra: Map::new(),
+        })
     }
 
     pub(super) fn sanitize_annotated_response(
         &self,
-        mut response: AnnotatedLlmResponse,
+        response: AnnotatedLlmResponse,
     ) -> Option<AnnotatedLlmResponse> {
-        replace_optional_string(&mut response.id, &self.replacement);
-        response.message = response
-            .message
-            .map(|content| sanitize_message_content(content, &self.replacement));
-        response.tool_calls = response.tool_calls.map(|calls| {
-            calls
-                .into_iter()
-                .map(|call| sanitize_response_tool_call(call, &self.replacement))
-                .collect()
-        });
-        if let Some(FinishReason::Unknown(value)) = response.finish_reason.as_mut() {
-            *value = (*self.replacement).clone();
-        }
-        response.usage = response
-            .usage
-            .map(|usage| sanitize_usage(usage, &self.replacement));
-        response.optimization_summary = response
-            .optimization_summary
-            .map(|summary| sanitize_optimization_summary(summary, &self.replacement));
-        response.api_specific = response
-            .api_specific
-            .map(|specific| sanitize_api_specific_response(specific, &self.replacement));
-        response.extra.clear();
-        Some(response)
+        let AnnotatedLlmResponse {
+            id,
+            model,
+            message,
+            tool_calls,
+            finish_reason,
+            usage,
+            optimization_summary,
+            api_specific,
+            extra: _,
+        } = response;
+        Some(AnnotatedLlmResponse {
+            id: marked_option(id, &self.replacement),
+            model,
+            message: message.map(|content| sanitize_message_content(content, &self.replacement)),
+            tool_calls: tool_calls.map(|calls| {
+                calls
+                    .into_iter()
+                    .map(|call| sanitize_response_tool_call(call, &self.replacement))
+                    .collect()
+            }),
+            finish_reason: match finish_reason {
+                Some(FinishReason::Unknown(_)) => None,
+                known => known,
+            },
+            usage: usage.map(|usage| sanitize_usage(usage, &self.replacement)),
+            optimization_summary: optimization_summary
+                .map(|summary| sanitize_optimization_summary(summary, &self.replacement)),
+            api_specific: api_specific
+                .map(|specific| sanitize_api_specific_response(specific, &self.replacement)),
+            extra: Map::new(),
+        })
     }
 
     pub(super) fn sanitize_event_fields(
@@ -171,14 +203,20 @@ impl TrajectorySanitizer {
         }
 
         if category == Some("llm") {
-            // Rebuild the event body from its normalized annotation instead
-            // of trusting the preceding payload. This admits the generated
-            // contract-first projection while keeping direct or malformed LLM
-            // events fail-closed.
+            let projected = self.project_llm_event(event, &fields);
             fields.data = Some(
-                self.project_llm_event_data(event, &fields)
-                    .unwrap_or_else(empty_object),
+                projected
+                    .as_ref()
+                    .map_or_else(empty_object, |projection| projection.data.clone()),
             );
+            fields.category_profile = fields.category_profile.map(|profile| {
+                let mut profile = sanitize_category_profile_base(profile, self);
+                if let Some(projected) = projected.as_ref() {
+                    profile.annotated_request = projected.annotated_request.clone();
+                    profile.annotated_response = projected.annotated_response.clone();
+                }
+                profile
+            });
         } else if is_relay_metric_mark(event) {
             fields.data = fields
                 .data
@@ -191,9 +229,11 @@ impl TrajectorySanitizer {
         let provider = (category == Some("llm"))
             .then(|| provider_name(event))
             .flatten();
-        fields.category_profile = fields
-            .category_profile
-            .map(|profile| sanitize_category_profile(profile, self));
+        if category != Some("llm") {
+            fields.category_profile = fields
+                .category_profile
+                .map(|profile| sanitize_category_profile(profile, self));
+        }
         if let Some(provider) = provider {
             let profile = fields
                 .category_profile
@@ -206,38 +246,56 @@ impl TrajectorySanitizer {
         restore_log_severity(fields, log_severity)
     }
 
-    fn project_llm_event_data(
+    fn project_llm_event(
         &self,
         event: &Event,
         fields: &nemo_relay::api::event::EventSanitizeFields,
-    ) -> Option<Json> {
+    ) -> Option<ProjectedLlmEvent> {
         let profile = fields.category_profile.as_ref()?;
         match event.scope_category() {
             Some(nemo_relay::api::event::ScopeCategory::Start) => {
-                let request = fields
+                let annotated = profile.annotated_request.as_deref()?;
+                let annotated_surface = request_surface_from_annotation(annotated);
+                let sanitized = self.sanitize_annotated_request(annotated.clone())?;
+                let data = fields
                     .data
                     .as_ref()
-                    .and_then(|data| serde_json::from_value::<LlmRequest>(data.clone()).ok())?;
-                if !request.headers.is_empty() {
-                    return None;
-                }
-                let annotated = profile.annotated_request.as_deref()?;
-                let surface = request_surface_from_annotation(annotated)
-                    .or_else(|| detect_request_surface(&request.content))?;
-                let sanitized = self.sanitize_annotated_request(annotated.clone())?;
-                crate::trajectory_projection::render_request(surface, &sanitized)
+                    .and_then(|data| serde_json::from_value::<LlmRequest>(data.clone()).ok())
+                    .and_then(|request| {
+                        let detected_surface = detect_request_surface_with_hint(
+                            &request.content,
+                            annotated_surface.and_then(provider_hint_for_surface),
+                        );
+                        let surface = annotated_surface.or(detected_surface)?;
+                        (detected_surface == Some(surface)).then_some(())?;
+                        crate::trajectory_projection::render_request(surface, &sanitized)
+                    })
                     .and_then(|rendered| serde_json::to_value(rendered).ok())
+                    .unwrap_or_else(empty_object);
+                Some(ProjectedLlmEvent {
+                    data,
+                    annotated_request: Some(Arc::new(sanitized)),
+                    annotated_response: None,
+                })
             }
             Some(nemo_relay::api::event::ScopeCategory::End) => {
-                let payload = fields.data.as_ref()?;
                 let annotated = profile.annotated_response.as_deref()?;
-                let surface = response_surface_from_annotation(annotated)
-                    .or_else(|| detect_response_surface(payload))?;
-                (detect_response_surface(payload) == Some(surface)).then_some(())?;
                 let sanitized = self.sanitize_annotated_response(annotated.clone())?;
-                Some(crate::trajectory_projection::render_response(
-                    surface, &sanitized,
-                ))
+                let data = fields
+                    .data
+                    .as_ref()
+                    .and_then(|payload| {
+                        let surface = response_surface_from_annotation(annotated)
+                            .or_else(|| detect_response_surface(payload))?;
+                        (detect_response_surface(payload) == Some(surface)).then_some(())?;
+                        crate::trajectory_projection::render_response(surface, &sanitized)
+                    })
+                    .unwrap_or_else(empty_object);
+                Some(ProjectedLlmEvent {
+                    data,
+                    annotated_request: None,
+                    annotated_response: Some(Arc::new(sanitized)),
+                })
             }
             None => None,
         }
@@ -306,6 +364,26 @@ fn replace_optional_string(value: &mut Option<String>, replacement: &str) {
     }
 }
 
+fn sanitize_generation_params(params: GenerationParams, replacement: &str) -> GenerationParams {
+    let GenerationParams {
+        temperature,
+        max_tokens,
+        top_p,
+        stop,
+    } = params;
+    GenerationParams {
+        temperature,
+        max_tokens,
+        top_p,
+        stop: stop.map(|values| {
+            values
+                .into_iter()
+                .map(|_| replacement.to_string())
+                .collect()
+        }),
+    }
+}
+
 fn sanitize_message(message: Message, replacement: &str) -> Message {
     match message {
         Message::System { content, name } => Message::System {
@@ -334,7 +412,10 @@ fn sanitize_message(message: Message, replacement: &str) -> Message {
             }),
             name: name.map(|_| replacement.to_string()),
         },
-        Message::Tool { content, .. } => Message::Tool {
+        Message::Tool {
+            content,
+            tool_call_id: _,
+        } => Message::Tool {
             content: sanitize_message_content(content, replacement),
             tool_call_id: replacement.to_string(),
         },
@@ -342,20 +423,35 @@ fn sanitize_message(message: Message, replacement: &str) -> Message {
             content: content.map(|_| replacement.to_string()),
             name,
         },
-        Message::ToolCallItem { id, name, .. } => Message::ToolCallItem {
+        Message::ToolCallItem {
+            id,
+            call_id: _,
+            name,
+            arguments: _,
+            extra: _,
+        } => Message::ToolCallItem {
             id: id.map(|_| replacement.to_string()),
             call_id: replacement.to_string(),
             name,
             arguments: empty_object(),
             extra: Map::new(),
         },
-        Message::ToolResultItem { id, .. } => Message::ToolResultItem {
+        Message::ToolResultItem {
+            id,
+            call_id: _,
+            output: _,
+            extra: _,
+        } => Message::ToolResultItem {
             id: id.map(|_| replacement.to_string()),
             call_id: replacement.to_string(),
             output: empty_object(),
             extra: Map::new(),
         },
-        Message::ProviderNative { provider, kind, .. } => Message::ProviderNative {
+        Message::ProviderNative {
+            provider,
+            kind,
+            value: _,
+        } => Message::ProviderNative {
             provider,
             kind: sanitize_native_kind(kind, replacement),
             value: empty_object(),
@@ -377,43 +473,63 @@ fn sanitize_message_content(content: MessageContent, replacement: &str) -> Messa
 
 fn sanitize_content_part(part: ContentPart, replacement: &str) -> ContentPart {
     match part {
-        ContentPart::Text { .. } => ContentPart::Text {
+        ContentPart::Text { text: _, extra: _ } => ContentPart::Text {
             text: replacement.to_string(),
             extra: Map::new(),
         },
-        ContentPart::ImageUrl { image_url, .. } => ContentPart::ImageUrl {
+        ContentPart::ImageUrl {
+            image_url,
+            extra: _,
+        } => ContentPart::ImageUrl {
             image_url: sanitize_image_url(image_url, replacement),
             extra: Map::new(),
         },
-        ContentPart::Image { .. } => ContentPart::Image {
+        ContentPart::Image { image: _, extra: _ } => ContentPart::Image {
             image: empty_object(),
             extra: Map::new(),
         },
-        ContentPart::Audio { .. } => ContentPart::Audio {
+        ContentPart::Audio { audio: _, extra: _ } => ContentPart::Audio {
             audio: empty_object(),
             extra: Map::new(),
         },
-        ContentPart::File { .. } => ContentPart::File {
+        ContentPart::File { file: _, extra: _ } => ContentPart::File {
             file: empty_object(),
             extra: Map::new(),
         },
-        ContentPart::Refusal { .. } => ContentPart::Refusal {
+        ContentPart::Refusal {
+            refusal: _,
+            extra: _,
+        } => ContentPart::Refusal {
             refusal: replacement.to_string(),
             extra: Map::new(),
         },
-        ContentPart::ToolUse { name, .. } => ContentPart::ToolUse {
+        ContentPart::ToolUse {
+            id: _,
+            name,
+            input: _,
+            extra: _,
+        } => ContentPart::ToolUse {
             id: replacement.to_string(),
             name,
             input: empty_object(),
             extra: Map::new(),
         },
-        ContentPart::ToolResult { is_error, .. } => ContentPart::ToolResult {
+        ContentPart::ToolResult {
+            tool_use_id: _,
+            content: _,
+            is_error,
+            extra: _,
+        } => ContentPart::ToolResult {
             tool_use_id: replacement.to_string(),
             content: empty_object(),
             is_error: is_error.map(|_| false),
             extra: Map::new(),
         },
-        ContentPart::ProviderNative { provider, kind, .. } => ContentPart::ProviderNative {
+        ContentPart::ProviderNative {
+            provider,
+            kind,
+            value: _,
+        } => ContentPart::ProviderNative {
             provider,
             kind: sanitize_native_kind(kind, replacement),
             value: empty_object(),
@@ -447,11 +563,15 @@ fn sanitize_function_call(call: FunctionCall, _replacement: &str) -> FunctionCal
 
 fn sanitize_tool_definition(tool: ToolDefinition, replacement: &str) -> ToolDefinition {
     match tool {
-        ToolDefinition::Function { function, .. } => ToolDefinition::Function {
+        ToolDefinition::Function { function, extra: _ } => ToolDefinition::Function {
             function: sanitize_function_definition(function, replacement),
             extra: Map::new(),
         },
-        ToolDefinition::ProviderNative { provider, kind, .. } => ToolDefinition::ProviderNative {
+        ToolDefinition::ProviderNative {
+            provider,
+            kind,
+            value: _,
+        } => ToolDefinition::ProviderNative {
             provider,
             kind: sanitize_native_kind(kind, replacement),
             value: empty_object(),
@@ -484,13 +604,15 @@ fn sanitize_tool_choice(choice: ToolChoice, replacement: &str) -> ToolChoice {
             choice_type: preserve_known_string(choice_type, &["function"], replacement),
             function: ToolChoiceFunctionName { name },
         }),
-        ToolChoice::ProviderNative(ProviderNativeComponent { provider, kind, .. }) => {
-            ToolChoice::ProviderNative(ProviderNativeComponent {
-                provider,
-                kind: sanitize_native_kind(kind, replacement),
-                value: empty_object(),
-            })
-        }
+        ToolChoice::ProviderNative(ProviderNativeComponent {
+            provider,
+            kind,
+            value: _,
+        }) => ToolChoice::ProviderNative(ProviderNativeComponent {
+            provider,
+            kind: sanitize_native_kind(kind, replacement),
+            value: empty_object(),
+        }),
     }
 }
 
@@ -502,18 +624,52 @@ fn sanitize_response_tool_call(call: ResponseToolCall, replacement: &str) -> Res
     }
 }
 
-fn sanitize_usage(mut usage: Usage, replacement: &str) -> Usage {
-    usage.cost = usage.cost.map(|cost| sanitize_cost(cost, replacement));
-    usage
+fn sanitize_usage(usage: Usage, replacement: &str) -> Usage {
+    let Usage {
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        cost,
+    } = usage;
+    Usage {
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        cost: cost.map(|cost| sanitize_cost(cost, replacement)),
+    }
 }
 
-fn sanitize_cost(mut cost: CostEstimate, replacement: &str) -> CostEstimate {
-    cost.currency = sanitize_currency(cost.currency, replacement);
-    cost.pricing_provider = None;
-    cost.pricing_model = None;
-    cost.pricing_as_of = None;
-    cost.pricing_source = None;
-    cost
+fn sanitize_cost(cost: CostEstimate, replacement: &str) -> CostEstimate {
+    let CostEstimate {
+        total,
+        currency,
+        input,
+        output,
+        cache_read,
+        cache_write,
+        source,
+        pricing_provider: _,
+        pricing_model: _,
+        pricing_as_of: _,
+        pricing_source: _,
+    } = cost;
+    CostEstimate {
+        total,
+        currency: sanitize_currency(currency, replacement),
+        input,
+        output,
+        cache_read,
+        cache_write,
+        source,
+        pricing_provider: None,
+        pricing_model: None,
+        pricing_as_of: None,
+        pricing_source: None,
+    }
 }
 
 fn sanitize_currency(currency: String, replacement: &str) -> String {
@@ -526,32 +682,41 @@ fn sanitize_currency(currency: String, replacement: &str) -> String {
 }
 
 fn sanitize_optimization_summary(
-    mut summary: LlmOptimizationSummary,
+    summary: LlmOptimizationSummary,
     replacement: &str,
 ) -> LlmOptimizationSummary {
-    summary.schema_version = preserve_known_string(summary.schema_version, &["1"], replacement);
-    summary.calculation_version =
-        preserve_known_string(summary.calculation_version, &["1"], replacement);
-    summary.limitations.clear();
-    summary.baseline_model = None;
-    summary.effective_model = None;
-    summary.effective_usage = summary
-        .effective_usage
-        .map(|usage| sanitize_usage(usage, replacement));
-    summary.baseline_usage = summary
-        .baseline_usage
-        .map(|usage| sanitize_usage(usage, replacement));
-    summary.baseline_cost = summary
-        .baseline_cost
-        .map(|cost| sanitize_cost(cost, replacement));
-    summary.actual_cost = summary
-        .actual_cost
-        .map(|cost| sanitize_cost(cost, replacement));
-    summary.currency = summary
-        .currency
-        .map(|currency| sanitize_currency(currency, replacement));
-    summary.contributions.clear();
-    summary
+    let LlmOptimizationSummary {
+        schema_version,
+        calculation_version,
+        status,
+        limitations: _,
+        baseline_model: _,
+        effective_model: _,
+        effective_usage,
+        baseline_usage,
+        tokens_saved,
+        baseline_cost,
+        actual_cost,
+        estimated_cost_saved,
+        currency,
+        contributions: _,
+    } = summary;
+    LlmOptimizationSummary {
+        schema_version: preserve_known_string(schema_version, &["1"], replacement),
+        calculation_version: preserve_known_string(calculation_version, &["1"], replacement),
+        status,
+        limitations: Vec::new(),
+        baseline_model: None,
+        effective_model: None,
+        effective_usage: effective_usage.map(|usage| sanitize_usage(usage, replacement)),
+        baseline_usage: baseline_usage.map(|usage| sanitize_usage(usage, replacement)),
+        tokens_saved,
+        baseline_cost: baseline_cost.map(|cost| sanitize_cost(cost, replacement)),
+        actual_cost: actual_cost.map(|cost| sanitize_cost(cost, replacement)),
+        estimated_cost_saved,
+        currency: currency.map(|currency| sanitize_currency(currency, replacement)),
+        contributions: Vec::new(),
+    }
 }
 
 fn sanitize_api_specific_response(
@@ -562,7 +727,7 @@ fn sanitize_api_specific_response(
         ApiSpecificResponse::OpenAIChat {
             logprobs,
             system_fingerprint,
-            ..
+            service_tier: _,
         } => ApiSpecificResponse::OpenAIChat {
             logprobs: opaque_option(logprobs),
             system_fingerprint: marked_option(system_fingerprint, replacement),
@@ -574,11 +739,11 @@ fn sanitize_api_specific_response(
             incomplete_details,
             previous_response_id,
             store,
+            service_tier: _,
             truncation,
             reasoning,
             input_tokens_details,
             output_tokens_details,
-            ..
         } => ApiSpecificResponse::OpenAIResponses {
             output_items: output_items
                 .map(|values| values.into_iter().map(|_| empty_object()).collect()),
@@ -612,7 +777,7 @@ fn sanitize_api_specific_response(
             stop_sequence,
             container,
             content_blocks,
-            ..
+            service_tier: _,
         } => ApiSpecificResponse::AnthropicMessages {
             object_type: object_type
                 .map(|value| preserve_known_string(value, &["message"], replacement)),
@@ -651,7 +816,7 @@ fn sanitize_api_specific_response(
             safety_ratings,
             grounding_metadata,
             citation_metadata,
-            ..
+            extra: _,
         } => ApiSpecificResponse::GeminiGenerateContent {
             thoughts_tokens,
             safety_ratings: opaque_option(safety_ratings),
@@ -659,7 +824,10 @@ fn sanitize_api_specific_response(
             citation_metadata: opaque_option(citation_metadata),
             extra: Map::new(),
         },
-        ApiSpecificResponse::Custom { .. } => ApiSpecificResponse::Custom {
+        ApiSpecificResponse::Custom {
+            api_name: _,
+            data: _,
+        } => ApiSpecificResponse::Custom {
             api_name: replacement.to_string(),
             data: empty_object(),
         },
@@ -780,6 +948,26 @@ fn is_known_mark_subtype(value: &str) -> bool {
 }
 
 fn sanitize_category_profile(
+    profile: CategoryProfile,
+    sanitizer: &TrajectorySanitizer,
+) -> CategoryProfile {
+    let annotated_request = profile.annotated_request.as_ref().and_then(|request| {
+        sanitizer
+            .sanitize_annotated_request((**request).clone())
+            .map(Arc::new)
+    });
+    let annotated_response = profile.annotated_response.as_ref().and_then(|response| {
+        sanitizer
+            .sanitize_annotated_response((**response).clone())
+            .map(Arc::new)
+    });
+    let mut profile = sanitize_category_profile_base(profile, sanitizer);
+    profile.annotated_request = annotated_request;
+    profile.annotated_response = annotated_response;
+    profile
+}
+
+fn sanitize_category_profile_base(
     mut profile: CategoryProfile,
     sanitizer: &TrajectorySanitizer,
 ) -> CategoryProfile {
@@ -793,16 +981,8 @@ fn sanitize_category_profile(
     });
     replace_optional_json(&mut profile.tool_result_annotation);
     profile.extra.clear();
-    profile.annotated_request = profile.annotated_request.as_ref().and_then(|request| {
-        sanitizer
-            .sanitize_annotated_request((**request).clone())
-            .map(Arc::new)
-    });
-    profile.annotated_response = profile.annotated_response.as_ref().and_then(|response| {
-        sanitizer
-            .sanitize_annotated_response((**response).clone())
-            .map(Arc::new)
-    });
+    profile.annotated_request = None;
+    profile.annotated_response = None;
     profile
 }
 
@@ -909,6 +1089,16 @@ fn request_surface_from_annotation(request: &AnnotatedLlmRequest) -> Option<Prov
         ApiSpecificRequest::OpenAIResponses { .. } => Some(ProviderSurface::OpenAIResponses),
         ApiSpecificRequest::OCIGenAI { .. } => Some(ProviderSurface::OCIGenAI),
         ApiSpecificRequest::Custom { .. } => None,
+    }
+}
+
+fn provider_hint_for_surface(surface: ProviderSurface) -> Option<&'static str> {
+    match surface {
+        ProviderSurface::AnthropicMessages => Some("anthropic.messages"),
+        ProviderSurface::OCIGenAI => Some("oci.genai"),
+        ProviderSurface::OpenAIChat
+        | ProviderSurface::OpenAIResponses
+        | ProviderSurface::GeminiGenerateContent => None,
     }
 }
 
