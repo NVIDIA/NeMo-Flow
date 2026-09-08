@@ -1568,8 +1568,9 @@ fn collect_host_plugin_readiness(
                 .map(|_| "hook-forward is supported".into()),
         );
         if let Some(plugin) = readiness.plugin.as_ref() {
-            let generation_fence =
-                plugin.join(crate::installation::generation::GENERATION_FILE_NAME);
+            let generation_fence = plugin
+                .join(crate::installation::generation::GENERATION_FILE_NAME)
+                .canonicalize_or_self();
             let hook_config = crate::hooks::persistent_hook_config_path(&generation_fence);
             readiness.push(
                 "Generated hooks",

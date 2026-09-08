@@ -137,10 +137,24 @@ fn private_hook_config_rejects_symlinks_and_broad_permissions() {
             .unwrap_err()
             .contains("owner-only regular file")
     );
+
+    let unsafe_parent = directory.path().join("unsafe-parent");
+    std::fs::create_dir(&unsafe_parent).unwrap();
+    let private_config = unsafe_parent.join("hook.json");
+    HookCommandConfig::transparent(CodingAgent::Codex, "http://127.0.0.1:1234")
+        .write(&private_config)
+        .unwrap();
+    std::fs::set_permissions(&unsafe_parent, std::fs::Permissions::from_mode(0o777)).unwrap();
+    assert!(
+        HookCommandConfig::load(&private_config)
+            .unwrap_err()
+            .contains("parent must be current-user-owned and non-group/world-writable")
+    );
 }
 
-#[test]
-fn transparent_run_skips_stale_persistent_hook_config_before_loading_it() {
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // The process-wide environment lock must cover the hook call.
+async fn transparent_run_skips_stale_persistent_hook_config_before_loading_it() {
     let _guard = crate::test_support::ENV_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -152,7 +166,7 @@ fn transparent_run_skips_stale_persistent_hook_config_before_loading_it() {
         "missing-persistent-hook-config.json",
     ));
     request.failure_policy = HookFailurePolicy::FailClosed;
-    let result = crate::hooks::transparent_hook_is_inert(&request);
+    let result = crate::hooks::hook_forward(request).await;
     // SAFETY: The process-wide environment lock is still held for this test.
     unsafe {
         match previous {
@@ -160,7 +174,7 @@ fn transparent_run_skips_stale_persistent_hook_config_before_loading_it() {
             None => std::env::remove_var(crate::configuration::TRANSPARENT_RUN_ENV),
         }
     }
-    assert!(result);
+    assert!(result.is_ok());
 }
 
 struct BootstrapConfigHome {

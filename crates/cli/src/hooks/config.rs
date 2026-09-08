@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::io::Read;
 
 use serde::{Deserialize, Serialize};
@@ -199,13 +199,10 @@ fn read_private_hook_config(path: &Path) -> Result<Vec<u8>, std::io::Error> {
 
 #[cfg(windows)]
 fn read_private_hook_config(path: &Path) -> Result<Vec<u8>, std::io::Error> {
-    if !crate::filesystem::windows_path_is_private(path)? {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "hook configuration must have the Relay private owner/System access control list",
-        ));
-    }
-    std::fs::read(path)
+    let mut file = crate::filesystem::open_private_windows_file_for_read(path)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 #[cfg(not(any(unix, windows)))]
