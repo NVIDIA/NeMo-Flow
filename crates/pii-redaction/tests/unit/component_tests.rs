@@ -633,10 +633,7 @@ fn trajectory_typed_request_matrix_preserves_only_approved_structure() {
     assert_eq!(value["max_tool_calls"], 4);
     assert_eq!(value["top_logprobs"], 3);
     assert_eq!(value["stream"], true);
-    assert_eq!(value["api_specific"]["frequency_penalty"], 0.4);
-    assert_eq!(value["api_specific"]["n"], 2);
-    assert_eq!(value["api_specific"]["seed"], 7);
-    assert_eq!(value["api_specific"]["audio"], json!({}));
+    assert!(value["api_specific"].is_null());
     assert!(value.get("future").is_none());
 }
 
@@ -1153,7 +1150,7 @@ async fn trajectory_preset_builds_codec_valid_redacted_chat_requests() {
         "preserve",
     ));
     let request = callback(LlmRequest {
-        headers: serde_json::Map::new(),
+        headers: serde_json::Map::from_iter([("authorization".into(), json!("Bearer SECRET"))]),
         content: json!({
             "model": "claude-sonnet-4-6",
             "messages": [
@@ -1179,7 +1176,8 @@ async fn trajectory_preset_builds_codec_valid_redacted_chat_requests() {
             "temperature": 0.2,
             "stop": ["private stop sequence"],
             "participant": {"name": "Alice Example", "username": "alice"},
-            "person_name": "Alice Example"
+            "person_name": "Alice Example",
+            "future_provider_extension": {"secret": "SECRET"}
         }),
     }, no_codec_request_context())
     .await
@@ -1199,6 +1197,8 @@ async fn trajectory_preset_builds_codec_valid_redacted_chat_requests() {
     assert_eq!(request.content["tools"][0]["function"]["name"], "search");
     assert!(request.content.get("participant").is_none());
     assert!(request.content.get("person_name").is_none());
+    assert!(request.content.get("future_provider_extension").is_none());
+    assert!(request.headers.is_empty());
 }
 
 #[tokio::test]
@@ -1214,12 +1214,17 @@ async fn trajectory_preset_builds_codec_valid_redacted_chat_responses() {
             "choices": [{"index": 0, "finish_reason": "tool_calls", "message": {
                 "role": "assistant",
                 "content": "private answer",
+                "audio": {"transcript": "SECRET"},
                 "tool_calls": [{"id": "call_1", "type": "function", "function": {
                     "name": "terminal", "arguments": "{\"command\":\"cat secret.txt\"}"
                 }}]
-            }, "logprobs": {"content": [{"token": "secret", "logprob": -0.5}]}}],
+            }, "logprobs": {"content": [{"token": "SECRET", "logprob": -0.5}]}}, {
+                "index": 1,
+                "message": {"role": "assistant", "content": "SECOND_SECRET"}
+            }],
             "usage": {"prompt_tokens": 20, "completion_tokens": 5, "total_tokens": 25},
-            "cost": {"total": 1.25}
+            "cost": {"total": 1.25},
+            "future_provider_extension": {"secret": "SECRET"}
         }),
         no_codec_context(),
     )
@@ -1239,6 +1244,81 @@ async fn trajectory_preset_builds_codec_valid_redacted_chat_responses() {
         "{}"
     );
     assert_eq!(sanitized["usage"]["total_tokens"], 25);
+    assert_eq!(sanitized["choices"].as_array().unwrap().len(), 1);
+    assert!(sanitized["choices"][0].get("logprobs").is_none());
+    assert!(sanitized["choices"][0]["message"].get("audio").is_none());
+    assert!(sanitized.get("future_provider_extension").is_none());
+    let serialized = serde_json::to_string(&sanitized).unwrap();
+    assert!(!serialized.contains("SECRET"), "{serialized}");
+}
+
+#[tokio::test]
+async fn trajectory_preset_projects_one_gemini_candidate_without_raw_extensions() {
+    let callback = crate::builtin::llm_sanitize_response_callback(trajectory_backend(
+        Some("gemini_generate_content"),
+        "preserve",
+    ));
+    let sanitized = callback(
+        json!({
+            "responseId": "SECRET-ID",
+            "modelVersion": "gemini-2.5-pro",
+            "candidates": [{
+                "index": 0,
+                "content": {"role": "model", "parts": [{"text": "SECRET-FIRST"}]},
+                "finishReason": "STOP",
+                "safetyRatings": [{"category": "SECRET"}]
+            }, {
+                "index": 1,
+                "content": {"role": "model", "parts": [{"text": "SECRET-SECOND"}]},
+                "finishReason": "STOP"
+            }],
+            "usageMetadata": {"promptTokenCount": 4, "candidatesTokenCount": 2},
+            "futureProviderExtension": {"secret": "SECRET"}
+        }),
+        no_codec_context(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(sanitized["responseId"], "[REDACTED]");
+    assert_eq!(sanitized["candidates"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        sanitized["candidates"][0]["content"]["parts"][0]["text"],
+        "[REDACTED]"
+    );
+    assert!(sanitized["candidates"][0].get("safetyRatings").is_none());
+    assert!(sanitized.get("futureProviderExtension").is_none());
+    let serialized = serde_json::to_string(&sanitized).unwrap();
+    assert!(!serialized.contains("SECRET"), "{serialized}");
+}
+
+#[tokio::test]
+async fn trajectory_preset_uses_empty_payloads_when_codec_projection_fails() {
+    let request = crate::builtin::llm_sanitize_request_callback(trajectory_backend(
+        Some("openai_chat"),
+        "preserve",
+    ))(
+        LlmRequest {
+            headers: serde_json::Map::from_iter([("authorization".into(), json!("SECRET"))]),
+            content: json!({"messages": "SECRET"}),
+        },
+        no_codec_request_context(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(request.headers.is_empty());
+    assert_eq!(request.content, json!({}));
+
+    let response = crate::builtin::llm_sanitize_response_callback(trajectory_backend(
+        Some("openai_chat"),
+        "preserve",
+    ))(json!({"choices": "SECRET"}), no_codec_context())
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(response, json!({}));
 }
 
 #[tokio::test]
@@ -1338,7 +1418,8 @@ async fn trajectory_preset_builds_codec_valid_provider_shapes() {
     .unwrap();
     assert_eq!(anthropic_response["id"], "[REDACTED]");
     assert_eq!(anthropic_response["role"], "assistant");
-    assert_eq!(anthropic_response["content"][1]["text"], "[REDACTED]");
+    assert_eq!(anthropic_response["content"][0]["text"], "[REDACTED]");
+    assert_eq!(anthropic_response["content"].as_array().unwrap().len(), 1);
     assert_eq!(anthropic_response["usage"]["input_tokens"], 12);
 }
 
@@ -3966,7 +4047,12 @@ async fn trajectory_preset_sanitizes_stream_finalization_without_changing_client
         .iter()
         .find(|event| event.scope_category() == Some(ScopeCategory::Start))
         .unwrap();
-    assert_eq!(start.input(), Some(&json!({})));
+    let start_input = start.input().unwrap();
+    assert_eq!(start_input["headers"], json!({}));
+    assert_eq!(
+        start_input["content"]["messages"][0]["content"],
+        "[REDACTED]"
+    );
     let annotated_request = start
         .category_profile()
         .and_then(|profile| profile.annotated_request.as_deref())
@@ -3982,7 +4068,11 @@ async fn trajectory_preset_sanitizes_stream_finalization_without_changing_client
         .iter()
         .find(|event| event.scope_category() == Some(ScopeCategory::End))
         .unwrap();
-    assert_eq!(end.output(), Some(&json!({})));
+    let end_output = end.output().unwrap();
+    assert_eq!(end_output["choices"].as_array().map(Vec::len), Some(1));
+    assert_eq!(end_output["choices"][0]["message"]["content"], "[REDACTED]");
+    assert_eq!(end_output["choices"][0]["finish_reason"], "stop");
+    assert_eq!(end_output["usage"]["total_tokens"], 11);
     let annotated_response = end
         .category_profile()
         .and_then(|profile| profile.annotated_response.as_deref())

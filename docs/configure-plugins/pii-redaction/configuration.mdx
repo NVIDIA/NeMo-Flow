@@ -250,19 +250,22 @@ The `builtin` section contains:
 ## Trajectory Context Preset
 
 `trajectory_context` is a fail-closed policy for metrics-oriented trajectory
-export. It replaces present opaque JSON payloads with `{}`, including raw LLM
-and tool input/output, headers, generic event data and metadata,
-provider-native values, category-profile extras, and unknown custom-mark
-payloads. A valid `nemo_relay.log.severity` value is restored for marks.
+export. It discards original LLM request and response payloads and generates
+minimal provider-shaped projections from sanitized normalized annotations.
+Unknown provider fields, extensions, additional choices or candidates, headers,
+provider-native values, generic event data and metadata, category-profile extras,
+and unknown custom-mark payloads cannot pass through those projections. Present
+opaque typed JSON values become `{}`. A valid `nemo_relay.log.severity` value is
+restored for marks.
 
 Typed LLM annotations retain message roles and content-part kinds; provider,
 model, and tool names; request tuning settings; finish reasons; token and cache
 usage; and normalized cost amounts, currency, and source classification.
 Conversational content and application identifiers use the configured
-replacement, which defaults to `[REDACTED]`. Opaque typed fields become `{}`,
-unapproved numbers become `0`, and unapproved booleans become `false`. Routing
-metadata, pricing provenance, optimization contribution evidence, and unknown
-fields are discarded. Relay lifecycle identifiers remain unchanged.
+replacement, which defaults to `[REDACTED]`. Opaque typed fields become `{}`;
+approved typed numeric and boolean analytics remain available. Routing metadata,
+pricing provenance, optimization contribution evidence, and unknown fields are
+discarded. Relay lifecycle identifiers remain unchanged.
 
 Provider, model, tool, and metric names are intentional free-form exceptions.
 Do not place user content, secrets, or personal identifiers in these fields.

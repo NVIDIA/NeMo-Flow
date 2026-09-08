@@ -12,11 +12,15 @@ use nemo_relay::api::event::{
     CategoryProfile, Event, LOG_SEVERITY_METADATA_KEY, LogSeverity, METRIC_DATA_SCHEMA_NAME,
     METRIC_DATA_SCHEMA_VERSION, MetricEnvelope,
 };
+use nemo_relay::api::llm::LlmRequest;
 use nemo_relay::codec::optimization::LlmOptimizationSummary;
 use nemo_relay::codec::request::{
     AnnotatedLlmRequest, ApiSpecificRequest, ContentPart, FunctionCall, FunctionDefinition,
     Message, MessageContent, OpenAiImageUrl, ProviderNativeComponent, ToolCall, ToolChoice,
     ToolChoiceFunction, ToolChoiceFunctionName, ToolDefinition,
+};
+use nemo_relay::codec::resolve::{
+    ProviderSurface, detect_request_surface, detect_response_surface,
 };
 use nemo_relay::codec::response::{
     AnnotatedLlmResponse, ApiSpecificResponse, CostEstimate, FinishReason, ResponseToolCall, Usage,
@@ -110,9 +114,11 @@ impl TrajectorySanitizer {
         replace_optional_string(&mut request.user, &self.replacement);
         replace_optional_json(&mut request.metadata);
         request.service_tier = None;
-        request.api_specific = request
-            .api_specific
-            .map(|specific| sanitize_api_specific_request(specific, &self.replacement));
+        // Provider-specific annotations describe the source payload. The
+        // contract-first projector builds a fresh provider wire shape from
+        // normalized fields, so retaining them would both risk leakage and
+        // make an otherwise empty encode template depend on source state.
+        request.api_specific = None;
         request.extra.clear();
         Some(request)
     }
@@ -164,7 +170,16 @@ impl TrajectorySanitizer {
             return fields;
         }
 
-        if is_relay_metric_mark(event) {
+        if category == Some("llm") {
+            // Rebuild the event body from its normalized annotation instead
+            // of trusting the preceding payload. This admits the generated
+            // contract-first projection while keeping direct or malformed LLM
+            // events fail-closed.
+            fields.data = Some(
+                self.project_llm_event_data(event, &fields)
+                    .unwrap_or_else(empty_object),
+            );
+        } else if is_relay_metric_mark(event) {
             fields.data = fields
                 .data
                 .and_then(|data| self.sanitize_metric_envelope(data));
@@ -189,6 +204,43 @@ impl TrajectorySanitizer {
         }
 
         restore_log_severity(fields, log_severity)
+    }
+
+    fn project_llm_event_data(
+        &self,
+        event: &Event,
+        fields: &nemo_relay::api::event::EventSanitizeFields,
+    ) -> Option<Json> {
+        let profile = fields.category_profile.as_ref()?;
+        match event.scope_category() {
+            Some(nemo_relay::api::event::ScopeCategory::Start) => {
+                let request = fields
+                    .data
+                    .as_ref()
+                    .and_then(|data| serde_json::from_value::<LlmRequest>(data.clone()).ok())?;
+                if !request.headers.is_empty() {
+                    return None;
+                }
+                let annotated = profile.annotated_request.as_deref()?;
+                let surface = request_surface_from_annotation(annotated)
+                    .or_else(|| detect_request_surface(&request.content))?;
+                let sanitized = self.sanitize_annotated_request(annotated.clone())?;
+                crate::trajectory_projection::render_request(surface, &sanitized)
+                    .and_then(|rendered| serde_json::to_value(rendered).ok())
+            }
+            Some(nemo_relay::api::event::ScopeCategory::End) => {
+                let payload = fields.data.as_ref()?;
+                let annotated = profile.annotated_response.as_deref()?;
+                let surface = response_surface_from_annotation(annotated)
+                    .or_else(|| detect_response_surface(payload))?;
+                (detect_response_surface(payload) == Some(surface)).then_some(())?;
+                let sanitized = self.sanitize_annotated_response(annotated.clone())?;
+                Some(crate::trajectory_projection::render_response(
+                    surface, &sanitized,
+                ))
+            }
+            None => None,
+        }
     }
 
     /// Redact optional metric text and reject every attribute that is not explicitly allowed.
@@ -439,121 +491,6 @@ fn sanitize_tool_choice(choice: ToolChoice, replacement: &str) -> ToolChoice {
                 value: empty_object(),
             })
         }
-    }
-}
-
-fn sanitize_api_specific_request(
-    request: ApiSpecificRequest,
-    replacement: &str,
-) -> ApiSpecificRequest {
-    match request {
-        ApiSpecificRequest::AnthropicMessages {
-            cache_control,
-            container,
-            inference_geo,
-            output_config,
-            thinking,
-            top_k,
-            user_profile_id,
-        } => ApiSpecificRequest::AnthropicMessages {
-            cache_control: opaque_option(cache_control),
-            container: marked_option(container, replacement),
-            inference_geo: marked_option(inference_geo, replacement),
-            output_config: opaque_option(output_config),
-            thinking: opaque_option(thinking),
-            top_k,
-            user_profile_id: marked_option(user_profile_id, replacement),
-        },
-        ApiSpecificRequest::OpenAIChat {
-            audio,
-            frequency_penalty,
-            function_call,
-            functions,
-            logit_bias,
-            logprobs,
-            modalities,
-            moderation,
-            n,
-            prediction,
-            presence_penalty,
-            prompt_cache_key,
-            prompt_cache_options,
-            prompt_cache_retention,
-            reasoning_effort,
-            response_format,
-            safety_identifier,
-            seed,
-            stream_options,
-            verbosity,
-            web_search_options,
-        } => ApiSpecificRequest::OpenAIChat {
-            audio: opaque_option(audio),
-            frequency_penalty,
-            function_call: opaque_option(function_call),
-            functions: functions.map(|values| values.into_iter().map(|_| empty_object()).collect()),
-            logit_bias: opaque_option(logit_bias),
-            logprobs,
-            modalities: modalities.map(|values| {
-                values
-                    .into_iter()
-                    .map(|value| preserve_known_string(value, &["text", "audio"], replacement))
-                    .collect()
-            }),
-            moderation: opaque_option(moderation),
-            n,
-            prediction: opaque_option(prediction),
-            presence_penalty,
-            prompt_cache_key: marked_option(prompt_cache_key, replacement),
-            prompt_cache_options: opaque_option(prompt_cache_options),
-            prompt_cache_retention: marked_option(prompt_cache_retention, replacement),
-            reasoning_effort: marked_option(reasoning_effort, replacement),
-            response_format: opaque_option(response_format),
-            safety_identifier: marked_option(safety_identifier, replacement),
-            seed,
-            stream_options: opaque_option(stream_options),
-            verbosity: marked_option(verbosity, replacement),
-            web_search_options: opaque_option(web_search_options),
-        },
-        ApiSpecificRequest::OpenAIResponses {
-            background,
-            context_management,
-            conversation,
-            moderation,
-            prompt,
-            prompt_cache_key,
-            prompt_cache_options,
-            prompt_cache_retention,
-            safety_identifier,
-            stream_options,
-            text,
-        } => ApiSpecificRequest::OpenAIResponses {
-            background: background.map(|_| false),
-            context_management: opaque_option(context_management),
-            conversation: opaque_option(conversation),
-            moderation: opaque_option(moderation),
-            prompt: opaque_option(prompt),
-            prompt_cache_key: marked_option(prompt_cache_key, replacement),
-            prompt_cache_options: opaque_option(prompt_cache_options),
-            prompt_cache_retention: marked_option(prompt_cache_retention, replacement),
-            safety_identifier: marked_option(safety_identifier, replacement),
-            stream_options: opaque_option(stream_options),
-            text: opaque_option(text),
-        },
-        ApiSpecificRequest::OCIGenAI {
-            compartment_id,
-            serving_mode,
-            api_format,
-        } => ApiSpecificRequest::OCIGenAI {
-            compartment_id: marked_option(compartment_id, replacement),
-            serving_mode: opaque_option(serving_mode),
-            api_format: api_format.map(|value| {
-                preserve_known_string(value, &["GENERIC", "COHERE", "COHEREV2"], replacement)
-            }),
-        },
-        ApiSpecificRequest::Custom { .. } => ApiSpecificRequest::Custom {
-            api_name: replacement.to_string(),
-            data: empty_object(),
-        },
     }
 }
 
@@ -962,5 +899,28 @@ fn provider_from_normalized_request(request: &AnnotatedLlmRequest) -> Option<&'s
         }
         ApiSpecificRequest::OCIGenAI { .. } => Some("oci.genai"),
         ApiSpecificRequest::Custom { .. } => None,
+    }
+}
+
+fn request_surface_from_annotation(request: &AnnotatedLlmRequest) -> Option<ProviderSurface> {
+    match request.api_specific.as_ref()? {
+        ApiSpecificRequest::AnthropicMessages { .. } => Some(ProviderSurface::AnthropicMessages),
+        ApiSpecificRequest::OpenAIChat { .. } => Some(ProviderSurface::OpenAIChat),
+        ApiSpecificRequest::OpenAIResponses { .. } => Some(ProviderSurface::OpenAIResponses),
+        ApiSpecificRequest::OCIGenAI { .. } => Some(ProviderSurface::OCIGenAI),
+        ApiSpecificRequest::Custom { .. } => None,
+    }
+}
+
+fn response_surface_from_annotation(response: &AnnotatedLlmResponse) -> Option<ProviderSurface> {
+    match response.api_specific.as_ref()? {
+        ApiSpecificResponse::OpenAIChat { .. } => Some(ProviderSurface::OpenAIChat),
+        ApiSpecificResponse::OpenAIResponses { .. } => Some(ProviderSurface::OpenAIResponses),
+        ApiSpecificResponse::AnthropicMessages { .. } => Some(ProviderSurface::AnthropicMessages),
+        ApiSpecificResponse::OCIGenAI { .. } => Some(ProviderSurface::OCIGenAI),
+        ApiSpecificResponse::GeminiGenerateContent { .. } => {
+            Some(ProviderSurface::GeminiGenerateContent)
+        }
+        ApiSpecificResponse::Custom { .. } => None,
     }
 }

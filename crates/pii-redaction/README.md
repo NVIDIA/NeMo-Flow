@@ -132,22 +132,25 @@ priority = 80
 preset = "trajectory_context"
 ```
 
-The preset empties raw LLM and tool payloads, headers, generic event data and
-metadata, provider-native values, category-profile extras, and unknown custom
-mark payloads. Present opaque JSON values become `{}`. The reserved
-`nemo_relay.log.severity` mark metadata field is restored in canonical form when
-valid. Set `custom_mark_payload_policy = "preserve"` only when an unknown custom
-mark producer is trusted and its original payload must remain available.
+The preset discards original LLM request and response payloads and generates a
+minimal provider-shaped projection from sanitized normalized annotations.
+Unknown provider fields, extensions, additional choices or candidates, headers,
+provider-native values, generic event data and metadata, category-profile extras,
+and unknown custom-mark payloads cannot pass through that projection. Present
+opaque typed JSON values become `{}`. The reserved `nemo_relay.log.severity` mark
+metadata field is restored in canonical form when valid. Set
+`custom_mark_payload_policy = "preserve"` only when an unknown custom-mark
+producer is trusted and its original payload must remain available.
 
 Normalized LLM annotations retain message roles and content-part kinds; model,
 tool, provider, and metric names; request tuning parameters; finish reasons;
 token and cache usage; and normalized cost amounts, currency, and source
 classification. Content strings and application identifiers use the configured
-replacement, which defaults to `[REDACTED]`. Opaque typed fields become `{}`,
-unapproved numbers become `0`, and unapproved booleans become `false`.
-Pricing provenance, routing metadata, optimization contribution evidence, and
-unknown fields are discarded. Relay event, parent, trace, and span identifiers
-are not sanitizer fields, so trajectory hierarchy remains available.
+replacement, which defaults to `[REDACTED]`. Opaque typed fields become `{}`;
+approved typed numeric and boolean analytics remain available. Pricing provenance,
+routing metadata, optimization contribution evidence, and unknown fields are
+discarded. Relay event, parent, trace, and span identifiers are not sanitizer
+fields, so trajectory hierarchy remains available.
 
 Provider, model, tool, and metric names are intentional free-form exceptions.
 Producers must not place user content, secrets, or personal identifiers in those
