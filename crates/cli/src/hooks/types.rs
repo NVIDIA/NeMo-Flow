@@ -26,7 +26,6 @@ impl HookForwardRequest {
             || self.generation_file.is_some()
             || self.generation_token.is_some()
             || self.forward_only
-            || self.transparent_run
             || self.profile.is_some()
             || self.session_metadata.is_some()
             || self.gateway_mode.is_some()

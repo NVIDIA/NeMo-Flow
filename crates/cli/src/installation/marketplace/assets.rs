@@ -118,6 +118,6 @@ pub(super) fn plugin_hooks(
     generation_fence: &Path,
     generation_token: &str,
 ) -> Result<Value, String> {
-    let hook_config = generation_fence.with_file_name(".nemo-relay-hook-config.json");
+    let hook_config = crate::hooks::persistent_hook_config_path(generation_fence);
     host.plugin_hooks(relay, generation_fence, generation_token, &hook_config)
 }

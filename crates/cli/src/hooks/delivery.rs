@@ -22,6 +22,12 @@ const HOOK_FORWARD_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub(crate) async fn hook_forward(mut command: HookForwardRequest) -> Result<(), CliError> {
     let fail_closed = command.failure_policy.fail_closed();
+    // Persistent hooks do not carry this marker, so they can become inert without reading a
+    // stale configuration file while a process-private transparent gateway is active. Generated
+    // transparent wrappers do carry it and still load their private configuration fail-closed.
+    if transparent_hook_is_inert(&command) {
+        return Ok(());
+    }
     if let Some(path) = command.hook_config.clone()
         && let Err(error) =
             super::HookCommandConfig::load(&path).and_then(|config| config.apply(&mut command))
@@ -32,12 +38,6 @@ pub(crate) async fn hook_forward(mut command: HookForwardRequest) -> Result<(), 
         validate_optional_json("session metadata", command.session_metadata.as_deref())
     {
         return handle_hook_error(error, fail_closed);
-    }
-    // A transparent wrapper can coexist with any installed Relay plugin. Its process marker makes
-    // persistent plugin hooks inert, while only the wrapper-owned command carries
-    // `--transparent-run` and forwards to the process-private gateway.
-    if transparent_run_active() && !command.transparent_run {
-        return Ok(());
     }
     let destination = hook_destination(&command);
     let persistent = match persistent_gateway(&destination) {
@@ -104,6 +104,10 @@ pub(crate) async fn hook_forward(mut command: HookForwardRequest) -> Result<(), 
         Err(error) => return handle_hook_error(error, fail_closed),
     };
     handle_hook_forward_response(response, fail_closed).await
+}
+
+pub(crate) fn transparent_hook_is_inert(command: &HookForwardRequest) -> bool {
+    transparent_run_active() && !command.transparent_run
 }
 
 fn persistent_gateway(

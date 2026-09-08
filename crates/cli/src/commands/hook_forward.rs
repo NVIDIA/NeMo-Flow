@@ -22,7 +22,6 @@ pub(crate) struct HookForwardCommand {
             "generation_file",
             "generation_token",
             "forward_only",
-            "transparent_run",
             "profile",
             "session_metadata",
             "gateway_mode"

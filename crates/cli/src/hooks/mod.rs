@@ -17,7 +17,9 @@ pub(crate) use delivery::hook_forward;
 #[cfg(test)]
 pub(crate) use delivery::send_verified_hook_forward_request;
 #[cfg(test)]
-pub(crate) use delivery::{gateway_headers, insert_header, read_hook_payload_from};
+pub(crate) use delivery::{
+    gateway_headers, insert_header, read_hook_payload_from, transparent_hook_is_inert,
+};
 #[cfg(test)]
 pub(crate) use destination::{
     HookGatewayLifecycle, resolve_hook_destination, transparent_gateway_spec,
@@ -25,8 +27,8 @@ pub(crate) use destination::{
 #[cfg(test)]
 pub(crate) use encoding::transparent_hook_forward_commands;
 pub(crate) use encoding::{
-    GeneratedHookCommands, generated_policy_hooks, persistent_hook_forward_commands,
-    transparent_hook_forward_commands_with_config,
+    GeneratedHookCommands, generated_policy_hooks, persistent_hook_config_path,
+    persistent_hook_forward_commands, transparent_hook_forward_commands_with_config,
 };
 #[cfg(test)]
 pub(crate) use encoding::{

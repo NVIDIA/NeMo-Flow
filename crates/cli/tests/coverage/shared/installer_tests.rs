@@ -26,6 +26,18 @@ fn hook_request(agent: CodingAgent) -> HookForwardRequest {
     }
 }
 
+fn write_private_hook_config(path: &std::path::Path, contents: &str) {
+    std::fs::write(path, contents).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    #[cfg(windows)]
+    crate::filesystem::protect_private_windows_path(path).unwrap();
+}
+
 #[test]
 fn private_hook_config_round_trips_and_hydrates_a_hook_request() {
     let directory = tempfile::tempdir().unwrap();
@@ -36,6 +48,7 @@ fn private_hook_config_round_trips_and_hydrates_a_hook_request() {
 
     let config = HookCommandConfig::load(&path).unwrap();
     let mut request = hook_request(CodingAgent::Codex);
+    request.transparent_run = true;
     config.apply(&mut request).unwrap();
     assert_eq!(
         request.gateway_url.as_deref(),
@@ -78,11 +91,10 @@ fn private_hook_config_rejects_agent_mismatch_and_inline_configuration() {
 fn private_hook_config_rejects_unknown_and_incomplete_values() {
     let directory = tempfile::tempdir().unwrap();
     let unknown = directory.path().join("unknown.json");
-    std::fs::write(
+    write_private_hook_config(
         &unknown,
         r#"{"version":1,"agent":"codex","gateway_url":"http://127.0.0.1:1234","forward_only":false,"transparent_run":true,"unexpected":true}"#,
-    )
-    .unwrap();
+    );
     assert!(
         HookCommandConfig::load(&unknown)
             .unwrap_err()
@@ -90,16 +102,65 @@ fn private_hook_config_rejects_unknown_and_incomplete_values() {
     );
 
     let incomplete = directory.path().join("incomplete.json");
-    std::fs::write(
+    write_private_hook_config(
         &incomplete,
         r#"{"version":1,"agent":"codex","gateway_url":"http://127.0.0.1:1234","generation_file":"generation","generation_token":null,"forward_only":false,"transparent_run":false}"#,
-    )
-    .unwrap();
+    );
     assert!(
         HookCommandConfig::load(&incomplete)
             .unwrap_err()
             .contains("both generation file and token")
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn private_hook_config_rejects_symlinks_and_broad_permissions() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    let directory = tempfile::tempdir().unwrap();
+    let config = directory.path().join("hook.json");
+    HookCommandConfig::transparent(CodingAgent::Codex, "http://127.0.0.1:1234")
+        .write(&config)
+        .unwrap();
+    let link = directory.path().join("hook-link.json");
+    symlink(&config, &link).unwrap();
+    assert!(
+        HookCommandConfig::load(&link)
+            .unwrap_err()
+            .contains("owner-only regular file")
+    );
+
+    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(
+        HookCommandConfig::load(&config)
+            .unwrap_err()
+            .contains("owner-only regular file")
+    );
+}
+
+#[test]
+fn transparent_run_skips_stale_persistent_hook_config_before_loading_it() {
+    let _guard = crate::test_support::ENV_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let previous = std::env::var_os(crate::configuration::TRANSPARENT_RUN_ENV);
+    // SAFETY: The process-wide environment lock is held for this test.
+    unsafe { std::env::set_var(crate::configuration::TRANSPARENT_RUN_ENV, "1") };
+    let mut request = hook_request(CodingAgent::Codex);
+    request.hook_config = Some(std::path::PathBuf::from(
+        "missing-persistent-hook-config.json",
+    ));
+    request.failure_policy = HookFailurePolicy::FailClosed;
+    let result = crate::hooks::transparent_hook_is_inert(&request);
+    // SAFETY: The process-wide environment lock is still held for this test.
+    unsafe {
+        match previous {
+            Some(value) => std::env::set_var(crate::configuration::TRANSPARENT_RUN_ENV, value),
+            None => std::env::remove_var(crate::configuration::TRANSPARENT_RUN_ENV),
+        }
+    }
+    assert!(result);
 }
 
 struct BootstrapConfigHome {
@@ -441,13 +502,13 @@ fn generated_hook_dispatch_covers_all_agents() {
             false,
         )
         .for_event("PreToolUse"),
-        "/abs/path/to/nemo-relay hook-forward codex --hook-config /private/nemo-relay-hook.json --fail-closed"
+        "/abs/path/to/nemo-relay hook-forward codex --hook-config /private/nemo-relay-hook.json --transparent-run --fail-closed"
     );
     let relay = Path::new("/opt/NeMo Relay's & tools/nemo-relay");
     assert_eq!(
         transparent_hook_forward_commands_for_platform(relay, CodingAgent::Codex, config, false)
             .for_event("SessionStart"),
-        r#"'/opt/NeMo Relay'\''s & tools/nemo-relay' hook-forward codex --hook-config /private/nemo-relay-hook.json --fail-open"#
+        r#"'/opt/NeMo Relay'\''s & tools/nemo-relay' hook-forward codex --hook-config /private/nemo-relay-hook.json --transparent-run --fail-open"#
     );
     let native =
         transparent_hook_forward_commands(Path::new("nemo-relay"), CodingAgent::Codex, config)

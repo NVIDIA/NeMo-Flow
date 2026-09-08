@@ -1570,7 +1570,7 @@ fn collect_host_plugin_readiness(
         if let Some(plugin) = readiness.plugin.as_ref() {
             let generation_fence =
                 plugin.join(crate::installation::generation::GENERATION_FILE_NAME);
-            let hook_config = plugin.join(".nemo-relay-hook-config.json");
+            let hook_config = crate::hooks::persistent_hook_config_path(&generation_fence);
             readiness.push(
                 "Generated hooks",
                 InstallGeneration::capture(generation_fence.clone()).and_then(|generation| {

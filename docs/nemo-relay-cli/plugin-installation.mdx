@@ -233,16 +233,19 @@ always terminates the gateway process tree.
 ### Hook Delivery and Upgrade Safety
 
 Before contacting the gateway, Relay rejects a fixed-endpoint `hook-forward`
-command that lacks a valid installer-owned generation fence. It uses the
-configured hook failure policy. This prevents a legacy hook retained by a host
-process from reviving a retired installation. If install or uninstall reports a
-missing or invalid generation marker, follow its cleanup instructions: close
-the host and standalone `nemo-relay mcp` processes, remove the stale
-registration and state it identifies, and then run the requested `--force`
-command.
+command that lacks a valid installer-owned generation fence. Generated
+persistent hook commands reference a private Relay-owned configuration file;
+that file contains the generation-file path and immutable generation identity.
+Relay uses the configured hook failure policy. This prevents a legacy hook
+retained by a host process from reviving a retired installation. If install or
+uninstall reports a missing or invalid generation marker, follow its cleanup
+instructions: close the host and standalone `nemo-relay mcp` processes, remove
+the stale registration and state it identifies, and then run the requested
+`--force` command.
 
-Transparent hooks embed their process-private gateway URL and never recover a
-persistent gateway, so they do not need this fence. Source plugins and custom
+Transparent hooks reference a temporary private configuration file containing
+their process-private gateway URL and never recover a persistent gateway, so
+they do not need this fence. Source plugins and custom
 automation can use `--forward-only` to contact an existing gateway without a
 fence. That mode waits for an authenticated, configuration-compatible Relay
 gateway and rejects foreign or incompatible listeners before it sends the

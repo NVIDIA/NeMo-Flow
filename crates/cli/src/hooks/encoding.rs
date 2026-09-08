@@ -3,7 +3,7 @@
 
 //! Hook definition and portable command encoding.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
@@ -58,7 +58,7 @@ pub(crate) fn persistent_hook_forward_commands(
 ) -> Result<GeneratedHookCommands, String> {
     hook_commands(
         relay,
-        &hook_config_arguments(agent, &config_path(generation_file)),
+        &hook_config_arguments(agent, &persistent_hook_config_path(generation_file), false),
     )
 }
 
@@ -68,7 +68,10 @@ pub(crate) fn transparent_hook_forward_commands(
     agent: CodingAgent,
     gateway_url: &str,
 ) -> Result<GeneratedHookCommands, String> {
-    hook_commands(relay, &hook_config_arguments(agent, Path::new(gateway_url)))
+    hook_commands(
+        relay,
+        &hook_config_arguments(agent, Path::new(gateway_url), true),
+    )
 }
 
 pub(crate) fn transparent_hook_forward_commands_with_config(
@@ -76,7 +79,7 @@ pub(crate) fn transparent_hook_forward_commands_with_config(
     agent: CodingAgent,
     hook_config: &Path,
 ) -> Result<GeneratedHookCommands, String> {
-    hook_commands(relay, &hook_config_arguments(agent, hook_config))
+    hook_commands(relay, &hook_config_arguments(agent, hook_config, true))
 }
 
 #[cfg(test)]
@@ -88,7 +91,7 @@ pub(crate) fn transparent_hook_forward_commands_for_platform(
 ) -> GeneratedHookCommands {
     hook_commands_for_platform(
         relay,
-        &hook_config_arguments(agent, Path::new(gateway_url)),
+        &hook_config_arguments(agent, Path::new(gateway_url), true),
         windows,
     )
 }
@@ -103,22 +106,30 @@ pub(crate) fn persistent_hook_forward_commands_for_platform(
 ) -> GeneratedHookCommands {
     hook_commands_for_platform(
         relay,
-        &hook_config_arguments(agent, &config_path(generation_file)),
+        &hook_config_arguments(agent, &persistent_hook_config_path(generation_file), false),
         windows,
     )
 }
 
-fn config_path(generation_file: &Path) -> std::path::PathBuf {
+pub(crate) fn persistent_hook_config_path(generation_file: &Path) -> PathBuf {
     generation_file.with_file_name(".nemo-relay-hook-config.json")
 }
 
-pub(super) fn hook_config_arguments(agent: CodingAgent, hook_config: &Path) -> Vec<String> {
-    vec![
+pub(super) fn hook_config_arguments(
+    agent: CodingAgent,
+    hook_config: &Path,
+    transparent_run: bool,
+) -> Vec<String> {
+    let mut arguments = vec![
         "hook-forward".into(),
         agent.as_arg().into(),
         "--hook-config".into(),
         hook_config.display().to_string(),
-    ]
+    ];
+    if transparent_run {
+        arguments.push("--transparent-run".into());
+    }
+    arguments
 }
 
 fn hook_commands(relay: &Path, arguments: &[String]) -> Result<GeneratedHookCommands, String> {

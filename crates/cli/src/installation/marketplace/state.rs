@@ -74,7 +74,7 @@ impl PluginLayout {
             host.install_arg()
         ));
         let hooks_path = plugin_root.join("hooks").join("hooks.json");
-        let hook_config = plugin_root.join(".nemo-relay-hook-config.json");
+        let hook_config = crate::hooks::persistent_hook_config_path(&generation_fence);
         let state_path = state_path(host, install_dir);
         Self {
             host_arg: host.install_arg(),
