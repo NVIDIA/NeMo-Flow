@@ -25,7 +25,8 @@ SPDX-License-Identifier: Apache-2.0
   Python, and Node.js. Go and the raw C FFI are experimental and source-first.
 - Scope stacks establish ownership, visibility, cleanup, and event parentage.
   Middleware and plugins operate within that scope model; events are emitted in
-  ATOF form and consumed by subscribers or exporters.
+  Agent Trajectory Observability Format (ATOF) and consumed by subscribers or
+  exporters.
 - A public or observable runtime change requires identifying which bindings
   expose the affected contract. Keep those surfaces aligned, but do not modify
   or test an unrelated binding solely because the implementation is in Rust.

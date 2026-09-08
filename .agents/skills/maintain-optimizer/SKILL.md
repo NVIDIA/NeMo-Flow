@@ -61,4 +61,3 @@ See `docs/configure-plugins/adaptive/configuration.mdx` and
 - `docs/configure-plugins/adaptive/adaptive-hints.mdx`
 - `docs/build-plugins/about.mdx`
 - `docs/build-plugins/configuration-and-validation.mdx`
-- `docs/configure-plugins/about.mdx`

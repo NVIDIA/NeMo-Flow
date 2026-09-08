@@ -477,8 +477,8 @@ Common checks include:
 ### Where Are Release Notes?
 
 Use [Release Notes](/about-nemo-relay/release-notes) for
-documentation-visible release status. Complete release history is published
-through the repository release page when that page is available.
+documentation-visible release status. [GitHub Releases](https://github.com/NVIDIA/NeMo-Relay/releases)
+contains the complete release history.
 
 ### Where Do I Report Issues?
 
@@ -512,7 +512,8 @@ Choose the smallest validation set that covers the touched surface:
 - Python binding changes: `just test-python`.
 - Node.js binding changes: `just test-node`.
 - Go binding changes: `just test-go`.
-- Documentation changes: `just docs`; also run `just docs-linkcheck` when links change.
+- Documentation changes: `just docs`; `just docs-linkcheck` is an equivalent
+  compatibility entrypoint, not an additional check.
 
 Refer to [Testing and Documentation](/contribute/testing-and-docs) for the
 current contribution workflow.

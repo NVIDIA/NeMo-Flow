@@ -56,9 +56,10 @@ OpenTelemetry projections.
 
 - Run the affected Rust crate tests plus `just test-rust` if event
   fields changed.
-- Run only the binding suites whose native config or lifecycle contract
-  changed.
-- Update and validate docs or examples only when the public workflow changed.
+- Run only the binding suites whose exposed configuration, lifecycle, event, or
+  exporter contract changed.
+- Update and validate docs or examples when the public workflow, documented
+  observability contract, or emitted output changed.
 
 ## References
 

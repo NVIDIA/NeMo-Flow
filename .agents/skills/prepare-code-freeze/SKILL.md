@@ -32,8 +32,9 @@ This workflow assumes `upstream` is the NVIDIA repository remote
    `docs/code-freeze-<major>.<minor>`.
 5. Update `.github/nightly-alpha-branches.yaml` to include the new release
    branch.
-6. Run `just set-version <next-version>` to bump all release-versioned Cargo,
-   Node, OpenClaw, and lockfile surfaces on `main`.
+6. Run `just set-version <next-version>` to update all project-owned
+   unified-release version surfaces on `main`, including Cargo, Python, Node,
+   plugins, lockfiles, and coding-agent manifests.
    Regenerate the dynamic worker-plugin fixture lockfile so its path
    dependencies use the new workspace version:
 
@@ -71,7 +72,7 @@ This workflow assumes `upstream` is the NVIDIA repository remote
    - the nightly alpha branch config update
    - the `just set-version <next-version>` bump
    - documentation old-version reference updates or intentional leftovers
-   - that release-bound PRs now target the new `release/*` branch
+   - that subsequent release-bound PRs target the new `release/*` branch
 
 ## Guardrails
 

@@ -23,6 +23,8 @@ build-metadata variants.
 
 ## Workflow
 
+Use this sequence:
+
 1. Read the current version from `Cargo.toml` and choose the exact target.
 2. Compare project-owned package/workspace members and plugin manifests with
    the helpers called by `set_project_version`, paying particular attention to
@@ -41,6 +43,8 @@ build-metadata variants.
    changed. Do not run language suites for a metadata-only bump.
 
 ## Verification
+
+Before handoff, verify:
 
 - Confirm every project-owned manifest version and internal dependency resolves
   to the target SemVer or its expected PEP 440 translation, and that unrelated
