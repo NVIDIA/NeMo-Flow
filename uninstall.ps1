@@ -28,6 +28,8 @@ Options:
 Examples:
   irm https://raw.githubusercontent.com/NVIDIA/NeMo-Relay/main/uninstall.ps1 | iex
   .\uninstall.ps1 -InstallDir "$HOME\bin"
+  iwr https://raw.githubusercontent.com/NVIDIA/NeMo-Relay/main/uninstall.ps1 -OutFile uninstall.ps1
+  .\uninstall.ps1 -Force
 
 This removes only the installed CLI binary. It does not remove PATH entries,
 Relay configuration, observability output, or coding-agent integrations. It

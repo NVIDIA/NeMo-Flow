@@ -210,6 +210,14 @@ coding-agent integrations.
 `--force` is intentionally interactive; it does not terminate a detected
 coding-agent process without its own confirmation.
 
+PowerShell cannot pass script parameters through the `irm ... | iex` form. To
+use `-Force` or `-InstallDir`, download the script and invoke it directly:
+
+```powershell
+iwr https://raw.githubusercontent.com/NVIDIA/NeMo-Relay/main/uninstall.ps1 -OutFile uninstall.ps1
+.\uninstall.ps1 -Force
+```
+
 For CLI installations managed by a package manager, use that package manager
 instead:
 
