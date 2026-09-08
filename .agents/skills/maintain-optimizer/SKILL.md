@@ -1,18 +1,11 @@
 ---
 name: maintain-optimizer
-description: Maintain or extend the NeMo Relay adaptive surface across config, plugins, docs, and bindings; use this when users still say optimizer
-author: NVIDIA Corporation and Affiliates
+description: Change NeMo Relay adaptive configuration, built-in adaptive components, reports, or binding helpers; also use when the task calls this surface optimizer. Do not use for generic plugin changes.
 license: Apache-2.0
 ---
 
 
 # Maintain Adaptive Surfaces
-
-## Companion Guidance
-
-Use `karpathy-guidelines` alongside this skill for implementation or review
-work. Keep changes scoped, surface assumptions, and define focused validation
-before editing.
 
 Use this skill when changing adaptive config schema, built-in sections, shared
 plugin lifecycle, plugin registration, or binding-native helper
@@ -31,8 +24,8 @@ lifecycle:
 
 There is no separate public adaptive runtime handle.
 
-See `docs/plugins/adaptive/configuration.md` and
-`docs/about/concepts/plugins.md`.
+See `docs/configure-plugins/adaptive/configuration.mdx` and
+`docs/configure-plugins/about.mdx`.
 
 ## Keep In Sync
 
@@ -62,11 +55,10 @@ See `docs/plugins/adaptive/configuration.md` and
 
 ## References
 
-- `docs/plugins/adaptive/configuration.md`
-- `docs/plugins/adaptive/about.md`
-- `docs/plugins/adaptive/acg.md`
-- `docs/plugins/adaptive/adaptive-hints.md`
-- `docs/build-plugins/basic-guide.md`
-- `docs/build-plugins/validate-configuration.md`
-- `docs/about/concepts/plugins.md`
-- `validate-change`
+- `docs/configure-plugins/adaptive/configuration.mdx`
+- `docs/configure-plugins/adaptive/about.mdx`
+- `docs/configure-plugins/adaptive/acg.mdx`
+- `docs/configure-plugins/adaptive/adaptive-hints.mdx`
+- `docs/build-plugins/about.mdx`
+- `docs/build-plugins/configuration-and-validation.mdx`
+- `docs/configure-plugins/about.mdx`

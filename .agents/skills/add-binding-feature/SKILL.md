@@ -1,18 +1,11 @@
 ---
 name: add-binding-feature
-description: Add or change a public NeMo Relay API surface across the core runtime and every affected binding
-author: NVIDIA Corporation and Affiliates
+description: Add or change a public NeMo Relay runtime API across Rust and affected language bindings when no more specific maintainer skill owns the domain. Do not use for middleware additions, internal refactors, binding-local fixes, or docs-only changes.
 license: Apache-2.0
 ---
 
 
 # Add a Binding Feature
-
-## Companion Guidance
-
-Use `karpathy-guidelines` alongside this skill for implementation or review
-work. Keep changes scoped, surface assumptions, and define focused validation
-before editing.
 
 Use this skill when a change affects the public runtime surface and must stay in
 parity across the Rust core, FFI, and one or more bindings.
@@ -20,6 +13,7 @@ parity across the Rust core, FFI, and one or more bindings.
 Do not use this skill for:
 
 - Internal-only core refactors with no public API change
+- New middleware contracts, which use the middleware-specific workflow
 - Binding-local bug fixes that do not change shared behavior
 - Docs-only or example-only updates
 
@@ -29,13 +23,12 @@ Do not use this skill for:
    Implement the behavior first in `crates/core/src/api/` and
    related core modules such as `crates/core/src/api/runtime/`,
    `crates/core/src/codec/`, or `crates/core/src/json.rs`.
-2. **FFI / shared C surface**
-   Add or update FFI wrappers in the relevant `crates/ffi/src/api/*.rs`
-   module, re-export them through `crates/ffi/src/api/mod.rs`, and ensure the
-   generated `crates/ffi/nemo_relay.h` stays correct.
+2. **FFI / shared C surface, when affected**
+   Update `crates/ffi` and its generated header only when the capability is
+   exposed through the C ABI or Go binding.
 3. **Language-native bindings**
-   Update Python, Go, and Node.js for every surface that should expose the
-   capability.
+   Update each binding that exposes the capability; leave unrelated bindings
+   unchanged.
 4. **Language wrapper helpers**
    Update Python wrapper modules, Go shorthand packages, typed helpers, or
    adaptive/plugin helpers if the new behavior belongs there.
@@ -43,8 +36,8 @@ Do not use this skill for:
    Update reference docs, language-binding docs, and examples when the public
    surface or expected usage changed.
 6. **Validation**
-   Run the validation matrix from the `validate-change` skill for the affected
-   surfaces.
+   Follow the repository validation policy for the surfaces whose public or
+   observable behavior changed.
 
 ## Naming Conventions
 
@@ -61,17 +54,13 @@ Do not use this skill for:
 - [ ] Core function with doc comment in `crates/core/src/api/`
 - [ ] Runtime callback/state, codec, JSON, or event/tool/LLM/scope types added
       in the relevant core module if needed
-- [ ] FFI wrapper in the relevant `crates/ffi/src/api/*.rs` module and
-      re-export in `crates/ffi/src/api/mod.rs`
-- [ ] Regenerate the shared library/header path with `just build-go`
-- [ ] Python native binding in `crates/python/src/py_api/mod.rs`
-- [ ] Python wrapper with docstring in `python/nemo_relay/<module>.py`
-- [ ] Python type stubs updated in the relevant `python/nemo_relay/*.pyi` modules
-- [ ] Go wrapper in `go/nemo_relay/nemo_relay.go` with doc comment
-- [ ] Go shorthand package updated if the capability belongs there
-- [ ] Node.js binding in `crates/node/src/api/mod.rs`
+- [ ] FFI wrapper and generated header updated if the C ABI changes
+- [ ] Python native binding, wrapper, docstring, and stubs updated if exposed
+- [ ] Go wrapper and shorthand package updated if the experimental Go surface
+      exposes the capability
+- [ ] Node.js native binding and wrapper updated if exposed
 - [ ] Typed wrapper or adaptive/plugin helper surfaces updated when applicable
-- [ ] Tests added in every affected language surface
+- [ ] Meaningful tests added in every affected language surface
 - [ ] SPDX license header on any new files
 - [ ] Relevant pages under `docs/reference/` updated
 - [ ] `README.md`, `docs/getting-started/`, or binding-level READMEs updated if behavior differs by language
@@ -94,14 +83,15 @@ Lock these before implementing:
 
 ## Key References
 
-- Architecture: `docs/about/architecture.md`
-- Reference index: `docs/reference/api/index.md`
+- Architecture: `docs/about-nemo-relay/architecture.mdx`
+- Reference index: `docs/reference/api/index.mdx`
 - Getting started and binding status: `README.md`,
-  `docs/getting-started/quick-start.md`,
-  `docs/about/release-notes/support-matrix.md`
-- Typed wrappers and codecs: `docs/integrate-frameworks/using-codecs.md`,
-  `docs/integrate-frameworks/provider-codecs.md`
-- Adaptive config/plugins: `docs/about/concepts/plugins.md`,
-  `docs/build-plugins/about.md`, `docs/plugins/adaptive/configuration.md`
+  `docs/getting-started/quick-start/index.mdx`,
+  `docs/reference/support-matrix.mdx`
+- Typed wrappers and codecs: `docs/integrate-into-frameworks/using-codecs.mdx`,
+  `docs/integrate-into-frameworks/provider-codecs.mdx`
+- Adaptive config/plugins: `docs/configure-plugins/about.mdx`,
+  `docs/build-plugins/about.mdx`,
+  `docs/configure-plugins/adaptive/configuration.mdx`
 - Existing pattern: follow a surface already implemented across core, FFI,
   Python, Go, and Node.js rather than inventing a new shape

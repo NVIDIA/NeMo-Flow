@@ -1,18 +1,11 @@
 ---
 name: maintain-ci
-description: Maintain and review NeMo Relay GitHub Actions workflows with explicit per-job permissions, pinned action SHAs, deterministic caching, reusable workflow permission boundaries, and local validation
-author: NVIDIA Corporation and Affiliates
+description: Change or review NeMo Relay GitHub Actions workflows where permissions, pinned actions, caching, reusable workflows, or release gates require repository-specific handling. Do not use for ordinary source changes that merely run in CI.
 license: Apache-2.0
 ---
 
 
 # Maintain GitHub Actions CI
-
-## Companion Guidance
-
-Use `karpathy-guidelines` alongside this skill for implementation or review
-work. Keep changes scoped, surface assumptions, and define focused validation
-before editing.
 
 Use this skill when a change touches `.github/workflows/*.yml` or
 `.github/workflows/*.yaml`, or when reviewing CI behavior for security,
@@ -79,7 +72,7 @@ Start with the narrowest useful checks:
 
 ```bash
 ruby -e 'require "yaml"; Dir[".github/workflows/*.{yml,yaml}"].each { |f| YAML.load_file(f) }; puts "yaml-ok"'
-uv run pre-commit run --files .github/workflows/ci.yaml .github/workflows/ci_python.yml
+uv run pre-commit run
 ```
 
 Use ripgrep to inspect the workflow graph before editing:
@@ -98,6 +91,4 @@ source instead of assuming local success proves remote success.
 - `.github/workflows/ci_python.yml`
 - `RELEASING.md`
 - `.pre-commit-config.yaml`
-- `maintain-packaging`
-- `validate-change`
-- `maintain-dynamic-plugins`
+- `.github/ci-path-filters.yml`

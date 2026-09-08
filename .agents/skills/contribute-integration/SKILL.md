@@ -1,18 +1,11 @@
 ---
 name: contribute-integration
-description: Contribute a new or updated third-party framework integration for NeMo Relay
-author: NVIDIA Corporation and Affiliates
+description: Add or change a third-party framework integration that attaches NeMo Relay to framework tool, LLM, or lifecycle boundaries. Do not use for core runtime or binding-only changes.
 license: Apache-2.0
 ---
 
 
 # Contribute A Framework Integration
-
-## Companion Guidance
-
-Use `karpathy-guidelines` alongside this skill for implementation or review
-work. Keep changes scoped, surface assumptions, and define focused validation
-before editing.
 
 Use this skill when contributing an integration with a framework or plugin such
 as LangChain, LangGraph, Deep Agents, or OpenClaw through its public APIs.
@@ -37,4 +30,3 @@ as LangChain, LangGraph, Deep Agents, or OpenClaw through its public APIs.
 ## References
 
 - `docs/integrate-into-frameworks/about.mdx`
-- `validate-change`
