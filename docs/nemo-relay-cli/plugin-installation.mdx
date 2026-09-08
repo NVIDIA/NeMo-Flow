@@ -107,6 +107,41 @@ each user and host, even when two operations name different install
 directories. If another operation is still active after a short wait, Relay
 stops with a timeout instead of changing host-wide plugin state concurrently.
 
+### Recover a Deleted Codex Marketplace
+
+If the generated Codex marketplace directory is deleted while Codex still has
+`nemo-relay-local` registered, Codex reports the marketplace as present but
+unloadable and cannot say whether `nemo-relay-plugin` is registered. Relay
+recognizes this exact dangling state when both the expected marketplace root and
+its generation marker are absent. Recovery is explicit:
+
+```bash
+nemo-relay install codex --force
+nemo-relay uninstall codex --force
+```
+
+Use the first command to rebuild the integration or the second to finish
+removing it. The corresponding command without `--force` does not change the
+dangling state and tells you which forced command to run.
+
+Recovery reuses the surviving generation lock and fails before changing
+anything if that lock cannot be proved safe—for example, if it is missing,
+malformed, replaced, symlinked, not a regular file, or held by another process,
+or if the marketplace root or marker reappears while Relay acquires it. In that
+case, follow the manual-remediation instructions in the error instead of
+replacing the lock.
+
+During a forced reinstall, removal of the old provider and hooks, plugin
+registration, and marketplace registration is one cleanup phase. Until all
+three areas have been cleaned, a failure restores only prior state Relay can
+prove existed. After all three are clean, cleanup is committed: a later install
+failure does not recreate the dangling Codex registration. Relay keeps the
+validated lock and records the clean progress so another
+`nemo-relay install codex --force` or `nemo-relay integrations refresh` can
+retry safely. A partially failed forced uninstall is likewise retryable with
+`nemo-relay uninstall codex --force`; Relay removes the retained lock and state
+only after cleanup succeeds completely.
+
 ## What Install Changes
 
 For Claude Code and Codex, `nemo-relay install` writes a local marketplace named
@@ -207,6 +242,11 @@ nemo-relay install codex --install-dir <path-to-plugins> --force
 nemo-relay integrations refresh
 ```
 
+Refresh attempts each managed target through the same forced-install recovery
+path. If one Codex target has an unsafe surviving lock, Relay reports that
+target, continues refreshing the others, and returns an error after every
+target has been attempted.
+
 Manual MCP configurations are not changed; reinstall them through Relay if you
 want Relay to manage future refreshes.
 
@@ -239,6 +279,9 @@ that file contains the generation-file path and immutable generation identity.
 Relay uses the configured hook failure policy. This prevents a legacy hook
 retained by a host process from reviving a retired installation. If install or
 uninstall reports a missing or invalid generation marker, follow its cleanup
+instructions. If the generated Codex marketplace was deleted but its
+registration remains, use the forced recovery described above. When forced
+recovery cannot validate the surviving lock, follow the error's manual cleanup
 instructions: close the host and standalone `nemo-relay mcp` processes, remove
 the stale registration and state it identifies, and then run the requested
 `--force` command.
@@ -392,13 +435,16 @@ selections no longer parse. The `--agent` option remains supported for Claude
 Code and Codex `run` flows. Existing fenced installations can be refreshed with
 `nemo-relay install <host> --force`. Relay refuses to replace an older MCP
 installation without a valid generation marker because a cached host process
-might still be running. In that case, follow the manual cleanup steps in the
+might still be running. The exact deleted-Codex-marketplace state can be
+recovered with the forced commands described above when its surviving lock is
+safe. For other missing-marker states, follow the manual cleanup steps in the
 error before you retry the forced install.
 
 This release removes the internal `nemo-relay plugin-shim` command. Refresh a
 fenced generated installation with `nemo-relay install <host> --force`; use the
-manual cleanup described above when its generation marker is missing. For
-custom automation, use these supported replacements:
+deleted-marketplace recovery described above for that exact Codex state, and
+use manual cleanup for other missing-marker states. For custom automation, use
+these supported replacements:
 
 | Removed Internal Command | Supported Replacement |
 | --- | --- |
