@@ -991,18 +991,6 @@ fn provider_name(event: &Event) -> Option<String> {
     event
         .category_profile()
         .and_then(|profile| find_btree_string(&profile.extra, &keys))
-        .or_else(|| {
-            event
-                .metadata()
-                .and_then(Json::as_object)
-                .and_then(|value| find_string(value, &keys))
-        })
-        .or_else(|| {
-            event
-                .data()
-                .and_then(Json::as_object)
-                .and_then(|value| find_string(value, &keys))
-        })
         .or_else(|| provider_from_event_name(event.name()).map(str::to_string))
         .or_else(|| {
             event

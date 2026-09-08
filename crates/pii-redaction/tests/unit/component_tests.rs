@@ -753,6 +753,79 @@ async fn trajectory_event_profile_preserves_provider_and_marks_identifiers() {
     );
 }
 
+#[tokio::test]
+async fn trajectory_provider_does_not_promote_generic_metadata_or_data() {
+    let request: AnnotatedLlmRequest = serde_json::from_value(json!({
+        "model": "gpt-5.6-sol",
+        "messages": [{"role": "user", "content": "SECRET request"}],
+        "api_specific": {"api": "openai_responses"}
+    }))
+    .unwrap();
+    let request_data = json!({
+        "headers": {},
+        "content": {
+            "model": "gpt-5.6-sol",
+            "input": "SECRET request"
+        }
+    });
+
+    for (metadata, data) in [
+        (
+            json!({"provider": "SECRET metadata provider"}),
+            request_data.clone(),
+        ),
+        (
+            json!({}),
+            json!({
+                "headers": {},
+                "content": {
+                    "model": "gpt-5.6-sol",
+                    "input": "SECRET request"
+                },
+                "provider": "SECRET data provider"
+            }),
+        ),
+    ] {
+        let event = Event::Scope(ScopeEvent::new(
+            BaseEvent::builder()
+                .name("llm")
+                .data(data.clone())
+                .metadata(metadata.clone())
+                .build(),
+            ScopeCategory::Start,
+            Vec::new(),
+            EventCategory::llm(),
+            Some(
+                CategoryProfile::builder()
+                    .annotated_request(Arc::new(request.clone()))
+                    .build(),
+            ),
+        ));
+        let sanitized =
+            crate::builtin::event_sanitize_callback(trajectory_backend(None, "redact_all_leaves"))(
+                Arc::new(event.clone()),
+                EventSanitizeFields {
+                    data: Some(data),
+                    category_profile: event.category_profile().cloned(),
+                    metadata: Some(metadata),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(sanitized.metadata, Some(json!({})));
+        assert_eq!(
+            sanitized.category_profile.unwrap().extra,
+            BTreeMap::from([("gen_ai.provider.name".into(), json!("openai"))])
+        );
+        assert!(
+            !serde_json::to_string(&sanitized.data)
+                .unwrap()
+                .contains("SECRET")
+        );
+    }
+}
+
 fn no_codec_context() -> LlmSanitizeResponseContext {
     LlmSanitizeResponseContext::default()
 }
