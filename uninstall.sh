@@ -154,6 +154,10 @@ active_shutdown_target_exists() {
     return 1
 }
 
+process_identity() {
+    ps -p "$1" -o ppid= -o lstart= 2>/dev/null | sed -n '1p' | awk '{$1 = $1; print}'
+}
+
 describe_process() {
     process_pid=$1
     process_args=$(process_command "$process_pid")
@@ -233,8 +237,14 @@ stop_active_relay_processes() {
         if process_is_ancestor_of_uninstaller "$active_pid"; then
             error "cannot terminate process ${active_pid} from within its own process tree; rerun the uninstaller from an independent terminal"
         fi
+        confirmed_identity=$(process_identity "$active_pid")
+        [ -n "$confirmed_identity" ] || error "process ${active_pid} exited before confirmation"
         if ! confirm_shutdown "$active_pid"; then
             error "uninstall cancelled; process ${active_pid} remains active"
+        fi
+        current_identity=$(process_identity "$active_pid")
+        if [ -z "$current_identity" ] || [ "$current_identity" != "$confirmed_identity" ]; then
+            error "process ${active_pid} changed after confirmation; refusing to terminate it"
         fi
         if ! active_shutdown_target_exists "$active_pid"; then
             error "process ${active_pid} changed after confirmation; refusing to terminate it"

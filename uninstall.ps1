@@ -97,8 +97,24 @@ function Get-ActiveRelayShutdownTargets([string]$Destination) {
     return @($targets.Values)
 }
 
-function Test-ActiveRelayShutdownTarget([uint32]$ProcessId, [string]$Destination) {
-    return @(Get-ActiveRelayShutdownTargets $Destination | Where-Object { $_.ProcessId -eq $ProcessId }).Count -gt 0
+function Test-SameProcessIdentity($Expected, $Current) {
+    return $Expected.ProcessId -eq $Current.ProcessId -and
+        $Expected.ParentProcessId -eq $Current.ParentProcessId -and
+        [string]$Expected.CreationDate -eq [string]$Current.CreationDate -and
+        [string]::Equals(
+            [string]$Expected.ExecutablePath,
+            [string]$Current.ExecutablePath,
+            [System.StringComparison]::OrdinalIgnoreCase
+        )
+}
+
+function Test-ActiveRelayShutdownTarget($ExpectedProcess, [string]$Destination) {
+    foreach ($current in @(Get-ActiveRelayShutdownTargets $Destination)) {
+        if ($current.ProcessId -eq $ExpectedProcess.ProcessId) {
+            return Test-SameProcessIdentity $ExpectedProcess $current
+        }
+    }
+    return $false
 }
 
 function Format-ProcessDescription($Process) {
@@ -136,7 +152,7 @@ function Stop-ConfirmedProcessTree($Process, [string]$Destination) {
     if ($answer -notmatch '^(?i:y|yes)$') {
         Fail "uninstall cancelled; process $($Process.ProcessId) remains active"
     }
-    if (-not (Test-ActiveRelayShutdownTarget $Process.ProcessId $Destination)) {
+    if (-not (Test-ActiveRelayShutdownTarget $Process $Destination)) {
         Fail "process $($Process.ProcessId) changed after confirmation; refusing to terminate it"
     }
     & taskkill.exe /PID $Process.ProcessId /T /F | Out-Null
