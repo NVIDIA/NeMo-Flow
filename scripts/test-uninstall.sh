@@ -218,10 +218,10 @@ test_force_confirmation_controls_shutdown() {
     run_interactive_uninstaller y "$install_dir"
     assert_success
     [ ! -e "$relay_binary" ] || fail 'accepted confirmation did not remove the Relay binary'
+    wait "$session_pid" 2>/dev/null || true
     if kill -0 "$session_pid" 2>/dev/null; then
         fail 'accepted confirmation did not terminate the Relay process'
     fi
-    wait "$session_pid" 2>/dev/null || true
     active_session_pid=""
     return 0
 }
@@ -274,11 +274,11 @@ EOF
     run_interactive_uninstaller y "$install_dir"
     assert_success
     [ ! -e "$relay_binary" ] || fail 'accepted coding-agent confirmation did not remove the Relay binary'
+    wait "$agent_pid" 2>/dev/null || true
     kill -0 "$agent_pid" 2>/dev/null && fail 'accepted confirmation did not terminate the coding agent owner'
     for child_pid in $active_child_pids; do
         kill -0 "$child_pid" 2>/dev/null && fail "accepted confirmation did not terminate MCP child ${child_pid}"
     done
-    wait "$agent_pid" 2>/dev/null || true
     active_session_pid=""
     active_child_pids=""
     return 0

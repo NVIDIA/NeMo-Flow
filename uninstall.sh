@@ -205,13 +205,21 @@ terminate_process_tree() {
 wait_for_process_exit() {
     wait_pid=$1
     wait_attempt=0
-    while kill -0 "$wait_pid" 2>/dev/null; do
+    while process_is_running "$wait_pid"; do
         if [ "$wait_attempt" -ge 5 ]; then
             error "process ${wait_pid} did not stop after termination was confirmed"
         fi
         sleep 1
         wait_attempt=$((wait_attempt + 1))
     done
+}
+
+process_is_running() {
+    process_state=$(ps -p "$1" -o stat= 2>/dev/null | sed -n '1p' | awk '{$1 = $1; print}')
+    case "$process_state" in
+        ""|Z*) return 1 ;;
+    esac
+    kill -0 "$1" 2>/dev/null
 }
 
 stop_active_relay_processes() {
