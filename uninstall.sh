@@ -61,22 +61,18 @@ canonical_path() {
     printf '%s/%s\n' "$canonical_directory" "$(basename -- "$1")"
 }
 
-is_relay_process_name() {
-    case "$1" in
-        "$binary_name"|*/"$binary_name") return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
 is_installed_relay_process() {
     process_pid=$1
-    is_relay_process_name "$(process_name "$process_pid")" || return 1
+    process_executable=$(process_executable_path "$process_pid")
+    if [ -n "$process_executable" ]; then
+        [ "$process_executable" = "$destination_identity" ]
+        return
+    fi
     process_args=$(process_command "$process_pid")
     case "$process_args" in
-        *"$destination"*) return 0 ;;
+        "$destination"|"$destination "*) return 0 ;;
+        *) return 1 ;;
     esac
-    process_executable=$(process_executable_path "$process_pid")
-    [ "$process_executable" = "$destination_identity" ]
 }
 
 process_parent_pid() {
@@ -109,7 +105,7 @@ is_mcp_command() {
 }
 
 active_relay_process_pids() {
-    for process_pid in $(ps -axww -o pid=,comm=,command= | awk -v name="$binary_name" '
+    for process_pid in $(ps -axww -o pid=,command= | awk -v name="$binary_name" '
         $2 == name || $2 ~ ("/" name "$") { print $1 }
     '); do
         if is_installed_relay_process "$process_pid"; then
