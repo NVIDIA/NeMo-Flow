@@ -11,7 +11,11 @@ changes.
 
 ## Testing Rule
 
-Run tests for every language affected by your change. If you touch the core runtime, the expectation is broader because the bindings sit on top of the same behavior.
+Run tests for every language surface whose observable behavior can change. Start
+with the smallest focused test that proves the change, then run the canonical
+suite for each directly affected surface before handoff. A Rust implementation
+change does not automatically require every binding suite. Add a binding suite
+when the shared change affects that binding's public or observable contract.
 
 Run the affected targets directly:
 
@@ -43,6 +47,12 @@ fixtures inside a test case, keep real-time synchronization guards at five
 seconds or less, and use virtual time when validating timer behavior. Package
 builds and opt-in live end-to-end checks remain separate validation steps with
 their own runtime budgets.
+
+Run integration, documentation, packaging, FFI, generated-output, or build-only
+checks only when those surfaces change or the relevant test does not build
+them. Documentation, comments, mechanical metadata, and other reversible
+low-impact changes do not require language suites or tests that merely mirror
+the implementation. CI remains the broader cross-platform backstop.
 
 Use the matching build recipes when you need explicit build-only passes:
 
@@ -103,12 +113,13 @@ Before opening a PR, confirm:
 
 ## Docs Verification
 
-Use these commands to validate the Fern documentation site after docs changes.
-They regenerate the ignored Python, Node.js, and Rust API reference pages before
-checking the Fern site, including links and navigation.
+Use `just docs` to validate the Fern documentation site after relevant docs
+changes. It regenerates the ignored Python, Node.js, and Rust API reference
+pages before checking links and navigation. `just docs-linkcheck` is the
+compatibility entry point for a link-focused run; the recipes currently perform
+the same validation, so do not run both.
 
 ```bash
-just docs-linkcheck
 just docs
 ```
 

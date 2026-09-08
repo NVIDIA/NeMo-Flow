@@ -1,116 +1,65 @@
 ---
 name: update-project-version
-description: Update the NeMo Relay project version across Cargo, Node, and lockfiles without leaving release surfaces out of sync
-author: NVIDIA Corporation and Affiliates
+description: Perform a NeMo Relay project release-version change across project-owned manifests, dependencies, lockfiles, and generated attribution surfaces while keeping just set-version coverage complete. Do not use for dependency-only updates or adding a package when no project version bump is requested.
 license: Apache-2.0
 ---
 
-
 # Update Project Version
 
-## Companion Guidance
+Use this skill for project release-version changes, including prerelease and
+build-metadata variants.
 
-Use `karpathy-guidelines` alongside this skill for implementation or review
-work. Keep changes scoped, surface assumptions, and define focused validation
-before editing.
+## Invariants
 
-Use this skill when changing the released NeMo Relay version, including
-pre-release or build-metadata variants used during packaging.
-
-## Source Of Truth
-
-- `Cargo.toml` `[workspace.package].version` is the source of truth for the Rust
-  workspace and Python build versioning.
-- Keep `Cargo.toml` `[workspace.dependencies]` self-references aligned when the
-  workspace version changes.
-- `crates/node/package.json` carries its own npm package version and must stay
-  aligned with the workspace-root `package-lock.json`.
-- `integrations/openclaw/package.json` carries the OpenClaw npm plugin version
-  and must stay aligned with the workspace-root `package-lock.json`.
-- `package-lock.json` records Node package versions under
-  `packages["crates/node"].version` and
-  `packages["integrations/openclaw"].version`. The workspace-root lockfile may
-  not have a top-level `version` field.
+- `Cargo.toml` `[workspace.package].version` is the Rust source of truth.
+- `just set-version <version>` is the single repository entrypoint for updating
+  normal project-version surfaces. Do not hand-edit its existing targets.
+- Every new package or plugin that participates in the unified NeMo Relay
+  release, plus its project-version dependencies and lockfile entries, must be
+  covered by the version automation. If a value does not derive automatically,
+  update the automation in the same change that introduces it.
+- Python surfaces use PEP 440 translations where required; Cargo, npm, and
+  plugin manifests use the repository SemVer form.
 
 ## Workflow
 
-1. Read the current version from `Cargo.toml` and decide the exact target
-   version string.
-2. Run `just set-version <version>` to update release-version source files:
-   - `[workspace.package].version`
-   - `workspace.dependencies.nemo-relay.version`
-   - `workspace.dependencies.nemo-relay-adaptive.version`
-   - `workspace.dependencies.nemo-relay-pii-redaction.version`
-   - `workspace.dependencies.nemo-relay-ffi.version`
-   - `workspace.dependencies.nemo-relay-cli.version`
-   - `crates/node/package.json` `version`
-   - `integrations/openclaw/package.json` `version`
-   - `package-lock.json` `packages["crates/node"].version`
-   - `package-lock.json` `packages["integrations/openclaw"].version`
-   - `integrations/openclaw/package.json` `dependencies["nemo-relay-node"]`
-   - `package-lock.json`
-     `packages["integrations/openclaw"].dependencies["nemo-relay-node"]`
-3. If editing helper code, keep helper inputs aligned with those same fields:
-   - `set_project_version` should call the Cargo, Node, and coding-agent plugin
-     version helpers for the same target version.
-   - `set_cargo_workspace_version` should update `[workspace.package].version`
-     plus `workspace.dependencies.nemo-relay.version`,
-     `workspace.dependencies.nemo-relay-adaptive.version`,
-     `workspace.dependencies.nemo-relay-pii-redaction.version`,
-     `workspace.dependencies.nemo-relay-ffi.version`, and
-     `workspace.dependencies.nemo-relay-cli.version`.
-   - `set_node_package_versions` should update `crates/node/package.json`,
-     `integrations/openclaw/package.json`, the corresponding `package-lock.json`
-     package entries, and the OpenClaw `nemo-relay-node` dependency entries in
-     both files.
-   `set_node_package_version` remains a compatibility alias.
-   `set_npm_package_version` remains the reusable npm JSON helper for Node
-   packaging recipes.
-4. Refresh generated surfaces:
-   - Run `cargo check --workspace` to refresh `Cargo.lock` if workspace package
-     entries changed.
-   - If Cargo metadata changed and committed attribution files must stay fresh,
-     regenerate `ATTRIBUTIONS-Rust.md` with
-     `./scripts/generate_attributions.sh rust`.
-   - If `package-lock.json` changed, regenerate
-     `ATTRIBUTIONS-Node.md` with
-     `./scripts/generate_attributions.sh node`.
-5. Audit remaining references to the old version with targeted search. Separate
-   true version pins from examples, generated attribution files, and unrelated
-   third-party versions.
+Use this sequence:
 
-## Validation
+1. Read the current version from `Cargo.toml` and choose the exact target.
+2. Compare project-owned package/workspace members and plugin manifests with
+   the helpers called by `set_project_version`, paying particular attention to
+   recent or in-scope additions. A new manifest, publishable package, internal
+   dependency pinned to the project version, or lockfile package entry is a
+   signal that `just set-version` may need to change.
+3. Run `just set-version <version>`.
+4. Review the diff, then search tracked Cargo, Python, npm, lockfile, and plugin
+   manifests for the exact old version. Classify matches rather than replacing
+   them blindly: third-party pins and examples can legitimately match.
+5. If a project-owned release surface remains on the old version, update the
+   appropriate helper and rerun `just set-version <version>`. Read
+   `references/version-automation.md` only when the version topology or helper
+   implementation changes.
+6. Refresh lockfiles or attribution files only when their versioned inputs
+   changed. Do not run language suites for a metadata-only bump.
 
-- `rg -n '^version =|nemo-relay = \\{ version =|nemo-relay-adaptive = \\{ version =|nemo-relay-pii-redaction = \\{ version =|nemo-relay-ffi = \\{ version =|nemo-relay-cli = \\{ version =' Cargo.toml`
-- `rg -n '\"version\"' crates/node/package.json integrations/openclaw/package.json package-lock.json`
-- `cargo check --workspace`
-- If Rust attribution files are expected to stay current:
-  `./scripts/generate_attributions.sh rust`
-- If Node packaging changed materially: run `npm install --ignore-scripts` from
-  the repository root or stronger Node validation through `just test-node`
+## Verification
 
-## Release Notes
+Before handoff, verify:
 
-- `just package-node` and `just package-python` may set
-  temporary non-release versions for packaging. Do not commit those temporary
-  suffixes as the canonical project version unless the release process requires
-  that exact string.
+- Confirm every project-owned manifest version and internal dependency resolves
+  to the target SemVer or its expected PEP 440 translation, and that unrelated
+  versions did not change.
+- Rerun `just set-version <version>` when automation changed; it should be
+  idempotent and report no missing expected fields.
+- Use focused checks for edited helper code and targeted packaging or generated
+  output checks only for surfaces affected by the bump.
 
-## Avoid
-
-- Updating only `Cargo.toml` or only Node package metadata
-- Forgetting `Cargo.lock`, `ATTRIBUTIONS-Rust.md`, or `ATTRIBUTIONS-Node.md`
-  after changing versioned inputs that feed them
-- Doing blind repository-wide search/replace across docs and
-  generated attribution files
+Temporary versions produced by packaging recipes are not the canonical project
+version unless the release workflow explicitly requires that exact suffix.
 
 ## References
 
 - `Cargo.toml`
-- `Cargo.lock`
-- `package.json`
-- `package-lock.json`
-- `crates/node/package.json`
-- `integrations/openclaw/package.json`
 - `justfile`
-- `scripts/licensing/attributions_lockfile_md.py`
+- `references/version-automation.md` — only for adding, removing, or debugging
+  a versioned surface or version helper

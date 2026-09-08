@@ -1,18 +1,11 @@
 ---
 name: prepare-pr
-description: Prepare, open, create, publish, update, or edit a NeMo Relay pull request or PR body with the right tests, docs, contributor hygiene, and repository pull request template
-author: NVIDIA Corporation and Affiliates
+description: Prepare, create, publish, or edit a NeMo Relay pull request or its body using the repository template and contributor requirements. Do not use for code review or implementation without PR preparation.
 license: Apache-2.0
 ---
 
 
 # Prepare A PR For NeMo Relay
-
-## Companion Guidance
-
-Use `karpathy-guidelines` alongside this skill for implementation or review
-work. Keep changes scoped, surface assumptions, and define focused validation
-before editing.
 
 Use this skill at the end of a contributor or maintainer change before opening a
 pull request. Also use it whenever a user asks to create, open, publish, update,
@@ -25,18 +18,8 @@ review handoff details.
 ## Checklist
 
 - [ ] Branch scope is coherent and reviewable
-- [ ] Relevant tests passed under `validate-change`
-- [ ] Changed files were formatted with the language-native formatter
-- [ ] Any Rust change ran `just test-rust`
-- [ ] Any Rust change ran `cargo fmt --all`
-- [ ] Any Rust change ran `cargo clippy --workspace --all-targets -- -D warnings`
-- [ ] `crates/core` or `crates/adaptive` changes ran the full language matrix
-- [ ] Targeted `uv run pre-commit run --files <changed files...>` checks were used during iteration where useful
-- [ ] `uv run pre-commit run --all-files` passed or issues are understood
-- [ ] Docs and examples updated for any public behavior changes
-- [ ] Dependent maintainer or consumer skills updated when code changes affected
-      their APIs, bindings, commands, paths, packaging guidance, or best
-      practices
+- [ ] Validation results accurately report checks already run and relevant
+      omissions without widening validation solely for PR preparation
 - [ ] Pull request title follows Conventional Commit style and uses the correct
       type
 - [ ] Pull request body follows `.github/pull_request_template.md`
@@ -107,4 +90,3 @@ confirmation cannot be made, stop before opening the PR and surface the blocker.
 
 - `CONTRIBUTING.md`
 - `.github/pull_request_template.md`
-- `validate-change`

@@ -1,7 +1,6 @@
 ---
 name: prepare-code-freeze
-description: Prepare a NeMo Relay code freeze by creating the release branch, updating nightly alpha branch config, bumping main to the next version, and opening the required PR
-author: NVIDIA Corporation and Affiliates
+description: Execute a requested NeMo Relay code freeze by cutting a release branch, updating nightly alpha configuration, bumping main, and preparing the required PR. Do not use for an ordinary version bump or release-note draft.
 license: Apache-2.0
 ---
 
@@ -9,11 +8,6 @@ license: Apache-2.0
 
 Use this skill when the user asks to start, prepare, or automate a NeMo Relay
 code freeze.
-
-## Companion Guidance
-
-Use `update-project-version` for version bump semantics and `prepare-pr` before
-opening the PR.
 
 ## Workflow
 
@@ -38,8 +32,9 @@ This workflow assumes `upstream` is the NVIDIA repository remote
    `docs/code-freeze-<major>.<minor>`.
 5. Update `.github/nightly-alpha-branches.yaml` to include the new release
    branch.
-6. Run `just set-version <next-version>` to bump all release-versioned package
-   surfaces on `main`.
+6. Run `just set-version <next-version>` to update all project-owned
+   unified-release version surfaces on `main`, including Cargo, Python, Node,
+   plugins, lockfiles, and coding-agent manifests.
    Regenerate the dynamic worker-plugin fixture lockfile so its path
    dependencies use the new workspace version:
 
@@ -70,13 +65,14 @@ This workflow assumes `upstream` is the NVIDIA repository remote
 
    Any remaining documentation matches for `<old-version>` should be intentional
    and called out in the PR description.
-9. Open a PR targeting `main` using `.github/pull_request_template.md`. The PR
+9. After explicit approval to publish, open a PR targeting `main` using
+   `.github/pull_request_template.md`. The PR
    must mention:
    - the new release branch
    - the nightly alpha branch config update
    - the `just set-version <next-version>` bump
    - documentation old-version reference updates or intentional leftovers
-   - that release-bound PRs now target the new `release/*` branch
+   - that subsequent release-bound PRs target the new `release/*` branch
 
 ## Guardrails
 

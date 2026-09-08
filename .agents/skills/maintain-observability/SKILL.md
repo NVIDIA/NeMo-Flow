@@ -1,18 +1,11 @@
 ---
 name: maintain-observability
-description: Maintain or extend NeMo Relay observability surfaces across ATIF and typed OpenTelemetry projections
-author: NVIDIA Corporation and Affiliates
+description: Change NeMo Relay event fields, subscribers, ATIF output, or typed OpenTelemetry and OpenInference projections. Do not use for instrumentation examples that leave observability contracts unchanged.
 license: Apache-2.0
 ---
 
 
 # Maintain Observability Surfaces
-
-## Companion Guidance
-
-Use `karpathy-guidelines` alongside this skill for implementation or review
-work. Keep changes scoped, surface assumptions, and define focused validation
-before editing.
 
 Use this skill when changing event fields, exporter behavior, subscriber config,
 or binding parity for ATIF or the `full`, `gen_ai`, and `openinference`
@@ -63,9 +56,10 @@ OpenTelemetry projections.
 
 - Run the affected Rust crate tests plus `just test-rust` if event
   fields changed.
-- Run `just test-python`, `just test-go`, and `just test-node` when
-  binding-native config or lifecycle changed.
-- Update docs and examples in the same branch.
+- Run only the binding suites whose exposed configuration, lifecycle, event, or
+  exporter contract changed.
+- Update and validate docs or examples when the public workflow, documented
+  observability contract, or emitted output changed.
 
 ## References
 
@@ -75,4 +69,3 @@ OpenTelemetry projections.
 - `crates/core/src/observability/atif.rs`
 - `crates/core/src/observability/otel.rs`
 - `crates/core/src/observability/openinference.rs`
-- `validate-change`

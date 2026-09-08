@@ -1,18 +1,11 @@
 ---
 name: rename-surfaces
-description: Perform a coordinated repository, package, crate, module, or symbol rename across NeMo Relay
-author: NVIDIA Corporation and Affiliates
+description: Rename a NeMo Relay repository, package, crate, module, public symbol, import path, or brand surface across multiple consumers. Do not use for a file-local private rename.
 license: Apache-2.0
 ---
 
 
 # Perform A Repo Rename Or Surface Rename
-
-## Companion Guidance
-
-Use `karpathy-guidelines` alongside this skill for implementation or review
-work. Keep changes scoped, surface assumptions, and define focused validation
-before editing.
 
 Use this skill for coordinated naming changes such as repository renames, crate
 prefix changes, package/module renames, import-path changes, FFI symbol renames,
@@ -44,11 +37,10 @@ or branding text updates that must preserve functional identifiers.
 - [ ] Docs and examples updated
 - [ ] Integration packages and scripts updated
 - [ ] No stale old names remain in tracked files where they would break behavior
-- [ ] Full multi-language validation passes
+- [ ] Every surface changed by the rename has focused validation
 
 ## References
 
 - `README.md`
-- `docs/getting-started/quick-start.md`
-- `docs/reference/api/index.md`
-- `validate-change`
+- `docs/getting-started/quick-start/index.mdx`
+- `docs/reference/api/index.mdx`

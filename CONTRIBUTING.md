@@ -156,15 +156,24 @@ The hooks enforce:
 - **Rust**: FFI header sync for `crates/ffi/nemo_relay.h` through Cargo/build.rs, `cargo fmt` formatting check, `cargo clippy` lints, `cargo deny` auditing
 - **Go**: `gofmt` formatting, `go vet` static analysis
 
-To run all hooks manually against the entire codebase:
+During normal development, stage your changes and run:
 
 ```bash
-uv run pre-commit run --all-files
+uv run pre-commit run
 ```
+
+Reserve `uv run pre-commit run --all-files` for release preparation, an explicit
+review request, or reproducing the CI check job. Some hooks still run a
+workspace-level command when their configuration uses
+`pass_filenames: false`.
 
 ## Testing Requirements
 
-**Run tests for every language affected by your changes.** If your change touches the core Rust crate, run tests across all bindings since they all depend on it.
+Run tests for every language surface whose observable behavior can change. Start
+with the smallest focused test that proves the change, then run the canonical
+suite for each directly affected surface before handoff. A Rust implementation
+change does not by itself require every binding suite; add binding suites when
+the shared change affects that binding's public or observable contract.
 
 Run the affected test targets directly through the repository `justfile`:
 
@@ -176,7 +185,8 @@ just test-go
 just test-node
 ```
 
-Those target recipes are the primary entrypoints for targeted reruns as well:
+Use raw test-runner commands for a focused iteration loop when useful. The
+target recipes are the canonical surface-level checks:
 
 ```bash
 # Rust
@@ -193,7 +203,11 @@ just test-node
 
 ```
 
-When adding new functionality, include tests in the appropriate test files for each affected language binding. Tests are organized by topic: types, scope, tools, LLM, deregister, context isolation, and scope-local.
+Run integration, documentation, packaging, FFI, generated-output, or build-only
+checks only when those surfaces change or the relevant test does not build
+them. Documentation, comments, mechanical metadata, and other reversible
+low-impact changes do not need language suites or implementation-mirroring
+tests. When adding behavior, place meaningful tests in each affected surface.
 
 ## Documentation Checklist
 
@@ -227,9 +241,10 @@ This section describes how to prepare and submit changes for review.
 Complete these checks before opening or updating a pull request.
 
 1. Open or identify an issue describing the proposed enhancement or bug fix before submitting a pull request. External contributors should use a GitHub issue; NVIDIA contributors may use a GitHub or Linear issue.
-2. Ensure all pre-commit hooks pass.
-3. Run the relevant test suites and confirm they pass.
-4. Verify your changes compile cleanly with the relevant target-specific build recipe, such as `just build-rust` or `just build-python`.
+2. Run `uv run pre-commit run` against the staged changes.
+3. Run focused tests and the canonical suites for directly affected surfaces.
+4. Run a build-only recipe when packaging, generated artifacts, or a surface
+   not built by its tests changed.
 5. Update the relevant documentation entry points and references.
 6. Rebase your branch on the latest `main` to avoid merge conflicts.
 
