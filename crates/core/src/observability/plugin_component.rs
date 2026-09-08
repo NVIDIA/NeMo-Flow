@@ -31,6 +31,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value as Json};
 use uuid::Uuid;
@@ -224,6 +225,48 @@ pub struct OpenTelemetrySignalEndpointConfig {
     /// OTLP request timeout in milliseconds.
     #[serde(default = "default_timeout_millis")]
     pub timeout_millis: u64,
+    /// Optional endpoint-local trace/log delivery policy. Metric endpoints reject this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_filter: Option<OpenTelemetrySessionFilterConfig>,
+}
+
+/// Endpoint-local policy for suppressing trace and log delivery by session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum OpenTelemetrySessionFilterConfig {
+    /// Block the matching tool event and all later events for its session.
+    BlockAfterToolMatch(BlockAfterToolMatchSessionFilterConfig),
+}
+
+/// Settings for [`OpenTelemetrySessionFilterConfig::BlockAfterToolMatch`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct BlockAfterToolMatchSessionFilterConfig {
+    /// Metadata key holding the canonical session identity.
+    #[serde(default = "default_session_metadata_key")]
+    pub session_metadata_key: String,
+    /// Regular expressions matched against tool scope names.
+    pub tool_name_patterns: Vec<String>,
+    /// Handling after a match for events whose session cannot be resolved.
+    #[serde(default = "default_unattributed_events")]
+    pub unattributed_events: UnattributedEventsPolicy,
+}
+
+fn default_session_metadata_key() -> String {
+    "session_id".to_string()
+}
+fn default_unattributed_events() -> UnattributedEventsPolicy {
+    UnattributedEventsPolicy::BlockAfterMatch
+}
+
+/// Endpoint behavior for un-attributable trace/log events after a match.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum UnattributedEventsPolicy {
+    /// Drop events with no resolved session once this endpoint has observed a match.
+    BlockAfterMatch,
 }
 
 /// OTLP log pipeline settings.
@@ -378,6 +421,9 @@ pub struct OpenTelemetryEndpointConfig {
     /// How long completed scopes retain trace context for late marks, in milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completed_span_context_ttl_millis: Option<u64>,
+    /// Optional endpoint-local trace/log delivery policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_filter: Option<OpenTelemetrySessionFilterConfig>,
 }
 
 /// Multi-sink ATOF JSONL exporter config.
@@ -1492,6 +1538,121 @@ impl<T> OpenTelemetryResource<T> {
 struct IndexedOpenTelemetryResource<T> {
     index: usize,
     value: OpenTelemetryResource<T>,
+    session_filter: Option<Arc<Mutex<EndpointSessionFilter>>>,
+}
+
+/// Mutable, endpoint-local state for a session-aware delivery filter.
+struct EndpointSessionFilter {
+    session_metadata_key: String,
+    tool_name_patterns: Vec<Regex>,
+    blocked_sessions: HashSet<String>,
+    scope_sessions: HashMap<Uuid, String>,
+    block_unattributed_events: bool,
+}
+
+impl EndpointSessionFilter {
+    fn from_config(config: &OpenTelemetrySessionFilterConfig) -> PluginResult<Self> {
+        match config {
+            OpenTelemetrySessionFilterConfig::BlockAfterToolMatch(config) => {
+                if config.session_metadata_key.trim().is_empty()
+                    || config.tool_name_patterns.is_empty()
+                {
+                    return Err(PluginError::InvalidConfig(
+                        "OpenTelemetry session_filter requires a nonblank session_metadata_key and at least one tool_name_pattern".to_string(),
+                    ));
+                }
+                Ok(Self {
+                session_metadata_key: config.session_metadata_key.clone(),
+                tool_name_patterns: config.tool_name_patterns.iter().map(|pattern| {
+                    Regex::new(pattern).map_err(|error| PluginError::InvalidConfig(format!(
+                        "OpenTelemetry session_filter.tool_name_patterns contains invalid regex {pattern:?}: {error}"
+                    )))
+                }).collect::<PluginResult<Vec<_>>>()?,
+                blocked_sessions: HashSet::new(),
+                scope_sessions: HashMap::new(),
+                block_unattributed_events: false,
+                })
+            }
+        }
+    }
+
+    fn allow(&mut self, event: &Event) -> bool {
+        let session = self.resolve_session(event);
+        let is_matching_tool = event.scope_category() == Some(ScopeCategory::Start)
+            && event
+                .category()
+                .is_some_and(|category| category.as_str() == "tool")
+            && self
+                .tool_name_patterns
+                .iter()
+                .any(|pattern| pattern.is_match(event.name()));
+
+        if is_matching_tool {
+            // The configured policy is fail-closed: once a protected endpoint has
+            // observed a matching tool call, it must not leak later events that
+            // cannot be tied back to a session.
+            self.block_unattributed_events = true;
+            match &session {
+                Some(session) => {
+                    self.blocked_sessions.insert(session.clone());
+                }
+                None => {}
+            }
+            self.track_scope(event, session);
+            return false;
+        }
+
+        let allowed = match &session {
+            Some(session) => !self.blocked_sessions.contains(session),
+            None => !self.block_unattributed_events,
+        };
+        self.track_scope(event, session);
+        allowed
+    }
+
+    fn resolve_session(&self, event: &Event) -> Option<String> {
+        event
+            .metadata()
+            .and_then(Json::as_object)
+            .and_then(|metadata| metadata.get(&self.session_metadata_key))
+            .and_then(json_session_value)
+            .or_else(|| {
+                event
+                    .parent_uuid()
+                    .and_then(|parent| self.scope_sessions.get(&parent).cloned())
+            })
+            .or_else(|| self.scope_sessions.get(&event.uuid()).cloned())
+    }
+
+    fn track_scope(&mut self, event: &Event, session: Option<String>) {
+        match event.scope_category() {
+            Some(ScopeCategory::Start) => {
+                if let Some(session) = session {
+                    self.scope_sessions.insert(event.uuid(), session);
+                }
+            }
+            Some(ScopeCategory::End) => {
+                self.scope_sessions.remove(&event.uuid());
+            }
+            None => {}
+        }
+    }
+}
+
+fn json_session_value(value: &Json) -> Option<String> {
+    value
+        .as_str()
+        .map(str::to_owned)
+        .filter(|value| !value.is_empty())
+}
+
+fn build_endpoint_session_filter(
+    config: Option<&OpenTelemetrySessionFilterConfig>,
+) -> PluginResult<Option<Arc<Mutex<EndpointSessionFilter>>>> {
+    config
+        .map(EndpointSessionFilter::from_config)
+        .transpose()
+        .map(|filter| filter.map(|filter| Arc::new(Mutex::new(filter))))
 }
 
 struct ResolvedSignalEndpoints {
@@ -1557,6 +1718,7 @@ fn register_opentelemetry(
         .iter()
         .map(|subscriber| IndexedOpenTelemetryResource {
             index: subscriber.index,
+            session_filter: subscriber.session_filter.clone(),
             value: match &subscriber.value {
                 OpenTelemetryResource::Active(value) => {
                     OpenTelemetryResource::Active(value.subscriber())
@@ -1571,6 +1733,7 @@ fn register_opentelemetry(
         .iter()
         .map(|subscriber| IndexedOpenTelemetryResource {
             index: subscriber.index,
+            session_filter: subscriber.session_filter.clone(),
             value: match &subscriber.value {
                 OpenTelemetryResource::Active(value) => {
                     OpenTelemetryResource::Active(value.subscriber())
@@ -1585,6 +1748,7 @@ fn register_opentelemetry(
         .iter()
         .map(|subscriber| IndexedOpenTelemetryResource {
             index: subscriber.index,
+            session_filter: None,
             value: match &subscriber.value {
                 OpenTelemetryResource::Active(value) => {
                     let value = Arc::clone(value);
@@ -1791,6 +1955,15 @@ fn deliver_opentelemetry_callbacks(
         let Some(value) = callback.value.as_active() else {
             continue;
         };
+        if let Some(filter) = &callback.session_filter {
+            let Ok(mut filter) = filter.lock() else {
+                log::error!(target: "nemo_relay.plugin", event = "opentelemetry_session_filter_poisoned", resource_index = callback.index; "OpenTelemetry endpoint session filter was unavailable; event was dropped");
+                continue;
+            };
+            if !filter.allow(event) {
+                continue;
+            }
+        }
         if catch_unwind(AssertUnwindSafe(|| value(event))).is_err() {
             log::error!(
                 target: "nemo_relay.plugin",
@@ -1857,6 +2030,7 @@ fn build_opentelemetry_subscribers(
 ) -> PluginResult<Vec<IndexedOpenTelemetryResource<Arc<OpenTelemetrySubscriber>>>> {
     let mut subscribers = Vec::with_capacity(endpoints.len());
     for (index, endpoint) in endpoints.into_iter().enumerate() {
+        let session_filter = build_endpoint_session_filter(endpoint.session_filter.as_ref())?;
         let subscriber = build_otel_config(index, endpoint).and_then(|config| {
             OpenTelemetrySubscriber::new_for_plugin(config, index)
                 .map_err(observability_registration_error)
@@ -1865,6 +2039,7 @@ fn build_opentelemetry_subscribers(
             Ok(value) => subscribers.push(IndexedOpenTelemetryResource {
                 index,
                 value: OpenTelemetryResource::Active(Arc::new(value)),
+                session_filter,
             }),
             Err(error) => {
                 log::warn!(
@@ -1878,6 +2053,7 @@ fn build_opentelemetry_subscribers(
                 subscribers.push(IndexedOpenTelemetryResource {
                     index,
                     value: OpenTelemetryResource::Skipped(error.to_string()),
+                    session_filter,
                 });
             }
         }
@@ -1907,6 +2083,7 @@ fn resolve_signal_endpoints(
                 .map(|(index, value)| IndexedOpenTelemetryResource {
                     index,
                     value: OpenTelemetryResource::Active(value),
+                    session_filter: None,
                 })
                 .collect()
         }
@@ -1922,7 +2099,11 @@ fn resolve_signal_endpoints(
                     Ok(value) => OpenTelemetryResource::Active(value),
                     Err(error) => OpenTelemetryResource::Skipped(error.to_string()),
                 };
-                endpoints.push(IndexedOpenTelemetryResource { index, value });
+                endpoints.push(IndexedOpenTelemetryResource {
+                    index,
+                    value,
+                    session_filter: None,
+                });
             }
             endpoints
         }
@@ -1957,6 +2138,14 @@ fn validate_explicit_signal_endpoint(
     index: usize,
     endpoint: &OpenTelemetrySignalEndpointConfig,
 ) -> PluginResult<()> {
+    if signal == "metrics" && endpoint.session_filter.is_some() {
+        return Err(PluginError::InvalidConfig(format!(
+            "OpenTelemetry {signal}.endpoints[{index}].session_filter is only supported for trace and log endpoints"
+        )));
+    }
+    if let Some(filter) = &endpoint.session_filter {
+        let _ = EndpointSessionFilter::from_config(filter)?;
+    }
     if endpoint.endpoint.trim().is_empty() {
         return Err(PluginError::InvalidConfig(format!(
             "OpenTelemetry {signal}.endpoints[{index}].endpoint must be nonblank"
@@ -2001,6 +2190,7 @@ fn derive_signal_endpoint(
         service_version: trace.service_version.clone(),
         instrumentation_scope: trace.instrumentation_scope.clone(),
         timeout_millis: trace.timeout_millis,
+        session_filter: trace.session_filter.clone(),
     })
 }
 
@@ -2111,6 +2301,12 @@ fn build_opentelemetry_log_subscribers(
     let mut subscribers = Vec::with_capacity(endpoints.len());
     for endpoint in endpoints {
         let index = endpoint.index;
+        let session_filter = match &endpoint.value {
+            OpenTelemetryResource::Active(endpoint) => {
+                build_endpoint_session_filter(endpoint.session_filter.as_ref())?
+            }
+            OpenTelemetryResource::Skipped(_) => None,
+        };
         let value = match endpoint.value {
             OpenTelemetryResource::Skipped(message) => OpenTelemetryResource::Skipped(message),
             OpenTelemetryResource::Active(endpoint) => {
@@ -2136,7 +2332,11 @@ fn build_opentelemetry_log_subscribers(
                 }
             }
         };
-        subscribers.push(IndexedOpenTelemetryResource { index, value });
+        subscribers.push(IndexedOpenTelemetryResource {
+            index,
+            value,
+            session_filter,
+        });
     }
     Ok(subscribers)
 }
@@ -2189,7 +2389,11 @@ fn build_opentelemetry_metric_subscribers(
                 }
             }
         };
-        subscribers.push(IndexedOpenTelemetryResource { index, value });
+        subscribers.push(IndexedOpenTelemetryResource {
+            index,
+            value,
+            session_filter: None,
+        });
     }
     Ok(subscribers)
 }
@@ -3639,6 +3843,7 @@ fn validate_opentelemetry_signal_fields(
         "service_version",
         "instrumentation_scope",
         "timeout_millis",
+        "session_filter",
     ];
     let section_fields = match signal {
         "logs" => &[
@@ -3722,6 +3927,7 @@ fn validate_opentelemetry_endpoint_fields(
         "max_export_batch_size",
         "scheduled_delay_millis",
         "completed_span_context_ttl_millis",
+        "session_filter",
     ];
     const REMOVED: &[&str] = &["semantic_selector", "capture_content"];
     let Some(endpoints) = opentelemetry
@@ -3958,6 +4164,13 @@ fn validate_opentelemetry_section(
         }
         validate_opentelemetry_batch_config(diagnostics, policy, index, endpoint);
         validate_opentelemetry_headers(diagnostics, policy, index, endpoint);
+        validate_opentelemetry_session_filter(
+            diagnostics,
+            policy,
+            "opentelemetry",
+            &format!("endpoints[{index}].session_filter"),
+            endpoint.session_filter.as_ref(),
+        );
     }
     for error in opentelemetry_destination_collision_errors(&section.endpoints) {
         diagnostics.push(ConfigDiagnostic {
@@ -4150,6 +4363,22 @@ fn validate_opentelemetry_signal_endpoint_values(
             "must be 'http_binary' or 'grpc'",
         );
     }
+    if signal == "metrics" && endpoint.session_filter.is_some() {
+        push_otel_signal_diagnostic(
+            diagnostics,
+            policy,
+            signal,
+            &format!("endpoints[{index}].session_filter"),
+            "is only supported for trace and log endpoints",
+        );
+    }
+    validate_opentelemetry_session_filter(
+        diagnostics,
+        policy,
+        &format!("opentelemetry.{signal}"),
+        &format!("endpoints[{index}].session_filter"),
+        endpoint.session_filter.as_ref(),
+    );
     validate_case_insensitive_signal_header_duplicates(
         diagnostics,
         policy,
@@ -4188,6 +4417,42 @@ fn validate_opentelemetry_signal_endpoint_values(
             );
         }
         validate_opentelemetry_header_env(diagnostics, policy, &field, variable);
+    }
+}
+
+fn validate_opentelemetry_session_filter(
+    diagnostics: &mut Vec<ConfigDiagnostic>,
+    policy: &ConfigPolicy,
+    component: &str,
+    field: &str,
+    filter: Option<&OpenTelemetrySessionFilterConfig>,
+) {
+    let Some(OpenTelemetrySessionFilterConfig::BlockAfterToolMatch(filter)) = filter else {
+        return;
+    };
+    let mut invalid = Vec::new();
+    if filter.session_metadata_key.trim().is_empty() {
+        invalid.push("session_metadata_key must be nonblank".to_string());
+    }
+    if filter.tool_name_patterns.is_empty() {
+        invalid.push("tool_name_patterns must contain at least one pattern".to_string());
+    }
+    for (index, pattern) in filter.tool_name_patterns.iter().enumerate() {
+        if let Err(error) = Regex::new(pattern) {
+            invalid.push(format!(
+                "tool_name_patterns[{index}] is not a valid regex: {error}"
+            ));
+        }
+    }
+    for message in invalid {
+        push_policy_diag(
+            diagnostics,
+            policy.unsupported_value,
+            "observability.unsupported_value",
+            Some(component.to_string()),
+            Some(field.to_string()),
+            format!("OpenTelemetry {field} {message}"),
+        );
     }
 }
 
