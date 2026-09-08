@@ -28,9 +28,17 @@ function Assert-Contains([string]$Text, [string]$Expected) {
 }
 
 function Invoke-Uninstaller {
-    param([string[]]$Arguments = @())
+    param(
+        [string[]]$Arguments = @(),
+        [AllowNull()][string]$InputText = $null
+    )
 
-    $script:RunOutput = (& $PowerShell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $Uninstaller @Arguments 2>&1 | Out-String)
+    if ($null -eq $InputText) {
+        $script:RunOutput = (& $PowerShell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $Uninstaller @Arguments 2>&1 | Out-String)
+    }
+    else {
+        $script:RunOutput = ($InputText | & $PowerShell -NoProfile -ExecutionPolicy Bypass -File $Uninstaller @Arguments 2>&1 | Out-String)
+    }
     $script:RunStatus = $LASTEXITCODE
 }
 
@@ -103,6 +111,27 @@ try {
             Assert-Failure
             Assert-Contains $RunOutput 'refusing to uninstall while active Relay processes exist'
             Assert-True (Test-Path -LiteralPath $ActiveDestination -PathType Leaf) 'uninstaller removed an active binary'
+
+            $TestsRun++
+            Invoke-Uninstaller -Arguments @('-InstallDir', $ActiveDir, '-DryRun')
+            Assert-Success
+            Assert-Contains $RunOutput 'Dry run would refuse removal until these processes exit.'
+            Assert-True (-not $ActiveProcess.HasExited) 'dry run terminated the active Relay process'
+            Assert-True (Test-Path -LiteralPath $ActiveDestination -PathType Leaf) 'dry run removed the active binary'
+
+            $TestsRun++
+            Invoke-Uninstaller -Arguments @('-InstallDir', $ActiveDir, '-Force') -InputText 'n'
+            Assert-Failure
+            Assert-Contains $RunOutput "uninstall cancelled; process $($ActiveProcess.Id) remains active"
+            Assert-True (-not $ActiveProcess.HasExited) 'rejected confirmation terminated the active Relay process'
+            Assert-True (Test-Path -LiteralPath $ActiveDestination -PathType Leaf) 'rejected confirmation removed the active binary'
+
+            $TestsRun++
+            Invoke-Uninstaller -Arguments @('-InstallDir', $ActiveDir, '-Force') -InputText 'y'
+            Assert-Success
+            $ActiveProcess.WaitForExit(5000) | Out-Null
+            Assert-True $ActiveProcess.HasExited 'accepted confirmation did not terminate the active Relay process'
+            Assert-True (-not (Test-Path -LiteralPath $ActiveDestination)) 'accepted confirmation did not remove the active binary'
         }
         finally {
             if (-not $ActiveProcess.HasExited) {
