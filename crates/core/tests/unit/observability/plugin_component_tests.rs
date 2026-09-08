@@ -5654,20 +5654,23 @@ fn session_filter_event(
     ))
 }
 
-fn email_session_filter() -> EndpointSessionFilter {
-    EndpointSessionFilter::from_config(&OpenTelemetrySessionFilterConfig::BlockAfterToolMatch(
-        BlockAfterToolMatchSessionFilterConfig {
-            session_metadata_key: "session_id".to_string(),
-            tool_name_patterns: vec!["(?i)email".to_string()],
-            unattributed_events: UnattributedEventsPolicy::BlockAfterMatch,
-        },
+fn email_session_filter() -> Arc<EndpointSessionFilter> {
+    build_endpoint_session_filter(Some(
+        &OpenTelemetrySessionFilterConfig::BlockAfterToolMatch(
+            BlockAfterToolMatchSessionFilterConfig {
+                session_metadata_key: "session_id".to_string(),
+                tool_name_patterns: vec!["(?i)email".to_string()],
+                unattributed_events: UnattributedEventsPolicy::BlockAfterMatch,
+            },
+        ),
     ))
+    .unwrap()
     .unwrap()
 }
 
 #[test]
 fn endpoint_session_filter_blocks_only_the_matched_session_and_fails_closed_after_match() {
-    let mut filter = email_session_filter();
+    let filter = email_session_filter();
     let parent = uuid::Uuid::now_v7();
     let email = session_filter_event(
         "gmail.email_send",
@@ -5677,65 +5680,77 @@ fn endpoint_session_filter_blocks_only_the_matched_session_and_fails_closed_afte
         Some(parent),
         uuid::Uuid::now_v7(),
     );
-    assert!(!filter.allow(&email));
-    assert!(!filter.allow(&session_filter_event(
+    filter.observe(&email);
+    assert!(filter.blocks_event(&email));
+    let later = session_filter_event(
         "later",
         EventCategory::llm(),
         ScopeCategory::Start,
         Some(json!({"session_id": "blocked"})),
         None,
         uuid::Uuid::now_v7(),
-    )));
-    assert!(filter.allow(&session_filter_event(
+    );
+    filter.observe(&later);
+    assert!(filter.blocks_event(&later));
+    let other = session_filter_event(
         "other",
         EventCategory::llm(),
         ScopeCategory::Start,
         Some(json!({"session_id": "other"})),
         None,
         uuid::Uuid::now_v7(),
-    )));
-    assert!(!filter.allow(&session_filter_event(
+    );
+    filter.observe(&other);
+    assert!(!filter.blocks_event(&other));
+    let unattributed = session_filter_event(
         "unattributed",
         EventCategory::llm(),
         ScopeCategory::Start,
         None,
         None,
         uuid::Uuid::now_v7(),
-    )));
+    );
+    filter.observe(&unattributed);
+    assert!(filter.blocks_event(&unattributed));
 }
 
 #[test]
 fn endpoint_session_filter_resolves_a_child_session_from_scope_ancestry() {
-    let mut filter = email_session_filter();
+    let filter = email_session_filter();
     let root = uuid::Uuid::now_v7();
-    assert!(filter.allow(&session_filter_event(
+    let root_start = session_filter_event(
         "conversation",
         EventCategory::agent(),
         ScopeCategory::Start,
         Some(json!({"session_id": "blocked"})),
         None,
         root,
-    )));
-    assert!(!filter.allow(&session_filter_event(
+    );
+    filter.observe(&root_start);
+    assert!(!filter.blocks_event(&root_start));
+    let matching = session_filter_event(
         "execute_tool gmail.email_send",
         EventCategory::tool(),
         ScopeCategory::Start,
         None,
         Some(root),
         uuid::Uuid::now_v7(),
-    )));
+    );
+    filter.observe(&matching);
+    assert!(filter.blocks_event(&matching));
 }
 
 #[test]
-fn endpoint_session_filter_is_destination_local_at_delivery() {
+fn endpoint_session_filter_observation_does_not_suppress_subscriber_delivery() {
     let protected_deliveries = Arc::new(AtomicUsize::new(0));
     let debug_deliveries = Arc::new(AtomicUsize::new(0));
     let protected_counter = Arc::clone(&protected_deliveries);
     let debug_counter = Arc::clone(&debug_deliveries);
+    let protected_filter = email_session_filter();
     let callbacks: Vec<IndexedOpenTelemetryResource<EventSubscriberFn>> = vec![
         IndexedOpenTelemetryResource {
             index: 0,
-            session_filter: Some(Arc::new(Mutex::new(email_session_filter()))),
+            session_filter: Some(Arc::clone(&protected_filter)),
             value: OpenTelemetryResource::Active(Arc::new(move |_: &Event| {
                 protected_counter.fetch_add(1, Ordering::Relaxed);
             }) as EventSubscriberFn),
@@ -5764,8 +5779,12 @@ fn endpoint_session_filter_is_destination_local_at_delivery() {
         None,
         uuid::Uuid::now_v7(),
     );
+    observe_opentelemetry_session_filters(&callbacks, &[], &matching);
     deliver_opentelemetry_callbacks(&callbacks, &matching);
+    observe_opentelemetry_session_filters(&callbacks, &[], &later);
     deliver_opentelemetry_callbacks(&callbacks, &later);
-    assert_eq!(protected_deliveries.load(Ordering::Relaxed), 0);
+    assert!(protected_filter.blocks_event(&matching));
+    assert!(protected_filter.blocks_event(&later));
+    assert_eq!(protected_deliveries.load(Ordering::Relaxed), 2);
     assert_eq!(debug_deliveries.load(Ordering::Relaxed), 2);
 }
