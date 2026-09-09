@@ -21,6 +21,7 @@ use serde_json::{Map, Value as Json};
 use super::builtin::{
     CompiledBuiltinBackend, is_valid_json_pointer, llm_sanitize_request_callback,
     llm_sanitize_response_callback, tool_sanitize_callback,
+    trajectory_llm_request_projection_callback, trajectory_llm_response_projection_callback,
 };
 #[cfg(test)]
 pub(crate) use super::builtin::{hex_sha256, mask_text};
@@ -1293,11 +1294,16 @@ fn register_builtin_backend(
             sanitizer,
         )?;
     }
-    if config.input && !compiled.is_trajectory() {
+    if config.input {
+        let sanitizer = if compiled.is_trajectory() {
+            trajectory_llm_request_projection_callback(compiled.clone())
+        } else {
+            llm_sanitize_request_callback(compiled.clone())
+        };
         ctx.register_llm_sanitize_request_guardrail(
             &registration_name(profile_name, "input"),
             config.priority,
-            llm_sanitize_request_callback(compiled.clone()),
+            sanitizer,
         )?;
     }
     if config.input || config.tool_input {
@@ -1318,11 +1324,16 @@ fn register_builtin_backend(
             ),
         )?;
     }
-    if config.output && !compiled.is_trajectory() {
+    if config.output {
+        let sanitizer = if compiled.is_trajectory() {
+            trajectory_llm_response_projection_callback(compiled.clone())
+        } else {
+            llm_sanitize_response_callback(compiled.clone())
+        };
         ctx.register_llm_sanitize_response_guardrail(
             &registration_name(profile_name, "output"),
             config.priority,
-            llm_sanitize_response_callback(compiled.clone()),
+            sanitizer,
         )?;
     }
     if config.output || config.tool_output {

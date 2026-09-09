@@ -868,6 +868,215 @@ impl LlmCodec for IdentifiedRequestCodec {
     }
 }
 
+impl LlmResponseCodec for IdentifiedRequestCodec {
+    fn codec_identity(&self) -> LlmCodecIdentity {
+        self.identity.clone()
+    }
+
+    fn decode_response(
+        &self,
+        response: &Json,
+    ) -> nemo_relay::error::Result<crate::codec::response::AnnotatedLlmResponse> {
+        self.inner.decode_response(response)
+    }
+}
+
+struct WrappedResponsesCodec;
+
+impl LlmCodec for WrappedResponsesCodec {
+    fn codec_identity(&self) -> LlmCodecIdentity {
+        LlmCodecIdentity::BuiltIn(BuiltinLlmCodec::OpenAiResponses)
+    }
+
+    fn decode(&self, request: &LlmRequest) -> nemo_relay::error::Result<AnnotatedLlmRequest> {
+        let Some(payload) = request.content.get("payload") else {
+            return OpenAIResponsesCodec.decode(request);
+        };
+        OpenAIResponsesCodec.decode(&LlmRequest {
+            headers: request.headers.clone(),
+            content: payload.clone(),
+        })
+    }
+
+    fn encode(
+        &self,
+        annotated: &AnnotatedLlmRequest,
+        original: &LlmRequest,
+    ) -> nemo_relay::error::Result<LlmRequest> {
+        let Some(payload) = original.content.get("payload") else {
+            return OpenAIResponsesCodec.encode(annotated, original);
+        };
+        let encoded = OpenAIResponsesCodec.encode(
+            annotated,
+            &LlmRequest {
+                headers: original.headers.clone(),
+                content: payload.clone(),
+            },
+        )?;
+        let mut wrapped = original.clone();
+        wrapped.headers = encoded.headers;
+        wrapped.content = json!({"payload": encoded.content});
+        Ok(wrapped)
+    }
+}
+
+impl LlmResponseCodec for WrappedResponsesCodec {
+    fn codec_identity(&self) -> LlmCodecIdentity {
+        LlmCodecIdentity::BuiltIn(BuiltinLlmCodec::OpenAiResponses)
+    }
+
+    fn decode_response(
+        &self,
+        response: &Json,
+    ) -> nemo_relay::error::Result<crate::codec::response::AnnotatedLlmResponse> {
+        OpenAIResponsesCodec.decode_response(response.get("payload").unwrap_or(response))
+    }
+}
+
+#[tokio::test]
+async fn trajectory_managed_llm_events_fail_closed_for_runtime_and_opaque_codecs() {
+    let _guard = crate::plugins::pii_redaction::test_mutex().lock().unwrap();
+    reset_runtime();
+    setup_isolated_thread();
+
+    for (case, identity) in [
+        (
+            "runtime",
+            LlmCodecIdentity::Runtime("com.example.responses.v1".to_owned()),
+        ),
+        ("opaque", LlmCodecIdentity::Opaque),
+    ] {
+        initialize_plugins(plugin_config(json!({
+            "codec": "openai_responses",
+            "mode": "builtin",
+            "builtin": {"preset": "trajectory_context"}
+        })))
+        .await
+        .unwrap();
+        let subscriber_name = format!("pii-trajectory-{case}-codec");
+        let events = capture_events(&subscriber_name);
+        let request = LlmRequest {
+            headers: serde_json::Map::new(),
+            content: json!({
+                "model": "gpt-4.1-mini",
+                "input": [{
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "SECRET request"}]
+                }]
+            }),
+        };
+        let response = json!({
+            "id": "SECRET-response-id",
+            "model": "gpt-4.1-mini",
+            "status": "completed",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "SECRET response"}]
+            }]
+        });
+
+        let result = llm_call_execute(
+            LlmCallExecuteParams::builder()
+                .name("openai.responses")
+                .request(request)
+                .func(noop_openai_chat_exec_fn(response.clone()))
+                .codec(Arc::new(IdentifiedRequestCodec {
+                    identity: identity.clone(),
+                    inner: OpenAIResponsesCodec,
+                }))
+                .response_codec(Arc::new(IdentifiedRequestCodec {
+                    identity,
+                    inner: OpenAIResponsesCodec,
+                }))
+                .build(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result, response);
+        let captured = captured_events_snapshot(&events);
+        assert_eq!(captured.len(), 2);
+        assert_eq!(captured[0].input(), Some(&json!({})));
+        assert_eq!(captured[1].output(), Some(&json!({})));
+        assert!(captured[0].annotated_request().is_none());
+        assert!(captured[1].annotated_response().is_none());
+        assert!(!serde_json::to_string(&captured).unwrap().contains("SECRET"));
+
+        deregister_subscriber(&subscriber_name).unwrap();
+        clear_plugin_configuration().unwrap();
+    }
+}
+
+#[tokio::test]
+async fn trajectory_managed_llm_events_trust_the_active_builtin_codec_over_raw_shape_detection() {
+    let _guard = crate::plugins::pii_redaction::test_mutex().lock().unwrap();
+    reset_runtime();
+    setup_isolated_thread();
+
+    initialize_plugins(plugin_config(json!({
+        "codec": "openai_responses",
+        "mode": "builtin",
+        "builtin": {"preset": "trajectory_context"}
+    })))
+    .await
+    .unwrap();
+    let events = capture_events("pii-trajectory-active-codec-surface");
+    let request = LlmRequest {
+        headers: serde_json::Map::new(),
+        content: json!({
+            "payload": {
+                "model": "gpt-4.1-mini",
+                "input": "SECRET request"
+            }
+        }),
+    };
+    let response = json!({
+        "payload": {
+            "id": "SECRET-response-id",
+            "model": "gpt-4.1-mini",
+            "status": "completed",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "SECRET response"}]
+            }]
+        }
+    });
+    assert!(crate::codec::resolve::detect_request_surface(&request.content).is_none());
+    assert!(crate::codec::resolve::detect_response_surface(&response).is_none());
+
+    let result = llm_call_execute(
+        LlmCallExecuteParams::builder()
+            .name("openai.responses")
+            .request(request)
+            .func(noop_openai_chat_exec_fn(response.clone()))
+            .codec(Arc::new(WrappedResponsesCodec))
+            .response_codec(Arc::new(WrappedResponsesCodec))
+            .build(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result, response);
+    let captured = captured_events_snapshot(&events);
+    assert_eq!(captured.len(), 2);
+    assert_eq!(
+        captured[0].input().unwrap()["content"]["input"][0]["content"],
+        "[REDACTED]"
+    );
+    assert_eq!(
+        captured[1].output().unwrap()["output"][0]["content"][0]["text"],
+        "[REDACTED]"
+    );
+    assert!(captured[0].annotated_request().is_some());
+    assert!(captured[1].annotated_response().is_some());
+    assert!(!serde_json::to_string(&captured).unwrap().contains("SECRET"));
+
+    deregister_subscriber("pii-trajectory-active-codec-surface").unwrap();
+    clear_plugin_configuration().unwrap();
+}
+
 #[tokio::test]
 async fn normalized_llm_paths_use_the_active_codec_and_fail_closed_for_unknown_codecs() {
     let backend = crate::builtin::CompiledBuiltinBackend::new(

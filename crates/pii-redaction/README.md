@@ -134,6 +134,9 @@ preset = "trajectory_context"
 
 The preset discards original LLM request and response payloads and generates a
 minimal provider-shaped projection from sanitized normalized annotations.
+Only recognized built-in codec identities, or a configured legacy codec when
+no active codec is present, are eligible for projection. Runtime and opaque
+codec identities emit `{}` even when their payload resembles a built-in shape.
 Unknown provider fields, extensions, additional choices or candidates, headers,
 provider-native values, generic event data and metadata, category-profile extras,
 and unknown custom-mark payloads cannot pass through that projection. Present

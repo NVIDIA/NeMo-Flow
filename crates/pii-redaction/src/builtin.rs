@@ -922,6 +922,33 @@ pub(super) fn llm_sanitize_request_callback(
     })
 }
 
+pub(super) fn trajectory_llm_request_projection_callback(
+    backend: CompiledBuiltinBackend,
+) -> LlmSanitizeRequestFn {
+    let backend = Arc::new(backend);
+    Arc::new(move |request: LlmRequest, context| {
+        let backend = Arc::clone(&backend);
+        Box::pin(async move {
+            if matches!(context.codec(), LlmCodecIdentity::None) {
+                return Ok(backend.legacy_surface.is_some().then_some(request));
+            }
+            let projected = (|| {
+                let surface = backend.selected_surface(context.codec())?;
+                let resolved = context.resolve_codec();
+                let fallback = resolved.is_none().then(|| build_request_codec(surface));
+                let codec = resolved.as_deref().or(fallback.as_deref())?;
+                let annotated = codec.decode(&request).ok()?;
+                let sanitized = backend
+                    .trajectory
+                    .as_ref()?
+                    .sanitize_annotated_request(annotated)?;
+                crate::trajectory_projection::render_request(surface, &sanitized)
+            })();
+            Ok(projected)
+        })
+    })
+}
+
 pub(super) fn llm_sanitize_response_callback(
     backend: CompiledBuiltinBackend,
 ) -> LlmSanitizeResponseFn {
@@ -969,6 +996,33 @@ pub(super) fn llm_sanitize_response_callback(
                 );
             }
             Ok(sanitized)
+        })
+    })
+}
+
+pub(super) fn trajectory_llm_response_projection_callback(
+    backend: CompiledBuiltinBackend,
+) -> LlmSanitizeResponseFn {
+    let backend = Arc::new(backend);
+    Arc::new(move |payload: Json, context| {
+        let backend = Arc::clone(&backend);
+        Box::pin(async move {
+            if matches!(context.codec(), LlmCodecIdentity::None) {
+                return Ok(backend.legacy_surface.is_some().then_some(payload));
+            }
+            let projected = (|| {
+                let surface = backend.selected_surface(context.codec())?;
+                let resolved = context.resolve_codec();
+                let fallback = resolved.is_none().then(|| build_response_codec(surface));
+                let codec = resolved.as_deref().or(fallback.as_deref())?;
+                let annotated = codec.decode_response(&payload).ok()?;
+                let sanitized = backend
+                    .trajectory
+                    .as_ref()?
+                    .sanitize_annotated_response(annotated)?;
+                crate::trajectory_projection::render_response(surface, &sanitized)
+            })();
+            Ok(projected)
         })
     })
 }
