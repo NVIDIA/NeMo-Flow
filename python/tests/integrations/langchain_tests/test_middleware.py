@@ -862,7 +862,7 @@ def test_payload_to_model_request_leaves_chat_nvidia_model_unchanged_without_rel
     assert converted.model_settings == {"temperature": 1.0}
 
 
-def test_payload_to_model_request_keeps_generic_model_headers_in_model_settings(model_request: ModelRequest[Any]):
+def test_payload_to_model_request_does_not_inject_relay_headers_for_generic_models(model_request: ModelRequest[Any]):
     from nemo_relay.integrations.langchain._serialization import (
         model_request_to_payload,
         payload_to_model_request,
@@ -876,10 +876,93 @@ def test_payload_to_model_request_keeps_generic_model_headers_in_model_settings(
     converted = payload_to_model_request(model_request, relay_request)
 
     assert converted.model is model_request.model
+    assert converted.model_settings == {"temperature": 1.0}
+
+
+def test_payload_to_model_request_forwards_relay_headers_as_extra_headers_for_anthropic(
+    model_request: ModelRequest[Any],
+):
+    from nemo_relay.integrations.langchain._serialization import (
+        model_request_to_payload,
+        payload_to_model_request,
+    )
+
+    ChatAnthropic = pytest.importorskip("langchain_anthropic").ChatAnthropic
+    original = model_request.override(model=ChatAnthropic.model_construct(model="claude-test"))
+    relay_request = nemo_relay.LLMRequest(
+        {"x-relay-header": "value"},
+        model_request_to_payload("mock-model", original),
+    )
+
+    converted = payload_to_model_request(original, relay_request)
+
+    assert converted.model is original.model
     assert converted.model_settings == {
         "temperature": 1.0,
         "extra_headers": {"x-relay-header": "value"},
     }
+
+
+def test_payload_to_model_request_merges_relay_headers_into_configured_extra_headers(
+    model_request: ModelRequest[Any],
+):
+    from nemo_relay.integrations.langchain._serialization import (
+        model_request_to_payload,
+        payload_to_model_request,
+    )
+
+    configured_headers = {"x-team": "platform"}
+    original = model_request.override(model_settings={"temperature": 1.0, "extra_headers": configured_headers})
+    relay_request = nemo_relay.LLMRequest(
+        {"x-relay-header": "value"},
+        model_request_to_payload("mock-model", original),
+    )
+
+    converted = payload_to_model_request(original, relay_request)
+
+    assert converted.model_settings == {
+        "temperature": 1.0,
+        "extra_headers": {"x-team": "platform", "x-relay-header": "value"},
+    }
+    assert configured_headers == {"x-team": "platform"}
+
+
+def test_wrap_model_call_does_not_inject_extra_headers_for_models_that_reject_them(
+    nemo_relay_middleware: NemoRelayMiddleware,
+):
+    from langchain.agents.middleware import ModelRequest, ModelResponse
+    from langchain_core.language_models import BaseChatModel
+    from langchain_core.messages import AIMessage, HumanMessage
+    from langchain_core.outputs import ChatGeneration, ChatResult
+
+    class StrictKwargsChatModel(BaseChatModel):
+        """Provider whose SDK rejects unknown request fields, like langchain-oci."""
+
+        model: str = "strict-model"
+
+        def _generate(self, messages: Any, stop: Any = None, run_manager: Any = None, **kwargs: Any) -> ChatResult:
+            unexpected = sorted(set(kwargs) - {"temperature"})
+            if unexpected:
+                raise TypeError(f"Unrecognized keyword arguments: {', '.join(unexpected)}")
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content="strict-ok"))])
+
+        @property
+        def _llm_type(self) -> str:
+            return "strict-kwargs"
+
+    request = ModelRequest(
+        model=StrictKwargsChatModel(),
+        messages=[HumanMessage(content="hello")],
+        model_settings={"temperature": 0.0},
+    )
+
+    def handler(model_request: ModelRequest[Any]) -> ModelResponse[Any]:
+        result = model_request.model.invoke(model_request.messages, **model_request.model_settings)
+        return ModelResponse(result=[result])
+
+    response = nemo_relay_middleware.wrap_model_call(request, handler)
+
+    assert response.result[0].content == "strict-ok"
 
 
 def test_langchain_model_response_codec_decodes_text_and_tool_calls():
