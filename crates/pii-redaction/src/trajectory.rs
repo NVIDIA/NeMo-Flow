@@ -1,40 +1,33 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Structure-preserving removal of conversational trajectory content.
+//! Typed, fail-closed removal of conversational trajectory content.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use serde_json::Value as Json;
+use serde_json::{Map, Value as Json};
 
 use nemo_relay::api::event::{
     CategoryProfile, Event, LOG_SEVERITY_METADATA_KEY, LogSeverity, METRIC_DATA_SCHEMA_NAME,
     METRIC_DATA_SCHEMA_VERSION, MetricEnvelope,
 };
-use nemo_relay::codec::request::AnnotatedLlmRequest;
-use nemo_relay::codec::response::AnnotatedLlmResponse;
+use nemo_relay::api::llm::LlmRequest;
+use nemo_relay::codec::optimization::LlmOptimizationSummary;
+use nemo_relay::codec::request::{
+    AnnotatedLlmRequest, ApiSpecificRequest, ContentPart, FunctionCall, FunctionDefinition,
+    GenerationParams, Message, MessageContent, OpenAiImageUrl, ProviderNativeComponent, ToolCall,
+    ToolChoice, ToolChoiceFunction, ToolChoiceFunctionName, ToolDefinition,
+};
+use nemo_relay::codec::resolve::{
+    ProviderSurface, detect_request_surface_with_hint, detect_response_surface,
+};
+use nemo_relay::codec::response::{
+    AnnotatedLlmResponse, ApiSpecificResponse, CostEstimate, FinishReason, ResponseToolCall, Usage,
+};
 
-const TRUSTED_STRING_SCOPE_METADATA_FIELDS: &[&str] = &[
-    "nemo_relay_scope_role",
-    "agent_kind",
-    "hook_event_name",
-    "gateway_config_profile",
-    "gateway_mode",
-    "turn_source",
-    "harness",
-    "source",
-    "identity_quality",
-    "gateway_path",
-    "llm_correlation_status",
-    "llm_correlation_source",
-    "tool_correlation_status",
-    "tool_correlation_source",
-    "otel.status_code",
-    "fidelity_source",
-];
-
-const TRUSTED_BOOLEAN_SCOPE_METADATA_FIELDS: &[&str] = &["provider_payload_exact"];
+const PROVIDER_ATTRIBUTE: &str = "gen_ai.provider.name";
+const KNOWN_MARK_SUBTYPES: &[&str] = &["llm.chunk", "nemo_relay.llm.optimization", "skill.load"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum CustomMarkPayloadPolicy {
@@ -59,6 +52,12 @@ pub(super) struct TrajectorySanitizer {
     metric_string_attribute_allowlist: Arc<BTreeMap<String, BTreeSet<String>>>,
 }
 
+struct ProjectedLlmEvent {
+    data: Json,
+    annotated_request: Option<Arc<AnnotatedLlmRequest>>,
+    annotated_response: Option<Arc<AnnotatedLlmResponse>>,
+}
+
 impl TrajectorySanitizer {
     pub(super) fn new(
         replacement: String,
@@ -77,79 +76,108 @@ impl TrajectorySanitizer {
         }
     }
 
-    pub(super) fn sanitize_tool_payload(&self, value: Json) -> Json {
-        redact_all_leaves(value, &self.replacement)
-    }
-
-    pub(super) fn sanitize_provider_payload(&self, value: Json) -> Json {
-        redact_semantic_content(value, &self.replacement, None)
+    pub(super) fn sanitize_tool_payload(&self, _value: Json) -> Json {
+        empty_object()
     }
 
     pub(super) fn sanitize_annotated_request(
         &self,
         request: AnnotatedLlmRequest,
     ) -> Option<AnnotatedLlmRequest> {
-        let mut value = match serde_json::to_value(request) {
-            Ok(value) => value,
-            Err(_) => return log_annotated_llm_payload_omitted("request", "serialization failure"),
-        };
-        let preserved = take_root_fields(
-            &value,
-            &[
-                "model",
-                "tool_choice",
-                "store",
-                "previous_response_id",
-                "truncation",
-                "include",
-                "service_tier",
-                "parallel_tool_calls",
-                "max_output_tokens",
-                "max_tool_calls",
-                "top_logprobs",
-                "stream",
-            ],
-        );
-        value = redact_semantic_content(value, &self.replacement, None);
-        restore_root_fields(&mut value, preserved);
-        match serde_json::from_value(value) {
-            Ok(request) => Some(request),
-            Err(_) => log_annotated_llm_payload_omitted("request", "deserialization failure"),
-        }
+        let AnnotatedLlmRequest {
+            messages,
+            instructions,
+            model,
+            params,
+            tools,
+            tool_choice,
+            store,
+            previous_response_id,
+            truncation,
+            reasoning,
+            include,
+            user,
+            metadata,
+            service_tier: _,
+            parallel_tool_calls,
+            max_output_tokens,
+            max_tool_calls,
+            top_logprobs,
+            stream,
+            api_specific,
+            extra: _,
+        } = request;
+        Some(AnnotatedLlmRequest {
+            messages: messages
+                .into_iter()
+                .map(|message| sanitize_message(message, &self.replacement))
+                .collect(),
+            instructions: instructions
+                .map(|content| sanitize_message_content(content, &self.replacement)),
+            model,
+            params: params.map(|params| sanitize_generation_params(params, &self.replacement)),
+            tools: tools.map(|tools| {
+                tools
+                    .into_iter()
+                    .map(|tool| sanitize_tool_definition(tool, &self.replacement))
+                    .collect()
+            }),
+            tool_choice: tool_choice.map(|choice| sanitize_tool_choice(choice, &self.replacement)),
+            store,
+            previous_response_id: marked_option(previous_response_id, &self.replacement),
+            truncation: opaque_option(truncation),
+            reasoning: opaque_option(reasoning),
+            include: opaque_option(include),
+            user: marked_option(user, &self.replacement),
+            metadata: opaque_option(metadata),
+            service_tier: None,
+            parallel_tool_calls,
+            max_output_tokens,
+            max_tool_calls,
+            top_logprobs,
+            stream,
+            api_specific: api_specific
+                .map(|specific| sanitize_api_specific_request(specific, &self.replacement)),
+            extra: Map::new(),
+        })
     }
 
     pub(super) fn sanitize_annotated_response(
         &self,
         response: AnnotatedLlmResponse,
     ) -> Option<AnnotatedLlmResponse> {
-        let mut value = match serde_json::to_value(response) {
-            Ok(value) => value,
-            Err(_) => {
-                return log_annotated_llm_payload_omitted("response", "serialization failure");
-            }
-        };
-        let mut preserved = take_root_fields(
-            &value,
-            &[
-                "id",
-                "model",
-                "finish_reason",
-                "usage",
-                "optimization_summary",
-            ],
-        );
-        if let Some((_, summary)) = preserved
-            .iter_mut()
-            .find(|(field, _)| field == "optimization_summary")
-        {
-            sanitize_optimization_payloads(summary, &self.replacement);
-        }
-        value = redact_semantic_content(value, &self.replacement, None);
-        restore_root_fields(&mut value, preserved);
-        match serde_json::from_value(value) {
-            Ok(response) => Some(response),
-            Err(_) => log_annotated_llm_payload_omitted("response", "deserialization failure"),
-        }
+        let AnnotatedLlmResponse {
+            id,
+            model,
+            message,
+            tool_calls,
+            finish_reason,
+            usage,
+            optimization_summary,
+            api_specific,
+            extra: _,
+        } = response;
+        Some(AnnotatedLlmResponse {
+            id: marked_option(id, &self.replacement),
+            model,
+            message: message.map(|content| sanitize_message_content(content, &self.replacement)),
+            tool_calls: tool_calls.map(|calls| {
+                calls
+                    .into_iter()
+                    .map(|call| sanitize_response_tool_call(call, &self.replacement))
+                    .collect()
+            }),
+            finish_reason: match finish_reason {
+                Some(FinishReason::Unknown(_)) => None,
+                known => known,
+            },
+            usage: usage.map(|usage| sanitize_usage(usage, &self.replacement)),
+            optimization_summary: optimization_summary
+                .map(|summary| sanitize_optimization_summary(summary, &self.replacement)),
+            api_specific: api_specific
+                .map(|specific| sanitize_api_specific_response(specific, &self.replacement)),
+            extra: Map::new(),
+        })
     }
 
     pub(super) fn sanitize_event_fields(
@@ -158,60 +186,117 @@ impl TrajectorySanitizer {
         mut fields: nemo_relay::api::event::EventSanitizeFields,
     ) -> nemo_relay::api::event::EventSanitizeFields {
         let log_severity = valid_mark_log_severity(event, fields.metadata.as_ref());
-        if is_relay_metric_mark(event) {
+        let category = event.category().map(|category| category.as_str());
+        let unknown_custom_mark = matches!(event, Event::Mark(_))
+            && category == Some("custom")
+            && !is_known_mark_subtype(event.name());
+
+        if unknown_custom_mark
+            && self.custom_mark_payload_policy == CustomMarkPayloadPolicy::Preserve
+        {
+            return fields;
+        }
+
+        if category == Some("llm") {
+            let projected = self.project_llm_event(event, &fields);
+            fields.data = Some(
+                projected
+                    .as_ref()
+                    .map_or_else(empty_object, |projection| projection.data.clone()),
+            );
+            fields.category_profile = fields.category_profile.map(|profile| {
+                let mut profile = sanitize_category_profile_base(profile, self);
+                if let Some(projected) = projected.as_ref() {
+                    profile.annotated_request = projected.annotated_request.clone();
+                    profile.annotated_response = projected.annotated_response.clone();
+                }
+                profile
+            });
+        } else if is_relay_metric_mark(event) {
             fields.data = fields
                 .data
                 .and_then(|data| self.sanitize_metric_envelope(data));
-            fields.metadata = fields
-                .metadata
-                .map(|value| redact_semantic_content(value, &self.replacement, None));
+        } else {
+            fields.data = fields.data.map(|_| empty_object());
+        }
+        fields.metadata = fields.metadata.map(|_| empty_object());
+
+        let provider = (category == Some("llm"))
+            .then(|| provider_name(event))
+            .flatten();
+        if category != Some("llm") {
             fields.category_profile = fields
                 .category_profile
-                .and_then(|profile| sanitize_category_profile(profile, &self.replacement));
-            return restore_log_severity(fields, log_severity);
+                .map(|profile| sanitize_category_profile(profile, self));
+        }
+        if let Some(provider) = provider {
+            let profile = fields
+                .category_profile
+                .get_or_insert_with(CategoryProfile::default);
+            profile
+                .extra
+                .insert(PROVIDER_ATTRIBUTE.to_string(), Json::String(provider));
         }
 
-        let category = event.category().map(|category| category.as_str());
-        let specialized_scope =
-            matches!(event, Event::Scope(_)) && matches!(category, Some("llm" | "tool"));
-        let unknown_custom_mark = matches!(event, Event::Mark(_))
-            && category == Some("custom")
-            && !is_known_content_bearing_mark(event.name());
-
-        if unknown_custom_mark {
-            if self.custom_mark_payload_policy == CustomMarkPayloadPolicy::RedactAllLeaves {
-                fields.data = fields
-                    .data
-                    .map(|value| redact_all_leaves(value, &self.replacement));
-                fields.metadata = fields
-                    .metadata
-                    .map(|value| redact_all_leaves(value, &self.replacement));
-                fields.category_profile = fields
-                    .category_profile
-                    .and_then(|profile| redact_custom_category_profile(profile, self));
-            }
-            return restore_log_severity(fields, log_severity);
-        }
-
-        if !specialized_scope {
-            fields.data = fields
-                .data
-                .map(|value| redact_semantic_content(value, &self.replacement, None));
-        }
-        fields.metadata = fields.metadata.map(|value| {
-            if matches!(event, Event::Scope(_)) {
-                sanitize_scope_metadata(value, &self.replacement)
-            } else {
-                redact_semantic_content(value, &self.replacement, None)
-            }
-        });
-        fields.category_profile = fields
-            .category_profile
-            .and_then(|profile| sanitize_category_profile(profile, &self.replacement));
         restore_log_severity(fields, log_severity)
     }
 
-    /// Redact optional metric text without modifying required export fields.
+    fn project_llm_event(
+        &self,
+        event: &Event,
+        fields: &nemo_relay::api::event::EventSanitizeFields,
+    ) -> Option<ProjectedLlmEvent> {
+        let profile = fields.category_profile.as_ref()?;
+        match event.scope_category() {
+            Some(nemo_relay::api::event::ScopeCategory::Start) => {
+                let annotated = profile.annotated_request.as_deref()?;
+                let annotated_surface = request_surface_from_annotation(annotated);
+                let sanitized = self.sanitize_annotated_request(annotated.clone())?;
+                let data = fields
+                    .data
+                    .as_ref()
+                    .and_then(|data| serde_json::from_value::<LlmRequest>(data.clone()).ok())
+                    .and_then(|request| {
+                        let detected_surface = detect_request_surface_with_hint(
+                            &request.content,
+                            annotated_surface.and_then(provider_hint_for_surface),
+                        );
+                        let surface = annotated_surface.or(detected_surface)?;
+                        (detected_surface == Some(surface)).then_some(())?;
+                        crate::trajectory_projection::render_request(surface, &sanitized)
+                    })
+                    .and_then(|rendered| serde_json::to_value(rendered).ok())
+                    .unwrap_or_else(empty_object);
+                Some(ProjectedLlmEvent {
+                    data,
+                    annotated_request: Some(Arc::new(sanitized)),
+                    annotated_response: None,
+                })
+            }
+            Some(nemo_relay::api::event::ScopeCategory::End) => {
+                let annotated = profile.annotated_response.as_deref()?;
+                let sanitized = self.sanitize_annotated_response(annotated.clone())?;
+                let data = fields
+                    .data
+                    .as_ref()
+                    .and_then(|payload| {
+                        let surface = response_surface_from_annotation(annotated)
+                            .or_else(|| detect_response_surface(payload))?;
+                        (detect_response_surface(payload) == Some(surface)).then_some(())?;
+                        crate::trajectory_projection::render_response(surface, &sanitized)
+                    })
+                    .unwrap_or_else(empty_object);
+                Some(ProjectedLlmEvent {
+                    data,
+                    annotated_request: None,
+                    annotated_response: Some(Arc::new(sanitized)),
+                })
+            }
+            None => None,
+        }
+    }
+
+    /// Redact optional metric text and reject every attribute that is not explicitly allowed.
     fn sanitize_metric_envelope(&self, data: Json) -> Option<Json> {
         let mut envelope = match serde_json::from_value::<MetricEnvelope>(data) {
             Ok(envelope) => envelope,
@@ -230,9 +315,8 @@ impl TrajectorySanitizer {
                 .take()
                 .map(|_| (*self.replacement).clone());
             measurement.attributes = measurement.attributes.take().map(|attributes| {
-                redact_metric_string_attributes(
+                retain_allowed_metric_string_attributes(
                     attributes,
-                    &self.replacement,
                     &self.metric_string_attribute_allowlist,
                 )
             });
@@ -249,17 +333,6 @@ impl TrajectorySanitizer {
     }
 }
 
-fn log_annotated_llm_payload_omitted<T>(direction: &str, reason: &str) -> Option<T> {
-    log::warn!(
-        target: "nemo_relay.plugin",
-        event = "pii_llm_payload_omitted",
-        codec_kind = "annotated",
-        reason;
-        "PII redaction omitted an annotated LLM {direction} payload"
-    );
-    None
-}
-
 fn log_metric_envelope_omitted(reason: &str) -> Option<Json> {
     log::warn!(
         target: "nemo_relay.plugin",
@@ -268,6 +341,650 @@ fn log_metric_envelope_omitted(reason: &str) -> Option<Json> {
         "PII redaction omitted a metric envelope"
     );
     None
+}
+
+fn empty_object() -> Json {
+    Json::Object(Map::new())
+}
+
+fn replace_optional_json(value: &mut Option<Json>) {
+    if value.is_some() {
+        *value = Some(empty_object());
+    }
+}
+
+fn replace_optional_string(value: &mut Option<String>, replacement: &str) {
+    if value.is_some() {
+        *value = Some(replacement.to_string());
+    }
+}
+
+fn sanitize_generation_params(params: GenerationParams, replacement: &str) -> GenerationParams {
+    let GenerationParams {
+        temperature,
+        max_tokens,
+        top_p,
+        stop,
+    } = params;
+    GenerationParams {
+        temperature,
+        max_tokens,
+        top_p,
+        stop: stop.map(|values| {
+            values
+                .into_iter()
+                .map(|_| replacement.to_string())
+                .collect()
+        }),
+    }
+}
+
+fn sanitize_message(message: Message, replacement: &str) -> Message {
+    match message {
+        Message::System { content, name } => Message::System {
+            content: sanitize_message_content(content, replacement),
+            name: name.map(|_| replacement.to_string()),
+        },
+        Message::User { content, name } => Message::User {
+            content: sanitize_message_content(content, replacement),
+            name: name.map(|_| replacement.to_string()),
+        },
+        Message::Developer { content, name } => Message::Developer {
+            content: sanitize_message_content(content, replacement),
+            name: name.map(|_| replacement.to_string()),
+        },
+        Message::Assistant {
+            content,
+            tool_calls,
+            name,
+        } => Message::Assistant {
+            content: content.map(|content| sanitize_message_content(content, replacement)),
+            tool_calls: tool_calls.map(|calls| {
+                calls
+                    .into_iter()
+                    .map(|call| sanitize_tool_call(call, replacement))
+                    .collect()
+            }),
+            name: name.map(|_| replacement.to_string()),
+        },
+        Message::Tool {
+            content,
+            tool_call_id: _,
+        } => Message::Tool {
+            content: sanitize_message_content(content, replacement),
+            tool_call_id: replacement.to_string(),
+        },
+        Message::Function { content, name } => Message::Function {
+            content: content.map(|_| replacement.to_string()),
+            name,
+        },
+        Message::ToolCallItem {
+            id,
+            call_id: _,
+            name,
+            arguments: _,
+            extra: _,
+        } => Message::ToolCallItem {
+            id: id.map(|_| replacement.to_string()),
+            call_id: replacement.to_string(),
+            name,
+            arguments: empty_object(),
+            extra: Map::new(),
+        },
+        Message::ToolResultItem {
+            id,
+            call_id: _,
+            output: _,
+            extra: _,
+        } => Message::ToolResultItem {
+            id: id.map(|_| replacement.to_string()),
+            call_id: replacement.to_string(),
+            output: empty_object(),
+            extra: Map::new(),
+        },
+        Message::ProviderNative {
+            provider,
+            kind,
+            value: _,
+        } => Message::ProviderNative {
+            provider,
+            kind: sanitize_native_kind(kind, replacement),
+            value: empty_object(),
+        },
+    }
+}
+
+fn sanitize_message_content(content: MessageContent, replacement: &str) -> MessageContent {
+    match content {
+        MessageContent::Text(_) => MessageContent::Text(replacement.to_string()),
+        MessageContent::Parts(parts) => MessageContent::Parts(
+            parts
+                .into_iter()
+                .map(|part| sanitize_content_part(part, replacement))
+                .collect(),
+        ),
+    }
+}
+
+fn sanitize_content_part(part: ContentPart, replacement: &str) -> ContentPart {
+    match part {
+        ContentPart::Text { text: _, extra: _ } => ContentPart::Text {
+            text: replacement.to_string(),
+            extra: Map::new(),
+        },
+        ContentPart::ImageUrl {
+            image_url,
+            extra: _,
+        } => ContentPart::ImageUrl {
+            image_url: sanitize_image_url(image_url, replacement),
+            extra: Map::new(),
+        },
+        ContentPart::Image { image: _, extra: _ } => ContentPart::Image {
+            image: empty_object(),
+            extra: Map::new(),
+        },
+        ContentPart::Audio { audio: _, extra: _ } => ContentPart::Audio {
+            audio: empty_object(),
+            extra: Map::new(),
+        },
+        ContentPart::File { file: _, extra: _ } => ContentPart::File {
+            file: empty_object(),
+            extra: Map::new(),
+        },
+        ContentPart::Refusal {
+            refusal: _,
+            extra: _,
+        } => ContentPart::Refusal {
+            refusal: replacement.to_string(),
+            extra: Map::new(),
+        },
+        ContentPart::ToolUse {
+            id: _,
+            name,
+            input: _,
+            extra: _,
+        } => ContentPart::ToolUse {
+            id: replacement.to_string(),
+            name,
+            input: empty_object(),
+            extra: Map::new(),
+        },
+        ContentPart::ToolResult {
+            tool_use_id: _,
+            content: _,
+            is_error,
+            extra: _,
+        } => ContentPart::ToolResult {
+            tool_use_id: replacement.to_string(),
+            content: empty_object(),
+            is_error: is_error.map(|_| false),
+            extra: Map::new(),
+        },
+        ContentPart::ProviderNative {
+            provider,
+            kind,
+            value: _,
+        } => ContentPart::ProviderNative {
+            provider,
+            kind: sanitize_native_kind(kind, replacement),
+            value: empty_object(),
+        },
+    }
+}
+
+fn sanitize_image_url(image_url: OpenAiImageUrl, replacement: &str) -> OpenAiImageUrl {
+    OpenAiImageUrl {
+        url: replacement.to_string(),
+        detail: image_url
+            .detail
+            .map(|detail| preserve_known_string(detail, &["auto", "low", "high"], replacement)),
+    }
+}
+
+fn sanitize_tool_call(call: ToolCall, replacement: &str) -> ToolCall {
+    ToolCall {
+        id: replacement.to_string(),
+        call_type: preserve_known_string(call.call_type, &["function"], replacement),
+        function: sanitize_function_call(call.function, replacement),
+    }
+}
+
+fn sanitize_function_call(call: FunctionCall, _replacement: &str) -> FunctionCall {
+    FunctionCall {
+        name: call.name,
+        arguments: empty_object().to_string(),
+    }
+}
+
+fn sanitize_tool_definition(tool: ToolDefinition, replacement: &str) -> ToolDefinition {
+    match tool {
+        ToolDefinition::Function { function, extra: _ } => ToolDefinition::Function {
+            function: sanitize_function_definition(function, replacement),
+            extra: Map::new(),
+        },
+        ToolDefinition::ProviderNative {
+            provider,
+            kind,
+            value: _,
+        } => ToolDefinition::ProviderNative {
+            provider,
+            kind: sanitize_native_kind(kind, replacement),
+            value: empty_object(),
+        },
+    }
+}
+
+fn sanitize_function_definition(
+    function: FunctionDefinition,
+    replacement: &str,
+) -> FunctionDefinition {
+    FunctionDefinition {
+        name: function.name,
+        description: function.description.map(|_| replacement.to_string()),
+        parameters: function.parameters.map(|_| empty_object()),
+        strict: function.strict.map(|_| false),
+        extra: Map::new(),
+    }
+}
+
+fn sanitize_tool_choice(choice: ToolChoice, replacement: &str) -> ToolChoice {
+    match choice {
+        ToolChoice::Auto => ToolChoice::Auto,
+        ToolChoice::None => ToolChoice::None,
+        ToolChoice::Required => ToolChoice::Required,
+        ToolChoice::Specific(ToolChoiceFunction {
+            choice_type,
+            function: ToolChoiceFunctionName { name },
+        }) => ToolChoice::Specific(ToolChoiceFunction {
+            choice_type: preserve_known_string(choice_type, &["function"], replacement),
+            function: ToolChoiceFunctionName { name },
+        }),
+        ToolChoice::ProviderNative(ProviderNativeComponent {
+            provider,
+            kind,
+            value: _,
+        }) => ToolChoice::ProviderNative(ProviderNativeComponent {
+            provider,
+            kind: sanitize_native_kind(kind, replacement),
+            value: empty_object(),
+        }),
+    }
+}
+
+fn sanitize_api_specific_request(
+    request: ApiSpecificRequest,
+    replacement: &str,
+) -> ApiSpecificRequest {
+    match request {
+        ApiSpecificRequest::AnthropicMessages {
+            cache_control,
+            container,
+            inference_geo,
+            output_config,
+            thinking,
+            top_k,
+            user_profile_id,
+        } => ApiSpecificRequest::AnthropicMessages {
+            cache_control: opaque_option(cache_control),
+            container: marked_option(container, replacement),
+            inference_geo: marked_option(inference_geo, replacement),
+            output_config: opaque_option(output_config),
+            thinking: opaque_option(thinking),
+            top_k,
+            user_profile_id: marked_option(user_profile_id, replacement),
+        },
+        ApiSpecificRequest::OpenAIChat {
+            audio,
+            frequency_penalty,
+            function_call,
+            functions,
+            logit_bias,
+            logprobs,
+            modalities,
+            moderation,
+            n,
+            prediction,
+            presence_penalty,
+            prompt_cache_key,
+            prompt_cache_options,
+            prompt_cache_retention,
+            reasoning_effort,
+            response_format,
+            safety_identifier,
+            seed,
+            stream_options,
+            verbosity,
+            web_search_options,
+        } => ApiSpecificRequest::OpenAIChat {
+            audio: opaque_option(audio),
+            frequency_penalty,
+            function_call: opaque_option(function_call),
+            functions: functions.map(|values| values.into_iter().map(|_| empty_object()).collect()),
+            logit_bias: opaque_option(logit_bias),
+            logprobs,
+            modalities: modalities.map(|values| {
+                values
+                    .into_iter()
+                    .map(|value| preserve_known_string(value, &["text", "audio"], replacement))
+                    .collect()
+            }),
+            moderation: opaque_option(moderation),
+            n,
+            prediction: opaque_option(prediction),
+            presence_penalty,
+            prompt_cache_key: marked_option(prompt_cache_key, replacement),
+            prompt_cache_options: opaque_option(prompt_cache_options),
+            prompt_cache_retention: marked_option(prompt_cache_retention, replacement),
+            reasoning_effort: marked_option(reasoning_effort, replacement),
+            response_format: opaque_option(response_format),
+            safety_identifier: marked_option(safety_identifier, replacement),
+            seed,
+            stream_options: opaque_option(stream_options),
+            verbosity: marked_option(verbosity, replacement),
+            web_search_options: opaque_option(web_search_options),
+        },
+        ApiSpecificRequest::OpenAIResponses {
+            background,
+            context_management,
+            conversation,
+            moderation,
+            prompt,
+            prompt_cache_key,
+            prompt_cache_options,
+            prompt_cache_retention,
+            safety_identifier,
+            stream_options,
+            text,
+        } => ApiSpecificRequest::OpenAIResponses {
+            background,
+            context_management: opaque_option(context_management),
+            conversation: opaque_option(conversation),
+            moderation: opaque_option(moderation),
+            prompt: opaque_option(prompt),
+            prompt_cache_key: marked_option(prompt_cache_key, replacement),
+            prompt_cache_options: opaque_option(prompt_cache_options),
+            prompt_cache_retention: marked_option(prompt_cache_retention, replacement),
+            safety_identifier: marked_option(safety_identifier, replacement),
+            stream_options: opaque_option(stream_options),
+            text: opaque_option(text),
+        },
+        ApiSpecificRequest::OCIGenAI {
+            compartment_id,
+            serving_mode,
+            api_format,
+        } => ApiSpecificRequest::OCIGenAI {
+            compartment_id: marked_option(compartment_id, replacement),
+            serving_mode: opaque_option(serving_mode),
+            api_format: api_format
+                .filter(|value| ["GENERIC", "COHERE", "COHEREV2"].contains(&value.as_str())),
+        },
+        ApiSpecificRequest::Custom {
+            api_name: _,
+            data: _,
+        } => ApiSpecificRequest::Custom {
+            api_name: replacement.to_string(),
+            data: empty_object(),
+        },
+    }
+}
+
+fn sanitize_response_tool_call(call: ResponseToolCall, replacement: &str) -> ResponseToolCall {
+    ResponseToolCall {
+        id: replacement.to_string(),
+        name: call.name,
+        arguments: empty_object(),
+    }
+}
+
+fn sanitize_usage(usage: Usage, replacement: &str) -> Usage {
+    let Usage {
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        cost,
+    } = usage;
+    Usage {
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        cost: cost.map(|cost| sanitize_cost(cost, replacement)),
+    }
+}
+
+fn sanitize_cost(cost: CostEstimate, replacement: &str) -> CostEstimate {
+    let CostEstimate {
+        total,
+        currency,
+        input,
+        output,
+        cache_read,
+        cache_write,
+        source,
+        pricing_provider: _,
+        pricing_model: _,
+        pricing_as_of: _,
+        pricing_source: _,
+    } = cost;
+    CostEstimate {
+        total,
+        currency: sanitize_currency(currency, replacement),
+        input,
+        output,
+        cache_read,
+        cache_write,
+        source,
+        pricing_provider: None,
+        pricing_model: None,
+        pricing_as_of: None,
+        pricing_source: None,
+    }
+}
+
+fn sanitize_currency(currency: String, replacement: &str) -> String {
+    let currency = currency.trim();
+    if currency.len() == 3 && currency.bytes().all(|byte| byte.is_ascii_alphabetic()) {
+        currency.to_ascii_uppercase()
+    } else {
+        replacement.to_string()
+    }
+}
+
+fn sanitize_optimization_summary(
+    summary: LlmOptimizationSummary,
+    replacement: &str,
+) -> LlmOptimizationSummary {
+    let LlmOptimizationSummary {
+        schema_version,
+        calculation_version,
+        status,
+        limitations: _,
+        baseline_model: _,
+        effective_model: _,
+        effective_usage,
+        baseline_usage,
+        tokens_saved,
+        baseline_cost,
+        actual_cost,
+        estimated_cost_saved,
+        currency,
+        contributions: _,
+    } = summary;
+    LlmOptimizationSummary {
+        schema_version: preserve_known_string(schema_version, &["1"], replacement),
+        calculation_version: preserve_known_string(calculation_version, &["1"], replacement),
+        status,
+        limitations: Vec::new(),
+        baseline_model: None,
+        effective_model: None,
+        effective_usage: effective_usage.map(|usage| sanitize_usage(usage, replacement)),
+        baseline_usage: baseline_usage.map(|usage| sanitize_usage(usage, replacement)),
+        tokens_saved,
+        baseline_cost: baseline_cost.map(|cost| sanitize_cost(cost, replacement)),
+        actual_cost: actual_cost.map(|cost| sanitize_cost(cost, replacement)),
+        estimated_cost_saved,
+        currency: currency.map(|currency| sanitize_currency(currency, replacement)),
+        contributions: Vec::new(),
+    }
+}
+
+fn sanitize_api_specific_response(
+    response: ApiSpecificResponse,
+    replacement: &str,
+) -> ApiSpecificResponse {
+    match response {
+        ApiSpecificResponse::OpenAIChat {
+            logprobs,
+            system_fingerprint,
+            service_tier: _,
+        } => ApiSpecificResponse::OpenAIChat {
+            logprobs: opaque_option(logprobs),
+            system_fingerprint: marked_option(system_fingerprint, replacement),
+            service_tier: None,
+        },
+        ApiSpecificResponse::OpenAIResponses {
+            output_items,
+            status,
+            incomplete_details,
+            previous_response_id,
+            store,
+            service_tier: _,
+            truncation,
+            reasoning,
+            input_tokens_details,
+            output_tokens_details,
+        } => ApiSpecificResponse::OpenAIResponses {
+            output_items: output_items
+                .map(|values| values.into_iter().map(|_| empty_object()).collect()),
+            status: status.map(|value| {
+                preserve_known_string(
+                    value,
+                    &[
+                        "queued",
+                        "in_progress",
+                        "completed",
+                        "incomplete",
+                        "failed",
+                        "cancelled",
+                    ],
+                    replacement,
+                )
+            }),
+            incomplete_details: opaque_option(incomplete_details),
+            previous_response_id: marked_option(previous_response_id, replacement),
+            store: store.map(|_| false),
+            service_tier: None,
+            truncation: opaque_option(truncation),
+            reasoning: opaque_option(reasoning),
+            input_tokens_details: opaque_option(input_tokens_details),
+            output_tokens_details: opaque_option(output_tokens_details),
+        },
+        ApiSpecificResponse::AnthropicMessages {
+            object_type,
+            role,
+            stop_reason,
+            stop_sequence,
+            container,
+            content_blocks,
+            service_tier: _,
+        } => ApiSpecificResponse::AnthropicMessages {
+            object_type: object_type
+                .map(|value| preserve_known_string(value, &["message"], replacement)),
+            role: role.map(|value| preserve_known_string(value, &["assistant"], replacement)),
+            stop_reason: stop_reason.map(|value| {
+                preserve_known_string(
+                    value,
+                    &[
+                        "end_turn",
+                        "max_tokens",
+                        "stop_sequence",
+                        "tool_use",
+                        "pause_turn",
+                        "refusal",
+                    ],
+                    replacement,
+                )
+            }),
+            stop_sequence: marked_option(stop_sequence, replacement),
+            service_tier: None,
+            container: opaque_option(container),
+            content_blocks: content_blocks
+                .map(|values| values.into_iter().map(|_| empty_object()).collect()),
+        },
+        ApiSpecificResponse::OCIGenAI {
+            api_format,
+            model_version,
+        } => ApiSpecificResponse::OCIGenAI {
+            api_format: api_format.map(|value| {
+                preserve_known_string(value, &["GENERIC", "COHERE", "COHEREV2"], replacement)
+            }),
+            model_version,
+        },
+        ApiSpecificResponse::GeminiGenerateContent {
+            thoughts_tokens,
+            safety_ratings,
+            grounding_metadata,
+            citation_metadata,
+            extra: _,
+        } => ApiSpecificResponse::GeminiGenerateContent {
+            thoughts_tokens,
+            safety_ratings: opaque_option(safety_ratings),
+            grounding_metadata: opaque_option(grounding_metadata),
+            citation_metadata: opaque_option(citation_metadata),
+            extra: Map::new(),
+        },
+        ApiSpecificResponse::Custom {
+            api_name: _,
+            data: _,
+        } => ApiSpecificResponse::Custom {
+            api_name: replacement.to_string(),
+            data: empty_object(),
+        },
+    }
+}
+
+fn opaque_option(value: Option<Json>) -> Option<Json> {
+    value.map(|_| empty_object())
+}
+
+fn marked_option(value: Option<String>, replacement: &str) -> Option<String> {
+    value.map(|_| replacement.to_string())
+}
+
+fn preserve_known_string(value: String, allowed: &[&str], replacement: &str) -> String {
+    if allowed.contains(&value.as_str()) {
+        value
+    } else {
+        replacement.to_string()
+    }
+}
+
+fn sanitize_native_kind(kind: String, replacement: &str) -> String {
+    preserve_known_string(
+        kind,
+        &[
+            "message",
+            "text",
+            "input_text",
+            "output_text",
+            "refusal",
+            "image_url",
+            "input_image",
+            "function_call",
+            "function_call_output",
+            "custom_tool_call",
+            "custom_tool_call_output",
+            "tool_use",
+            "tool_result",
+            "computer_call",
+            "computer_call_output",
+            "reasoning",
+        ],
+        replacement,
+    )
 }
 
 fn valid_mark_log_severity(event: &Event, metadata: Option<&Json>) -> Option<LogSeverity> {
@@ -285,11 +1002,14 @@ fn restore_log_severity(
     mut fields: nemo_relay::api::event::EventSanitizeFields,
     severity: Option<LogSeverity>,
 ) -> nemo_relay::api::event::EventSanitizeFields {
-    if let (Some(severity), Some(Json::Object(metadata))) = (severity, fields.metadata.as_mut()) {
-        metadata.insert(
-            LOG_SEVERITY_METADATA_KEY.to_string(),
-            Json::String(severity.as_str().to_string()),
-        );
+    if let Some(severity) = severity {
+        let metadata = fields.metadata.get_or_insert_with(empty_object);
+        if let Json::Object(metadata) = metadata {
+            metadata.insert(
+                LOG_SEVERITY_METADATA_KEY.to_string(),
+                Json::String(severity.as_str().to_string()),
+            );
+        }
     }
     fields
 }
@@ -302,412 +1022,195 @@ pub(crate) fn is_relay_metric_mark(event: &Event) -> bool {
         })
 }
 
-/// Redact strings in a typed metric attribute object.
-fn redact_metric_string_attributes(
+fn retain_allowed_metric_string_attributes(
     value: Json,
-    replacement: &str,
     allowlist: &BTreeMap<String, BTreeSet<String>>,
 ) -> Json {
-    match value {
-        Json::Object(values) => Json::Object(
-            values
-                .into_iter()
-                .map(|(key, value)| {
-                    let value = redact_metric_string_attribute(&key, value, replacement, allowlist);
-                    (key, value)
-                })
-                .collect(),
-        ),
-        value => value,
-    }
-}
-
-/// Redact an individual typed metric attribute when it contains text.
-fn redact_metric_string_attribute(
-    attribute: &str,
-    value: Json,
-    replacement: &str,
-    allowlist: &BTreeMap<String, BTreeSet<String>>,
-) -> Json {
-    match value {
-        Json::String(value) => Json::String(
-            if metric_string_value_is_allowed(allowlist, attribute, &value) {
-                value
-            } else {
-                replacement.to_string()
-            },
-        ),
-        Json::Array(values) if values.iter().all(Json::is_string) => Json::Array(
-            values
-                .into_iter()
-                .map(|value| {
-                    let Json::String(value) = value else {
-                        unreachable!("checked that every metric attribute value is a string");
-                    };
-                    Json::String(
-                        if metric_string_value_is_allowed(allowlist, attribute, &value) {
-                            value
-                        } else {
-                            replacement.to_string()
-                        },
-                    )
-                })
-                .collect(),
-        ),
-        value => value,
-    }
-}
-
-fn metric_string_value_is_allowed(
-    allowlist: &BTreeMap<String, BTreeSet<String>>,
-    attribute: &str,
-    value: &str,
-) -> bool {
-    allowlist
-        .get(attribute)
-        .is_some_and(|values| values.contains(value))
-}
-
-fn sanitize_scope_metadata(value: Json, replacement: &str) -> Json {
     let Json::Object(values) = value else {
-        return redact_semantic_content(value, replacement, None);
+        return empty_object();
     };
     Json::Object(
         values
             .into_iter()
-            .map(|(key, value)| {
-                let value = if is_trusted_scope_metadata_value(&key, &value) {
-                    value
-                } else {
-                    redact_semantic_content(value, replacement, Some(&key))
-                };
-                (key, value)
-            })
+            .filter(|(attribute, value)| metric_attribute_is_allowed(allowlist, attribute, value))
             .collect(),
     )
 }
 
-fn is_trusted_scope_metadata_value(key: &str, value: &Json) -> bool {
+fn metric_attribute_is_allowed(
+    allowlist: &BTreeMap<String, BTreeSet<String>>,
+    attribute: &str,
+    value: &Json,
+) -> bool {
+    let Some(allowed) = allowlist.get(attribute) else {
+        return false;
+    };
     match value {
-        Json::String(_) => TRUSTED_STRING_SCOPE_METADATA_FIELDS.contains(&key),
-        Json::Bool(_) => TRUSTED_BOOLEAN_SCOPE_METADATA_FIELDS.contains(&key),
+        Json::String(value) => allowed.contains(value),
+        Json::Array(values) if values.iter().all(Json::is_string) => values
+            .iter()
+            .filter_map(Json::as_str)
+            .all(|value| allowed.contains(value)),
         _ => false,
     }
 }
 
-fn is_known_content_bearing_mark(name: &str) -> bool {
-    matches!(
-        name,
-        "llm.chunk" | "nemo_relay.llm.optimization" | "skill.load"
-    )
+fn is_known_mark_subtype(value: &str) -> bool {
+    KNOWN_MARK_SUBTYPES.contains(&value)
 }
 
 fn sanitize_category_profile(
-    mut profile: CategoryProfile,
-    replacement: &str,
-) -> Option<CategoryProfile> {
-    profile.annotated_request = profile.annotated_request.as_ref().and_then(|request| {
-        TrajectorySanitizer::new(
-            replacement.to_string(),
-            CustomMarkPayloadPolicy::Preserve,
-            BTreeMap::new(),
-        )
-        .sanitize_annotated_request((**request).clone())
-        .map(Arc::new)
-    });
-    profile.annotated_response = profile.annotated_response.as_ref().and_then(|response| {
-        TrajectorySanitizer::new(
-            replacement.to_string(),
-            CustomMarkPayloadPolicy::Preserve,
-            BTreeMap::new(),
-        )
-        .sanitize_annotated_response((**response).clone())
-        .map(Arc::new)
-    });
-    profile.extra = profile
-        .extra
-        .into_iter()
-        .map(|(key, value)| {
-            let value = redact_semantic_content(value, replacement, Some(&key));
-            (key, value)
-        })
-        .collect();
-    Some(profile)
-}
-
-fn redact_custom_category_profile(
-    mut profile: CategoryProfile,
+    profile: CategoryProfile,
     sanitizer: &TrajectorySanitizer,
-) -> Option<CategoryProfile> {
-    profile.annotated_request = profile.annotated_request.as_ref().and_then(|request| {
+) -> CategoryProfile {
+    let annotated_request = profile.annotated_request.as_ref().and_then(|request| {
         sanitizer
             .sanitize_annotated_request((**request).clone())
             .map(Arc::new)
     });
-    profile.annotated_response = profile.annotated_response.as_ref().and_then(|response| {
+    let annotated_response = profile.annotated_response.as_ref().and_then(|response| {
         sanitizer
             .sanitize_annotated_response((**response).clone())
             .map(Arc::new)
     });
-    profile.extra = profile
-        .extra
-        .into_iter()
-        .map(|(key, value)| {
-            let value = redact_all_leaves(value, &sanitizer.replacement);
-            (key, value)
+    let mut profile = sanitize_category_profile_base(profile, sanitizer);
+    profile.annotated_request = annotated_request;
+    profile.annotated_response = annotated_response;
+    profile
+}
+
+fn sanitize_category_profile_base(
+    mut profile: CategoryProfile,
+    sanitizer: &TrajectorySanitizer,
+) -> CategoryProfile {
+    replace_optional_string(&mut profile.tool_call_id, &sanitizer.replacement);
+    profile.subtype = profile.subtype.map(|subtype| {
+        if is_known_mark_subtype(&subtype) {
+            subtype
+        } else {
+            (*sanitizer.replacement).clone()
+        }
+    });
+    replace_optional_json(&mut profile.tool_result_annotation);
+    profile.extra.clear();
+    profile.annotated_request = None;
+    profile.annotated_response = None;
+    profile
+}
+
+fn provider_name(event: &Event) -> Option<String> {
+    let keys = [PROVIDER_ATTRIBUTE, "provider_name", "provider"];
+    event
+        .category_profile()
+        .and_then(|profile| find_btree_string(&profile.extra, &keys))
+        .or_else(|| provider_from_event_name(event.name()).map(str::to_string))
+        .or_else(|| {
+            event
+                .category_profile()
+                .and_then(|profile| profile.annotated_request.as_deref())
+                .and_then(provider_from_normalized_request)
+                .map(str::to_string)
         })
-        .collect();
-    Some(profile)
 }
 
-fn take_root_fields(value: &Json, fields: &[&str]) -> Vec<(String, Json)> {
-    let Some(object) = value.as_object() else {
-        return Vec::new();
-    };
-    fields
-        .iter()
-        .filter_map(|field| {
-            object
-                .get(*field)
-                .cloned()
-                .map(|value| ((*field).to_string(), value))
+fn find_btree_string(values: &BTreeMap<String, Json>, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| values.get(*key).and_then(Json::as_str).map(str::to_string))
+        .or_else(|| {
+            ["usage", "request", "response"]
+                .into_iter()
+                .find_map(|container| {
+                    values
+                        .get(container)
+                        .and_then(Json::as_object)
+                        .and_then(|nested| find_string(nested, keys))
+                })
         })
-        .collect()
 }
 
-fn restore_root_fields(value: &mut Json, fields: Vec<(String, Json)>) {
-    let Some(object) = value.as_object_mut() else {
-        return;
-    };
-    object.extend(fields);
-}
-
-fn sanitize_optimization_payloads(value: &mut Json, replacement: &str) {
-    let Some(contributions) = value.get_mut("contributions").and_then(Json::as_array_mut) else {
-        return;
-    };
-    for contribution in contributions {
-        let Some(contribution) = contribution.as_object_mut() else {
-            continue;
-        };
-        if let Some(payload) = contribution.get_mut("payload") {
-            *payload = redact_all_leaves(payload.take(), replacement);
-        }
-        let known = [
-            "id",
-            "sequence",
-            "producer",
-            "kind",
-            "applied",
-            "model_transition",
-            "token_impact",
-            "payload_schema",
-            "payload",
-        ];
-        for (key, value) in contribution.iter_mut() {
-            if !known.contains(&key.as_str()) {
-                *value = redact_all_leaves(value.take(), replacement);
-            }
-        }
-    }
-}
-
-pub(super) fn redact_all_leaves(value: Json, replacement: &str) -> Json {
-    match value {
-        Json::Null => Json::Null,
-        Json::Bool(_) => Json::Bool(false),
-        Json::Number(_) => Json::from(0),
-        Json::String(_) => Json::String(replacement.to_string()),
-        Json::Array(values) => Json::Array(
-            values
+fn find_string(values: &Map<String, Json>, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| values.get(*key).and_then(Json::as_str).map(str::to_string))
+        .or_else(|| {
+            ["usage", "request", "response"]
                 .into_iter()
-                .map(|value| redact_all_leaves(value, replacement))
-                .collect(),
-        ),
-        Json::Object(values) => Json::Object(
-            values
-                .into_iter()
-                .map(|(key, value)| (key, redact_all_leaves(value, replacement)))
-                .collect(),
-        ),
-    }
+                .find_map(|container| {
+                    values
+                        .get(container)
+                        .and_then(Json::as_object)
+                        .and_then(|nested| {
+                            keys.iter().find_map(|key| {
+                                nested.get(*key).and_then(Json::as_str).map(str::to_string)
+                            })
+                        })
+                })
+        })
 }
 
-fn redact_semantic_content(value: Json, replacement: &str, field: Option<&str>) -> Json {
-    match value {
-        Json::Null => Json::Null,
-        value @ (Json::Bool(_) | Json::Number(_) | Json::String(_)) => {
-            redact_semantic_scalar(value, replacement, field)
+fn provider_from_event_name(name: &str) -> Option<&'static str> {
+    let name = name.to_ascii_lowercase();
+    [
+        ("azure_ai_inference", "azure.ai.inference"),
+        ("azure ai inference", "azure.ai.inference"),
+        ("azure_openai", "azure.ai.openai"),
+        ("azure openai", "azure.ai.openai"),
+        ("anthropic", "anthropic"),
+        ("claude", "anthropic"),
+        ("bedrock", "aws.bedrock"),
+        ("cohere", "cohere"),
+        ("deepseek", "deepseek"),
+        ("gemini", "gcp.gemini"),
+        ("vertex", "gcp.vertex_ai"),
+        ("groq", "groq"),
+        ("mistral", "mistral_ai"),
+        ("openai", "openai"),
+        ("gpt", "openai"),
+        ("perplexity", "perplexity"),
+    ]
+    .into_iter()
+    .find_map(|(needle, provider)| name.contains(needle).then_some(provider))
+}
+
+fn provider_from_normalized_request(request: &AnnotatedLlmRequest) -> Option<&'static str> {
+    match request.api_specific.as_ref()? {
+        ApiSpecificRequest::AnthropicMessages { .. } => Some("anthropic"),
+        ApiSpecificRequest::OpenAIChat { .. } | ApiSpecificRequest::OpenAIResponses { .. } => {
+            Some("openai")
         }
-        Json::Array(values) => Json::Array(
-            values
-                .into_iter()
-                .map(|value| redact_semantic_content(value, replacement, field))
-                .collect(),
-        ),
-        Json::Object(values) => redact_semantic_object(values, replacement, field),
+        ApiSpecificRequest::OCIGenAI { .. } => Some("oci.genai"),
+        ApiSpecificRequest::Custom { .. } => None,
     }
 }
 
-fn redact_semantic_scalar(value: Json, replacement: &str, field: Option<&str>) -> Json {
-    match value {
-        Json::Bool(value) if field.is_some_and(preserve_analytical_bool) => Json::Bool(value),
-        Json::Bool(_) => Json::Bool(false),
-        Json::Number(value) if field.is_some_and(preserve_analytical_number) => Json::Number(value),
-        Json::Number(_) => Json::from(0),
-        Json::String(value) if field.is_some_and(preserve_analytical_string) => Json::String(value),
-        Json::String(value) if field == Some("arguments") => {
-            redact_stringified_json(value, replacement)
+fn request_surface_from_annotation(request: &AnnotatedLlmRequest) -> Option<ProviderSurface> {
+    match request.api_specific.as_ref()? {
+        ApiSpecificRequest::AnthropicMessages { .. } => Some(ProviderSurface::AnthropicMessages),
+        ApiSpecificRequest::OpenAIChat { .. } => Some(ProviderSurface::OpenAIChat),
+        ApiSpecificRequest::OpenAIResponses { .. } => Some(ProviderSurface::OpenAIResponses),
+        ApiSpecificRequest::OCIGenAI { .. } => Some(ProviderSurface::OCIGenAI),
+        ApiSpecificRequest::Custom { .. } => None,
+    }
+}
+
+fn provider_hint_for_surface(surface: ProviderSurface) -> Option<&'static str> {
+    match surface {
+        ProviderSurface::AnthropicMessages => Some("anthropic.messages"),
+        ProviderSurface::OCIGenAI => Some("oci.genai"),
+        ProviderSurface::OpenAIChat
+        | ProviderSurface::OpenAIResponses
+        | ProviderSurface::GeminiGenerateContent => None,
+    }
+}
+
+fn response_surface_from_annotation(response: &AnnotatedLlmResponse) -> Option<ProviderSurface> {
+    match response.api_specific.as_ref()? {
+        ApiSpecificResponse::OpenAIChat { .. } => Some(ProviderSurface::OpenAIChat),
+        ApiSpecificResponse::OpenAIResponses { .. } => Some(ProviderSurface::OpenAIResponses),
+        ApiSpecificResponse::AnthropicMessages { .. } => Some(ProviderSurface::AnthropicMessages),
+        ApiSpecificResponse::OCIGenAI { .. } => Some(ProviderSurface::OCIGenAI),
+        ApiSpecificResponse::GeminiGenerateContent { .. } => {
+            Some(ProviderSurface::GeminiGenerateContent)
         }
-        Json::String(_) => Json::String(replacement.to_string()),
-        _ => unreachable!("only scalar JSON values are passed to redact_semantic_scalar"),
+        ApiSpecificResponse::Custom { .. } => None,
     }
-}
-
-fn redact_semantic_object(
-    values: serde_json::Map<String, Json>,
-    replacement: &str,
-    field: Option<&str>,
-) -> Json {
-    let preserve_tool_name = preserves_tool_or_function_name(field, &values);
-    Json::Object(
-        values
-            .into_iter()
-            .map(|(key, value)| {
-                let value = if key == "name" && preserve_tool_name && value.is_string() {
-                    value
-                } else {
-                    redact_semantic_content(value, replacement, Some(&key))
-                };
-                (key, value)
-            })
-            .collect(),
-    )
-}
-
-fn redact_stringified_json(value: String, replacement: &str) -> Json {
-    let Ok(parsed) = serde_json::from_str::<Json>(&value) else {
-        return Json::String(replacement.to_string());
-    };
-    let scrubbed = redact_all_leaves(parsed, replacement);
-    Json::String(serde_json::to_string(&scrubbed).unwrap_or_else(|_| replacement.to_string()))
-}
-
-fn preserve_analytical_bool(key: &str) -> bool {
-    matches!(
-        key,
-        "applied"
-            | "enabled"
-            | "store"
-            | "stream"
-            | "parallel_tool_calls"
-            | "required"
-            | "additionalProperties"
-    )
-}
-
-fn preserve_analytical_number(key: &str) -> bool {
-    matches!(
-        key,
-        "chunk_index"
-            | "index"
-            | "attempt"
-            | "sequence"
-            | "priority"
-            | "version"
-            | "temperature"
-            | "top_p"
-            | "top_logprobs"
-            | "max_tokens"
-            | "max_output_tokens"
-            | "max_tool_calls"
-            | "total"
-            | "input"
-            | "output"
-            | "cache_read"
-            | "cache_write"
-            | "confidence"
-            | "logprob"
-    ) || key.ends_with("_tokens")
-        || key.ends_with("_count")
-        || key.ends_with("_index")
-        || key.ends_with("_indices")
-        || key.ends_with("_cost")
-        || key.ends_with("_latency")
-        || key.ends_with("_millis")
-        || key.ends_with("_ms")
-        || key.ends_with("_seconds")
-        || key.ends_with("_timestamp")
-}
-
-fn preserve_analytical_string(key: &str) -> bool {
-    if matches!(key, "token" | "token_id") {
-        return false;
-    }
-    matches!(
-        key,
-        "role"
-            | "type"
-            | "api"
-            | "kind"
-            | "producer"
-            | "subtype"
-            | "model"
-            | "model_name"
-            | "provider"
-            | "protocol"
-            | "backend"
-            | "tier"
-            | "status"
-            | "finish_reason"
-            | "stop_reason"
-            | "service_tier"
-            | "mode"
-            | "quality"
-            | "estimation_method"
-            | "currency"
-            | "pricing_source"
-            | "pricing_provider"
-            | "pricing_model"
-            | "pricing_as_of"
-            | "required"
-            | "version"
-            | "event_type"
-            | "object"
-            | "object_type"
-            | "system_fingerprint"
-            | "truncation"
-            | "include"
-            | "detail"
-            | "media_type"
-            | "selected_model"
-            | "selected_backend"
-            | "selected_tier"
-            | "selected_protocol"
-            | "selected_route"
-            | "selected_endpoint"
-            | "baseline_model"
-            | "baseline_backend"
-            | "baseline_tier"
-            | "baseline_protocol"
-            | "baseline_route"
-            | "effective_model"
-            | "effective_backend"
-            | "effective_tier"
-            | "effective_protocol"
-            | "effective_route"
-    ) || key == "id"
-        || key.ends_with("_id")
-        || key.ends_with("_uuid")
-}
-
-fn preserves_tool_or_function_name(
-    container: Option<&str>,
-    object: &serde_json::Map<String, Json>,
-) -> bool {
-    matches!(container, Some("function" | "tools"))
-        || object
-            .get("type")
-            .and_then(Json::as_str)
-            .is_some_and(|kind| matches!(kind, "function" | "function_call" | "tool_use"))
 }
