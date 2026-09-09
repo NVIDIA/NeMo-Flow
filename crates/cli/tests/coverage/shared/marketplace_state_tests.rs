@@ -58,6 +58,7 @@ fn persisted_state_must_match_the_selected_layout() {
         host_plugin_removed: false,
         host_marketplace_removed: false,
         plugin_setup_installed: false,
+        marker_absent_recovery: false,
     };
     layout.validate_persisted_state(&valid).unwrap();
     let invalid = PluginState {

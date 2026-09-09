@@ -99,6 +99,8 @@ pub(crate) struct HostRegistrationReport {
     /// `None` means the host CLI could not determine whether the plugin is registered.
     pub(crate) host_plugin_registered: Option<bool>,
     pub(crate) host_marketplace_registered: bool,
+    /// Source Codex reported for its Relay marketplace when the marketplace cannot be loaded.
+    pub(crate) host_marketplace_source: Option<PathBuf>,
     /// The registered Relay marketplace was identified but its snapshot could not be loaded.
     pub(crate) host_marketplace_unloadable: bool,
 }
@@ -166,6 +168,7 @@ pub(super) fn host_registration_report(
         return Ok(HostRegistrationReport {
             host_plugin_registered: Some(true),
             host_marketplace_registered: true,
+            host_marketplace_source: None,
             host_marketplace_unloadable: false,
         });
     }
@@ -180,6 +183,7 @@ pub(crate) fn claude_registration_report(
     Ok(HostRegistrationReport {
         host_plugin_registered: Some(claude_plugin_registered(options, runner)?),
         host_marketplace_registered: claude_marketplace_registered(options, runner)?,
+        host_marketplace_source: None,
         host_marketplace_unloadable: false,
     })
 }
@@ -190,10 +194,11 @@ pub(crate) fn codex_registration_report(
 ) -> Result<HostRegistrationReport, String> {
     let host_plugin_registered = match codex_plugin_registered(options, runner) {
         Ok(registered) => registered,
-        Err(error) if is_dangling_codex_marketplace_error(&error) => {
+        Err(error) if let Some(source) = dangling_codex_marketplace_source(&error) => {
             return Ok(HostRegistrationReport {
                 host_plugin_registered: None,
                 host_marketplace_registered: true,
+                host_marketplace_source: Some(source),
                 host_marketplace_unloadable: true,
             });
         }
@@ -203,6 +208,7 @@ pub(crate) fn codex_registration_report(
     Ok(HostRegistrationReport {
         host_plugin_registered: Some(host_plugin_registered),
         host_marketplace_registered: codex_marketplace_registered(options, runner)?,
+        host_marketplace_source: None,
         host_marketplace_unloadable: false,
     })
 }
@@ -284,14 +290,19 @@ fn codex_marketplace_registered(
         .any(|name| name == MARKETPLACE_NAME))
 }
 
-fn is_dangling_codex_marketplace_error(error: &str) -> bool {
+fn dangling_codex_marketplace_source(error: &str) -> Option<PathBuf> {
     let plugin_list_snapshot_error = "failed to load configured marketplace snapshot(s):";
-    let marketplace = format!("`{MARKETPLACE_NAME}`");
-    let invalid_manifest = "marketplace root does not contain a supported manifest";
-    error.contains(plugin_list_snapshot_error)
-        && error
-            .lines()
-            .any(|line| line.contains(&marketplace) && line.contains(invalid_manifest))
+    if !error.contains(plugin_list_snapshot_error) {
+        return None;
+    }
+    let prefix = format!("- `{MARKETPLACE_NAME}` at ");
+    let suffix = ": marketplace root does not contain a supported manifest";
+    error.lines().find_map(|line| {
+        line.strip_prefix(&prefix)
+            .and_then(|source| source.strip_suffix(suffix))
+            .filter(|source| !source.is_empty())
+            .map(PathBuf::from)
+    })
 }
 
 fn plugin_entry_matches(entry: &Value) -> bool {
