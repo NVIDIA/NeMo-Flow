@@ -283,13 +283,25 @@ fn mask_url(text: &str, mask_char: &str) -> String {
     };
     let prefix_end = scheme_idx + 3;
     let remainder = &text[prefix_end..];
-    let Some(path_idx) = remainder.find('/') else {
-        return text.to_string();
+    let (authority, has_suffix) = remainder
+        .find(['/', '\\', '?', '#'])
+        .map_or((remainder, false), |suffix_idx| {
+            (&remainder[..suffix_idx], true)
+        });
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    if host.is_empty() {
+        return mask_text(text, mask_char, 0, 0);
     };
 
     let mut output = String::with_capacity(text.len());
-    output.push_str(&text[..prefix_end + path_idx + 1]);
-    output.push_str(mask_char);
+    output.push_str(&text[..prefix_end]);
+    output.push_str(host);
+    if has_suffix {
+        output.push('/');
+        output.push_str(mask_char);
+    }
     output
 }
 
@@ -344,4 +356,44 @@ fn mask_credit_card(text: &str, mask_char: &str) -> String {
         }
     }
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mask_url;
+
+    #[test]
+    fn url_mask_preserves_only_the_host_and_port() {
+        for (input, expected) in [
+            (
+                "https://alice:s3cr3t@example.test/private",
+                "https://example.test/*",
+            ),
+            (
+                "https://oauth2:token@example.test/org/repo.git",
+                "https://example.test/*",
+            ),
+            ("https://alice:s3cr3t@example.test", "https://example.test"),
+            (
+                "https://example.test?token=secret/path",
+                "https://example.test/*",
+            ),
+            (
+                "https://example.test#access_token=secret/path",
+                "https://example.test/*",
+            ),
+            (
+                "https://example.test\\@alice:s3cr3t",
+                "https://example.test/*",
+            ),
+            ("https://example.test/private", "https://example.test/*"),
+            ("https://example.test", "https://example.test"),
+            (
+                "https://[2001:db8::1]:8443/private",
+                "https://[2001:db8::1]:8443/*",
+            ),
+        ] {
+            assert_eq!(mask_url(input, "*"), expected, "input: {input}");
+        }
+    }
 }

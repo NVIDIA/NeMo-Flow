@@ -4585,6 +4585,62 @@ fn builtin_mask_with_url_detector_preserves_scheme_and_host_by_default() {
 }
 
 #[test]
+fn builtin_mask_with_url_detector_removes_credentials_and_masks_pathless_suffixes() {
+    let _guard = crate::plugins::pii_redaction::test_mutex().lock().unwrap();
+    reset_runtime();
+    setup_isolated_thread();
+
+    futures::executor::block_on(test_initialize_plugin_host_exact(plugin_config(json!({
+        "mode": "builtin",
+        "codec": "openai_chat",
+        "input": false,
+        "output": false,
+        "tool_input": true,
+        "tool_output": false,
+        "builtin": {
+            "action": "mask",
+            "detector": "url",
+            "target_paths": ["/url"]
+        }
+    }))))
+    .unwrap();
+
+    let events = capture_events("pii-redaction-url-sensitive-mask-events");
+    let _credential_handle = tool_call(
+        ToolCallParams::builder()
+            .name("fetch")
+            .args(json!({
+                "url": "https://alice:s3cr3t@example.test/private"
+            }))
+            .build(),
+    )
+    .unwrap();
+    let _query_handle = tool_call(
+        ToolCallParams::builder()
+            .name("fetch")
+            .args(json!({
+                "url": "https://example.test?token=secret-123456"
+            }))
+            .build(),
+    )
+    .unwrap();
+
+    let captured_events = captured_events_snapshot(&events);
+    assert_eq!(captured_events.len(), 2);
+    assert_eq!(
+        captured_events[0].input(),
+        Some(&json!({ "url": "https://example.test/*" }))
+    );
+    assert_eq!(
+        captured_events[1].input(),
+        Some(&json!({ "url": "https://example.test/*" }))
+    );
+
+    deregister_subscriber("pii-redaction-url-sensitive-mask-events").unwrap();
+    test_close_plugin_host().unwrap();
+}
+
+#[test]
 fn builtin_mask_with_ipv6_detector_preserves_last_segment_by_default() {
     let _guard = crate::plugins::pii_redaction::test_mutex().lock().unwrap();
     reset_runtime();
