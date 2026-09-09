@@ -1,20 +1,13 @@
 ---
 name: contribute-docs
-description: Contribute documentation or example changes that stay aligned with NeMo Relay public behavior
-author: NVIDIA Corporation and Affiliates
+description: Author or edit NeMo Relay documentation or examples when repository-specific MDX, public API, integration, or release-history conventions matter. Do not use for review-only requests or incidental prose edits in code.
 license: Apache-2.0
 ---
 
 
 # Contribute Docs Or Examples
 
-## Companion Guidance
-
-Use `karpathy-guidelines` alongside this skill for implementation or review
-work. Keep changes scoped, surface assumptions, and define focused validation
-before editing.
-
-Use this skill for docs-only or example-heavy changes.
+Use this skill when authoring docs-only or example-heavy changes.
 
 ## Rules
 
@@ -43,7 +36,7 @@ Use this skill for docs-only or example-heavy changes.
 
 ## Checklist
 
-- [ ] `README.md` or `docs/index.md` updated when entry points changed
+- [ ] `README.md` or `docs/index.yml` updated when entry points changed
 - [ ] Relevant getting-started or reference docs updated
 - [ ] Example commands still match current package names and paths
 - [ ] Relevant package or crate `README.md` files updated when examples or binding guidance changed
@@ -60,4 +53,3 @@ Use this skill for docs-only or example-heavy changes.
 - `CONTRIBUTING.md`
 - `RELEASING.md`
 - `docs/contribute/testing-and-docs.mdx`
-- `review-doc-style`

@@ -137,18 +137,12 @@ impl ProviderRoute {
         )
     }
 
-    // Like `upstream_url` but with an explicit base URL. This keeps OpenAI `/v1` normalization in
-    // one place for configured public, enterprise, or local proxy bases.
+    // Like `upstream_url` but with an explicit base URL. This keeps `/v1` normalization in one
+    // place for configured public, enterprise, or local proxy bases.
     pub(super) fn upstream_url_with_base(self, base: &str, path_and_query: &str) -> String {
         let base = base.trim_end_matches('/');
         let path_and_query = self.canonical_path_and_query(path_and_query);
-        let path_and_query = match self {
-            Self::OpenAiResponses
-            | Self::OpenAiChatCompletions
-            | Self::OpenAiImagesGenerations
-            | Self::OpenAiModels => normalize_openai_path_for_base(base, &path_and_query),
-            _ => path_and_query,
-        };
+        let path_and_query = normalize_v1_path_for_base(base, &path_and_query);
         format!("{base}{path_and_query}")
     }
 
@@ -192,7 +186,7 @@ fn configured_auth_header<'a>(
     }
 }
 
-pub(super) fn normalize_openai_path_for_base(base: &str, path_and_query: &str) -> String {
+pub(super) fn normalize_v1_path_for_base(base: &str, path_and_query: &str) -> String {
     match (base.ends_with("/v1"), path_and_query.starts_with("/v1/")) {
         (true, true) => path_and_query
             .strip_prefix("/v1")

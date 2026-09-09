@@ -1,21 +1,15 @@
 ---
 name: add-middleware
-description: Add a new guardrail or intercept type to the NeMo Relay middleware pipeline
-author: NVIDIA Corporation and Affiliates
+description: Add a new NeMo Relay guardrail or intercept type, registration surface, or pipeline stage. Do not use for changing an existing middleware implementation without a new middleware contract.
 license: Apache-2.0
 ---
 
 
 # Add a Middleware Type
 
-## Companion Guidance
-
-Use `karpathy-guidelines` alongside this skill for implementation or review
-work. Keep changes scoped, surface assumptions, and define focused validation
-before editing.
-
 NeMo Relay supports guardrails (validate/gate) and intercepts (transform) at various
-pipeline stages. Adding a new middleware type requires changes across all layers.
+pipeline stages. Adding a new middleware type requires checking every layer that
+exposes the new contract.
 
 Use this skill when introducing a new middleware registration surface or adding
 middleware behavior to a new pipeline stage.
@@ -93,7 +87,9 @@ from `crates/core/src/api/scope.rs`.
 
 6. Expose the new middleware surface in every affected binding.
 
-Follow the `add-binding-feature` skill for the cross-binding implementation checklist.
+For a public middleware contract, implement the Rust source of truth, then
+update only the bindings, FFI, wrappers, documentation, and tests that expose
+or observe the new contract.
 
 ## Required Tests
 
@@ -118,4 +114,3 @@ Follow the `add-binding-feature` skill for the cross-binding implementation chec
 - Pipeline docs: `docs/about-nemo-relay/concepts/middleware.mdx`
 - Architecture docs: `docs/about-nemo-relay/architecture.mdx`
 - Registration examples: `docs/instrument-applications/advanced-guide.mdx`
-- Validation: `validate-change`

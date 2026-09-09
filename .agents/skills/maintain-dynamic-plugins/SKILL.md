@@ -1,17 +1,10 @@
 ---
 name: maintain-dynamic-plugins
-description: Maintain NeMo Relay dynamic plugin loaders, manifests, Rust native SDKs, gRPC worker protocol, Python worker SDK, docs, tests, and release workflow coverage
-author: NVIDIA Corporation and Affiliates
+description: Change NeMo Relay dynamic plugin loaders, manifests, native ABI, gRPC worker protocol, or Python worker SDK. Do not use for ordinary built-in plugin configuration.
 license: Apache-2.0
 ---
 
 # Maintain Dynamic Plugins
-
-## Companion Guidance
-
-Use `karpathy-guidelines`, `validate-change`, `maintain-packaging`, and
-`contribute-docs` alongside this skill when implementation, packaging, CI, or
-documentation changes are involved.
 
 Use this skill for `plugin.kind = "rust_dynamic"`, `plugin.kind = "worker"`,
 `nemo-relay-plugin`, `nemo-relay-worker`, `nemo-relay-worker-proto`,
@@ -72,25 +65,20 @@ Use this skill for `plugin.kind = "rust_dynamic"`, `plugin.kind = "worker"`,
 
 ## Validation
 
-```bash
-just build-test-plugin-fixtures
-cargo test -p nemo-relay-types
-cargo test -p nemo-relay-plugin
-cargo test -p nemo-relay-worker-proto
-cargo test -p nemo-relay-worker
-cargo test -p nemo-relay --features worker-grpc --test native_plugin_integration --test worker_plugin_integration
-just test-python-plugin
-just test-rust
-just test-python
-just docs
-```
+Choose checks by the changed layer:
 
-The canonical `just test-rust`, `just test-python`, and `just test-go` recipes
-prepare plugin fixtures automatically. Run `just build-test-plugin-fixtures`
-before raw focused native or worker plugin tests; fixture compilation must not
-happen inside an individual test case.
+- Manifest or shared types: test the owning Rust crate.
+- Native loader or ABI: prepare plugin fixtures and run the focused native
+  plugin integration test.
+- Worker protocol or host: test the worker crates and regenerate or test the
+  Python worker SDK only when its protocol surface changes.
+- Shared runtime behavior: run the Rust suite and only binding suites whose
+  observable plugin behavior changes.
+- Documentation or packaging: run their targeted checks only when changed.
 
-For broad runtime or public API changes, run the full `validate-change` matrix.
+Canonical surface suites prepare plugin fixtures. Before a raw focused native
+or worker integration test, run `just build-test-plugin-fixtures`; never compile
+fixtures inside an individual test case.
 
 ## References
 
