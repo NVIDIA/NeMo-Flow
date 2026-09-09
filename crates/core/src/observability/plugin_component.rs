@@ -1542,30 +1542,79 @@ struct IndexedOpenTelemetryResource<T> {
     session_filter: Option<Arc<EndpointSessionFilter>>,
 }
 
+#[derive(Debug)]
+enum SessionFilterConfigViolation {
+    BlankSessionMetadataKey,
+    EmptyToolNamePatterns,
+    InvalidToolNamePattern {
+        index: usize,
+        pattern: String,
+        error: String,
+    },
+}
+
+fn validate_block_after_tool_match_session_filter(
+    config: &BlockAfterToolMatchSessionFilterConfig,
+) -> Result<Vec<Regex>, Vec<SessionFilterConfigViolation>> {
+    let mut violations = Vec::new();
+    if config.session_metadata_key.trim().is_empty() {
+        violations.push(SessionFilterConfigViolation::BlankSessionMetadataKey);
+    }
+    if config.tool_name_patterns.is_empty() {
+        violations.push(SessionFilterConfigViolation::EmptyToolNamePatterns);
+    }
+
+    let mut patterns = Vec::with_capacity(config.tool_name_patterns.len());
+    for (index, pattern) in config.tool_name_patterns.iter().enumerate() {
+        match Regex::new(pattern) {
+            Ok(pattern) => patterns.push(pattern),
+            Err(error) => violations.push(SessionFilterConfigViolation::InvalidToolNamePattern {
+                index,
+                pattern: pattern.clone(),
+                error: error.to_string(),
+            }),
+        }
+    }
+
+    if violations.is_empty() {
+        Ok(patterns)
+    } else {
+        Err(violations)
+    }
+}
+
 fn build_endpoint_session_filter(
     config: Option<&OpenTelemetrySessionFilterConfig>,
 ) -> PluginResult<Option<Arc<EndpointSessionFilter>>> {
     config
         .map(|config| match config {
             OpenTelemetrySessionFilterConfig::BlockAfterToolMatch(config) => {
-                if config.session_metadata_key.trim().is_empty()
-                    || config.tool_name_patterns.is_empty()
-                {
-                    return Err(PluginError::InvalidConfig(
-                        "OpenTelemetry session_filter requires a nonblank session_metadata_key and at least one tool_name_pattern".to_string(),
-                    ));
-                }
-                let patterns = config
-                    .tool_name_patterns
-                    .iter()
-                    .map(|pattern| {
-                        Regex::new(pattern).map_err(|error| {
-                            PluginError::InvalidConfig(format!(
-                                "OpenTelemetry session_filter.tool_name_patterns contains invalid regex {pattern:?}: {error}"
-                            ))
-                        })
-                    })
-                    .collect::<PluginResult<Vec<_>>>()?;
+                let patterns = validate_block_after_tool_match_session_filter(config).map_err(
+                    |violations| {
+                        if violations.iter().any(|violation| {
+                            matches!(
+                                violation,
+                                SessionFilterConfigViolation::BlankSessionMetadataKey
+                                    | SessionFilterConfigViolation::EmptyToolNamePatterns
+                            )
+                        }) {
+                            return PluginError::InvalidConfig(
+                                "OpenTelemetry session_filter requires a nonblank session_metadata_key and at least one tool_name_pattern".to_string(),
+                            );
+                        }
+                        let Some(SessionFilterConfigViolation::InvalidToolNamePattern {
+                            pattern,
+                            error,
+                            ..
+                        }) = violations.into_iter().next()
+                        else {
+                            unreachable!("session filter validation failed without a violation")
+                        };
+                        PluginError::InvalidConfig(format!(
+                            "OpenTelemetry session_filter.tool_name_patterns contains invalid regex {pattern:?}: {error}"
+                        ))
+                    },
+                )?;
                 Ok(EndpointSessionFilter::new(
                     config.session_metadata_key.clone(),
                     patterns,
@@ -4383,21 +4432,21 @@ fn validate_opentelemetry_session_filter(
     let Some(OpenTelemetrySessionFilterConfig::BlockAfterToolMatch(filter)) = filter else {
         return;
     };
-    let mut invalid = Vec::new();
-    if filter.session_metadata_key.trim().is_empty() {
-        invalid.push("session_metadata_key must be nonblank".to_string());
-    }
-    if filter.tool_name_patterns.is_empty() {
-        invalid.push("tool_name_patterns must contain at least one pattern".to_string());
-    }
-    for (index, pattern) in filter.tool_name_patterns.iter().enumerate() {
-        if let Err(error) = Regex::new(pattern) {
-            invalid.push(format!(
-                "tool_name_patterns[{index}] is not a valid regex: {error}"
-            ));
-        }
-    }
-    for message in invalid {
+    let Err(violations) = validate_block_after_tool_match_session_filter(filter) else {
+        return;
+    };
+    for violation in violations {
+        let message = match violation {
+            SessionFilterConfigViolation::BlankSessionMetadataKey => {
+                "session_metadata_key must be nonblank".to_string()
+            }
+            SessionFilterConfigViolation::EmptyToolNamePatterns => {
+                "tool_name_patterns must contain at least one pattern".to_string()
+            }
+            SessionFilterConfigViolation::InvalidToolNamePattern { index, error, .. } => {
+                format!("tool_name_patterns[{index}] is not a valid regex: {error}")
+            }
+        };
         push_policy_diag(
             diagnostics,
             policy.unsupported_value,

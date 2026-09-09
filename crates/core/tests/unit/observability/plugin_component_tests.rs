@@ -5669,6 +5669,54 @@ fn email_session_filter() -> Arc<EndpointSessionFilter> {
 }
 
 #[test]
+fn endpoint_session_filter_uses_shared_validation_rules_for_builds_and_diagnostics() {
+    let filter = OpenTelemetrySessionFilterConfig::BlockAfterToolMatch(
+        BlockAfterToolMatchSessionFilterConfig {
+            session_metadata_key: " ".to_string(),
+            tool_name_patterns: vec!["(".to_string()],
+            unattributed_events: UnattributedEventsPolicy::BlockAfterMatch,
+        },
+    );
+
+    let error = build_endpoint_session_filter(Some(&filter)).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "invalid config: OpenTelemetry session_filter requires a nonblank session_metadata_key and at least one tool_name_pattern"
+    );
+
+    let mut diagnostics = Vec::new();
+    validate_opentelemetry_session_filter(
+        &mut diagnostics,
+        &ConfigPolicy::default(),
+        "opentelemetry",
+        "endpoints[0].session_filter",
+        Some(&filter),
+    );
+    assert_eq!(diagnostics.len(), 2);
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("session_metadata_key must be nonblank")
+    }));
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("tool_name_patterns[0] is not a valid regex")
+    }));
+
+    let empty = BlockAfterToolMatchSessionFilterConfig {
+        session_metadata_key: "session_id".to_string(),
+        tool_name_patterns: Vec::new(),
+        unattributed_events: UnattributedEventsPolicy::BlockAfterMatch,
+    };
+    let violations = validate_block_after_tool_match_session_filter(&empty).unwrap_err();
+    assert!(matches!(
+        violations.as_slice(),
+        [SessionFilterConfigViolation::EmptyToolNamePatterns]
+    ));
+}
+
+#[test]
 fn endpoint_session_filter_blocks_only_the_matched_session_and_fails_closed_after_match() {
     let filter = email_session_filter();
     let parent = uuid::Uuid::now_v7();
