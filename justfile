@@ -1501,8 +1501,15 @@ test-go:
     prepare_test_plugin_fixtures
 
     if [[ "$is_windows" == true ]]; then
-        export CC=clang
-        export CXX=clang++
+        compiler_wrapper="$NEMO_RELAY_REPO_ROOT/scripts/go-windows-compiler.sh"
+        if command -v cygpath >/dev/null 2>&1; then
+            compiler_wrapper="$(cygpath -u "$compiler_wrapper")"
+        fi
+        # Go versions before 1.27 pass the MinGW-only -mthreads flag even when
+        # Clang targets MSVC. Filter that one flag while preserving Clang/lld
+        # for the MSVC-built FFI library.
+        export CC="bash \"$compiler_wrapper\" clang"
+        export CXX="bash \"$compiler_wrapper\" clang++"
         # Go's Windows linker checks -extldflags before deciding whether to
         # inject a GNU linker script; CGO_LDFLAGS is too late for that check.
         go_ldflags+=(-extldflags=-fuse-ld=lld)
