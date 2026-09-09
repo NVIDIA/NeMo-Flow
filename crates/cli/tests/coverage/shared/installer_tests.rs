@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use base64::Engine;
 use std::path::Path;
 use std::time::Duration;
 
@@ -10,6 +9,173 @@ use reqwest::header::HeaderMap;
 use serde_json::Value;
 
 use crate::agents::CodingAgent;
+
+fn hook_request(agent: CodingAgent) -> HookForwardRequest {
+    HookForwardRequest {
+        agent,
+        hook_config: None,
+        gateway_url: None,
+        generation_file: None,
+        generation_token: None,
+        forward_only: false,
+        transparent_run: false,
+        profile: None,
+        session_metadata: None,
+        gateway_mode: None,
+        failure_policy: HookFailurePolicy::Default,
+    }
+}
+
+fn write_private_hook_config(path: &std::path::Path, contents: &str) {
+    std::fs::write(path, contents).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    #[cfg(windows)]
+    crate::filesystem::protect_private_windows_path(path).unwrap();
+}
+
+#[test]
+fn private_hook_config_round_trips_and_hydrates_a_hook_request() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("hook.json");
+    HookCommandConfig::transparent(CodingAgent::Codex, "http://127.0.0.1:1234")
+        .write(&path)
+        .unwrap();
+
+    let config = HookCommandConfig::load(&path).unwrap();
+    let mut request = hook_request(CodingAgent::Codex);
+    request.transparent_run = true;
+    config.apply(&mut request).unwrap();
+    assert_eq!(
+        request.gateway_url.as_deref(),
+        Some("http://127.0.0.1:1234")
+    );
+    assert!(request.transparent_run);
+    assert!(request.generation_file.is_none());
+    assert!(request.generation_token.is_none());
+}
+
+#[test]
+fn private_hook_config_rejects_agent_mismatch_and_inline_configuration() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("hook.json");
+    HookCommandConfig::transparent(CodingAgent::Codex, "http://127.0.0.1:1234")
+        .write(&path)
+        .unwrap();
+
+    let mut agent_mismatch = hook_request(CodingAgent::ClaudeCode);
+    assert!(
+        HookCommandConfig::load(&path)
+            .unwrap()
+            .apply(&mut agent_mismatch)
+            .unwrap_err()
+            .contains("requested claude")
+    );
+
+    let mut inline_configuration = hook_request(CodingAgent::Codex);
+    inline_configuration.gateway_url = Some("http://127.0.0.1:5678".into());
+    assert!(
+        HookCommandConfig::load(&path)
+            .unwrap()
+            .apply(&mut inline_configuration)
+            .unwrap_err()
+            .contains("cannot be combined")
+    );
+}
+
+#[test]
+fn private_hook_config_rejects_unknown_and_incomplete_values() {
+    let directory = tempfile::tempdir().unwrap();
+    let unknown = directory.path().join("unknown.json");
+    write_private_hook_config(
+        &unknown,
+        r#"{"version":1,"agent":"codex","gateway_url":"http://127.0.0.1:1234","forward_only":false,"transparent_run":true,"unexpected":true}"#,
+    );
+    assert!(
+        HookCommandConfig::load(&unknown)
+            .unwrap_err()
+            .contains("failed to parse")
+    );
+
+    let incomplete = directory.path().join("incomplete.json");
+    write_private_hook_config(
+        &incomplete,
+        r#"{"version":1,"agent":"codex","gateway_url":"http://127.0.0.1:1234","generation_file":"generation","generation_token":null,"forward_only":false,"transparent_run":false}"#,
+    );
+    assert!(
+        HookCommandConfig::load(&incomplete)
+            .unwrap_err()
+            .contains("both generation file and token")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn private_hook_config_rejects_symlinks_and_broad_permissions() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    let directory = tempfile::tempdir().unwrap();
+    let config = directory.path().join("hook.json");
+    HookCommandConfig::transparent(CodingAgent::Codex, "http://127.0.0.1:1234")
+        .write(&config)
+        .unwrap();
+    let link = directory.path().join("hook-link.json");
+    symlink(&config, &link).unwrap();
+    assert!(
+        HookCommandConfig::load(&link)
+            .unwrap_err()
+            .contains("owner-only regular file")
+    );
+
+    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(
+        HookCommandConfig::load(&config)
+            .unwrap_err()
+            .contains("owner-only regular file")
+    );
+
+    let unsafe_parent = directory.path().join("unsafe-parent");
+    std::fs::create_dir(&unsafe_parent).unwrap();
+    let private_config = unsafe_parent.join("hook.json");
+    HookCommandConfig::transparent(CodingAgent::Codex, "http://127.0.0.1:1234")
+        .write(&private_config)
+        .unwrap();
+    std::fs::set_permissions(&unsafe_parent, std::fs::Permissions::from_mode(0o777)).unwrap();
+    assert!(
+        HookCommandConfig::load(&private_config)
+            .unwrap_err()
+            .contains("parent must be current-user-owned and non-group/world-writable")
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // The process-wide environment lock must cover the hook call.
+async fn transparent_run_skips_stale_persistent_hook_config_before_loading_it() {
+    let _guard = crate::test_support::ENV_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let previous = std::env::var_os(crate::configuration::TRANSPARENT_RUN_ENV);
+    // SAFETY: The process-wide environment lock is held for this test.
+    unsafe { std::env::set_var(crate::configuration::TRANSPARENT_RUN_ENV, "1") };
+    let mut request = hook_request(CodingAgent::Codex);
+    request.hook_config = Some(std::path::PathBuf::from(
+        "missing-persistent-hook-config.json",
+    ));
+    request.failure_policy = HookFailurePolicy::FailClosed;
+    let result = crate::hooks::hook_forward(request).await;
+    // SAFETY: The process-wide environment lock is still held for this test.
+    unsafe {
+        match previous {
+            Some(value) => std::env::set_var(crate::configuration::TRANSPARENT_RUN_ENV, value),
+            None => std::env::remove_var(crate::configuration::TRANSPARENT_RUN_ENV),
+        }
+    }
+    assert!(result.is_ok());
+}
 
 struct BootstrapConfigHome {
     _guard: std::sync::MutexGuard<'static, ()>,
@@ -115,6 +281,7 @@ async fn transparent_hook_delivery_authenticates_the_wrapper_gateway() {
     .expect("wrapper gateway did not become healthy");
     let command = HookForwardRequest {
         agent: CodingAgent::Codex,
+        hook_config: None,
         gateway_url: Some(gateway_url.clone()),
         generation_file: None,
         generation_token: None,
@@ -278,27 +445,6 @@ fn hook_response_statuses_preserve_guardrail_rejections_and_fail_closed_errors()
 }
 
 #[test]
-fn windows_hook_decoder_rejects_unsafe_odd_and_trailing_argument_envelopes() {
-    const SEPARATOR: &str = " -NoLogo -NoProfile -NonInteractive -EncodedCommand ";
-    #[cfg(windows)]
-    let launcher = windows_powershell_path().unwrap();
-    #[cfg(not(windows))]
-    let launcher = "C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe".to_string();
-
-    assert!(decode_windows_hook_command(&format!("powershell.exe{SEPARATOR}QQ==")).is_none());
-    assert!(decode_windows_hook_command(&format!("{launcher}{SEPARATOR}QQ==")).is_none());
-
-    let script = "$ErrorActionPreference='Stop'; & 'relay' ; if ($null -eq $LASTEXITCODE) { exit 1 }; exit $LASTEXITCODE";
-    let encoded = base64::engine::general_purpose::STANDARD.encode(
-        script
-            .encode_utf16()
-            .flat_map(u16::to_le_bytes)
-            .collect::<Vec<_>>(),
-    );
-    assert!(decode_windows_hook_command(&format!("{launcher}{SEPARATOR}{encoded}")).is_none());
-}
-
-#[test]
 fn merge_hooks_is_idempotent_and_preserves_existing_entries() {
     let existing = json!({
         "hooks": {
@@ -361,53 +507,33 @@ fn helper_formatting_and_headers_cover_optional_paths() {
 #[test]
 fn generated_hook_dispatch_covers_all_agents() {
     assert_generated_hook_policies();
+    let config = "/private/nemo-relay-hook.json";
     assert_eq!(
         transparent_hook_forward_commands_for_platform(
             Path::new("/abs/path/to/nemo-relay"),
             CodingAgent::Codex,
-            "http://127.0.0.1:1234",
+            config,
             false,
         )
         .for_event("PreToolUse"),
-        "/abs/path/to/nemo-relay hook-forward codex --gateway-url http://127.0.0.1:1234 --transparent-run --fail-closed"
+        "/abs/path/to/nemo-relay hook-forward codex --hook-config /private/nemo-relay-hook.json --transparent-run --fail-closed"
     );
     let relay = Path::new("/opt/NeMo Relay's & tools/nemo-relay");
     assert_eq!(
-        transparent_hook_forward_commands_for_platform(
-            relay,
-            CodingAgent::Codex,
-            "http://127.0.0.1:1234",
-            false
-        )
-        .for_event("SessionStart"),
-        r#"'/opt/NeMo Relay'\''s & tools/nemo-relay' hook-forward codex --gateway-url http://127.0.0.1:1234 --transparent-run --fail-open"#
+        transparent_hook_forward_commands_for_platform(relay, CodingAgent::Codex, config, false)
+            .for_event("SessionStart"),
+        r#"'/opt/NeMo Relay'\''s & tools/nemo-relay' hook-forward codex --hook-config /private/nemo-relay-hook.json --transparent-run --fail-open"#
     );
-    let native = transparent_hook_forward_commands(
-        Path::new("nemo-relay"),
-        CodingAgent::Codex,
-        "http://127.0.0.1:1234",
-    )
-    .unwrap();
-    if cfg!(windows) {
-        assert_eq!(
-            decode_windows_hook_command(native.for_event("on_session_start")).unwrap(),
-            vec![
-                String::from("nemo-relay"),
-                String::from("hook-forward"),
-                String::from("codex"),
-                String::from("--gateway-url"),
-                String::from("http://127.0.0.1:1234"),
-                String::from("--transparent-run"),
-                String::from("--fail-open"),
-            ]
-        );
-    } else {
+    let native =
+        transparent_hook_forward_commands(Path::new("nemo-relay"), CodingAgent::Codex, config)
+            .unwrap();
+    if !cfg!(windows) {
         assert_eq!(
             native,
             transparent_hook_forward_commands_for_platform(
                 Path::new("nemo-relay"),
                 CodingAgent::Codex,
-                "http://127.0.0.1:1234",
+                config,
                 false,
             )
         );
@@ -415,56 +541,13 @@ fn generated_hook_dispatch_covers_all_agents() {
     let windows = transparent_hook_forward_commands_for_platform(
         relay,
         CodingAgent::ClaudeCode,
-        "http://127.0.0.1:1234",
+        config,
         true,
     );
     let windows = windows.for_event("PreToolUse");
-    let (launcher, encoded) = windows.rsplit_once(' ').unwrap();
-    assert_eq!(
-        launcher,
-        "C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand"
-    );
-    assert!(
-        !encoded.is_empty()
-            && encoded
-                .chars()
-                .all(|character| character.is_ascii_alphanumeric()
-                    || matches!(character, '+' | '/' | '='))
-    );
-    assert_eq!(
-        decode_windows_hook_command(windows).unwrap(),
-        vec![
-            relay.display().to_string(),
-            "hook-forward".into(),
-            "claude".into(),
-            "--gateway-url".into(),
-            "http://127.0.0.1:1234".into(),
-            "--transparent-run".into(),
-            "--fail-closed".into(),
-        ]
-    );
-    assert!(decode_windows_hook_command("powershell.exe -EncodedCommand invalid").is_none());
-    assert!(
-        decode_windows_hook_command(
-            "C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand invalid payload"
-        )
-        .is_none()
-    );
-    let oversized = format!(
-        "C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand {}",
-        "A".repeat(8_000)
-    );
-    assert!(decode_windows_hook_command(&oversized).is_none());
-
-    let oversized_path = format!("C:/{}nemo-relay.exe", "long/".repeat(2_000));
-    let error = encoded_windows_hook_command(
-        "C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe",
-        Path::new(&oversized_path),
-        &["hook-forward".into(), "codex".into()],
-    )
-    .unwrap_err();
-    assert!(error.contains("exceeds the 8000-character safety limit"));
-    assert!(error.contains("shorten the Relay or plugin installation path"));
+    assert!(windows.contains("--hook-config"));
+    assert!(!windows.contains("PowerShell"));
+    assert!(!windows.contains("EncodedCommand"));
 }
 
 fn assert_generated_hook_policies() {

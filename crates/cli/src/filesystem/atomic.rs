@@ -199,7 +199,7 @@ fn create_private_windows_file(path: &Path) -> io::Result<File> {
 pub(crate) fn open_private_windows_file(path: &Path) -> io::Result<File> {
     use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
     use windows_sys::Win32::Storage::FileSystem::{
-        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_ALWAYS,
     };
 
     let file = with_private_windows_descriptor(|descriptor| {
@@ -209,9 +209,50 @@ pub(crate) fn open_private_windows_file(path: &Path) -> io::Result<File> {
             GENERIC_READ | GENERIC_WRITE,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             OPEN_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL,
         )
     })?;
     protect_private_windows_path(path)?;
+    Ok(file)
+}
+
+/// Opens an existing private file without following a reparse point.
+#[cfg(windows)]
+pub(crate) fn open_private_windows_file_for_read(path: &Path) -> io::Result<File> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::GENERIC_READ;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, GetFileInformationByHandle, OPEN_EXISTING,
+    };
+
+    let file = with_private_windows_descriptor(|descriptor| {
+        open_windows_file(
+            path,
+            descriptor,
+            GENERIC_READ,
+            FILE_SHARE_READ,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+        )
+    })?;
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: `file` owns a valid handle and `information` points to writable storage.
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle().cast(), &mut information) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "private file must not be a reparse point",
+        ));
+    }
+    if !windows_handle_is_private(file.as_raw_handle().cast())? {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "private file must have the Relay private owner/System access control list",
+        ));
+    }
     Ok(file)
 }
 
@@ -362,6 +403,82 @@ pub(crate) fn windows_path_is_private(path: &Path) -> io::Result<bool> {
 }
 
 #[cfg(windows)]
+fn windows_handle_is_private(handle: windows_sys::Win32::Foundation::HANDLE) -> io::Result<bool> {
+    use windows_sys::Win32::Foundation::{ERROR_SUCCESS, LocalFree};
+    use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
+    use windows_sys::Win32::Security::{
+        DACL_SECURITY_INFORMATION, EqualSid, GetTokenInformation, OWNER_SECURITY_INFORMATION,
+        PSECURITY_DESCRIPTOR, TOKEN_QUERY, TOKEN_USER, TokenUser,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    let mut owner = std::ptr::null_mut();
+    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    // SAFETY: `handle` is valid and the output pointers remain writable for the call.
+    let status = unsafe {
+        GetSecurityInfo(
+            handle,
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            &mut owner,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut descriptor,
+        )
+    };
+    if status != ERROR_SUCCESS || descriptor.is_null() || owner.is_null() {
+        return Err(io::Error::from_raw_os_error(status as i32));
+    }
+    let result = (|| {
+        let mut token = std::ptr::null_mut();
+        // SAFETY: GetCurrentProcess returns a valid pseudo-handle and `token` is writable.
+        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let owner_matches = (|| {
+            let mut required = 0;
+            // SAFETY: This sizing call intentionally supplies a null output buffer.
+            unsafe {
+                GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut required)
+            };
+            if required == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let word = std::mem::size_of::<usize>();
+            let mut buffer = vec![0_usize; (required as usize).div_ceil(word)];
+            // SAFETY: The aligned buffer has at least `required` writable bytes.
+            if unsafe {
+                GetTokenInformation(
+                    token,
+                    TokenUser,
+                    buffer.as_mut_ptr().cast(),
+                    required,
+                    &mut required,
+                )
+            } == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: GetTokenInformation initialized a TOKEN_USER at the aligned buffer address.
+            let user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
+            // SAFETY: Both SIDs remain valid while their backing storage is alive.
+            Ok(unsafe { EqualSid(owner, user.User.Sid) != 0 })
+        })();
+        // SAFETY: `token` is an owned handle returned by OpenProcessToken.
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(token) };
+        if !owner_matches? {
+            return Ok(false);
+        }
+        let actual = windows_dacl_sddl(descriptor)?;
+        with_private_windows_descriptor(|expected| Ok(actual == windows_dacl_sddl(expected)?))
+    })();
+    // SAFETY: GetSecurityInfo allocated `descriptor` for the caller.
+    unsafe { LocalFree(descriptor.cast()) };
+    result
+}
+
+#[cfg(windows)]
 fn windows_dacl_sddl(
     descriptor: windows_sys::Win32::Security::PSECURITY_DESCRIPTOR,
 ) -> io::Result<String> {
@@ -450,9 +567,16 @@ fn create_windows_file(
     descriptor: windows_sys::Win32::Security::PSECURITY_DESCRIPTOR,
 ) -> io::Result<File> {
     use windows_sys::Win32::Foundation::GENERIC_WRITE;
-    use windows_sys::Win32::Storage::FileSystem::CREATE_NEW;
+    use windows_sys::Win32::Storage::FileSystem::{CREATE_NEW, FILE_ATTRIBUTE_NORMAL};
 
-    open_windows_file(path, descriptor, GENERIC_WRITE, 0, CREATE_NEW)
+    open_windows_file(
+        path,
+        descriptor,
+        GENERIC_WRITE,
+        0,
+        CREATE_NEW,
+        FILE_ATTRIBUTE_NORMAL,
+    )
 }
 
 #[cfg(windows)]
@@ -462,11 +586,12 @@ fn open_windows_file(
     desired_access: u32,
     share_mode: u32,
     creation_disposition: u32,
+    flags_and_attributes: u32,
 ) -> io::Result<File> {
     use std::os::windows::io::FromRawHandle;
     use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
     use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
-    use windows_sys::Win32::Storage::FileSystem::{CreateFileW, FILE_ATTRIBUTE_NORMAL};
+    use windows_sys::Win32::Storage::FileSystem::CreateFileW;
 
     let path = windows_wide(path.as_os_str());
     let attributes = SECURITY_ATTRIBUTES {
@@ -483,7 +608,7 @@ fn open_windows_file(
             share_mode,
             &attributes,
             creation_disposition,
-            FILE_ATTRIBUTE_NORMAL,
+            flags_and_attributes,
             std::ptr::null_mut(),
         )
     };
