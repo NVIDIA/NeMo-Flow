@@ -25,8 +25,8 @@ use nemo_relay::api::runtime::{
     EventMetadataInjectorFn, EventSanitizeFn, EventSubscriberFn, LlmCodecIdentity,
     LlmConditionalFn, LlmExecutionNextFn, LlmJsonStream, LlmRequestInterceptFn,
     LlmSanitizeRequestContext, LlmSanitizeRequestFn, LlmSanitizeResponseContext,
-    LlmSanitizeResponseFn, LlmStreamExecutionNextFn, ToolConditionalFn, ToolExecutionNextFn,
-    ToolInterceptFn, ToolSanitizeFn,
+    LlmSanitizeResponseFn, LlmStreamExecutionNextFn, ToolConditionalFn, ToolExecutionContext,
+    ToolExecutionNextFn, ToolInterceptFn, ToolSanitizeFn,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
@@ -1585,37 +1585,69 @@ pub fn wrap_js_tool_exec_intercept_fn(
 ) -> nemo_relay::api::runtime::ToolExecutionFn {
     Arc::new(move |_name: &str, args: Json, next: ToolExecutionNextFn| {
         let func = func.clone();
-        let next_json: JsonNextFn = Arc::new(move |next_args| {
-            let next = next.clone();
-            Box::pin(async move {
-                serde_json::to_value(next(next_args).await?)
-                    .map_err(|error| FlowError::Internal(error.to_string()))
-            })
-        });
+        Box::pin(call_js_tool_exec_intercept(func, args, next))
+    })
+}
+
+/// Wrap a JS function `(context, next) => outcome` for tool execution intercepts.
+///
+/// The JS callback receives a plain object carrying `toolName`, `arguments`,
+/// and `toolCallId`, so it can correlate a result it produces itself with the
+/// originating tool call.
+pub fn wrap_js_tool_exec_intercept_context_fn(
+    func: Arc<PromiseAwareFn>,
+) -> nemo_relay::api::runtime::ToolExecutionContextFn {
+    Arc::new(
+        move |context: ToolExecutionContext, next: ToolExecutionNextFn| {
+            let func = func.clone();
+            let js_context = serde_json::json!({
+                "toolName": context.tool_name(),
+                "arguments": context.arguments(),
+                "toolCallId": context.tool_call_id(),
+            });
+            Box::pin(call_js_tool_exec_intercept(func, js_context, next))
+        },
+    )
+}
+
+/// Invoke a JS tool execution intercept and decode its outcome.
+///
+/// `primary` is the callback's first argument: the raw arguments for the
+/// legacy shape, or the serialized context for the context shape. Both shapes
+/// share the continuation packaging and outcome decoding.
+async fn call_js_tool_exec_intercept(
+    func: Arc<PromiseAwareFn>,
+    primary: Json,
+    next: ToolExecutionNextFn,
+) -> Result<ToolExecutionInterceptOutcome> {
+    let next_json: JsonNextFn = Arc::new(move |next_args| {
+        let next = next.clone();
         Box::pin(async move {
-            let result = func.call_with_json_next(args, next_json).await?;
-            #[derive(Deserialize)]
-            #[serde(rename_all = "camelCase")]
-            struct JsOutcome {
-                result: Json,
-                #[serde(default)]
-                annotation: Option<Json>,
-                #[serde(default)]
-                pending_marks: Vec<JsPendingMarkSpec>,
-            }
-            let outcome: JsOutcome = serde_json::from_value(result).map_err(|error| {
-                FlowError::InvalidArgument(format!(
-                    "tool execution intercept must return {{ result, annotation?, pendingMarks? }}; return {{ result: downstream.result, annotation: downstream.annotation }} after next(args): {error}"
-                ))
-            })?;
-            Ok(ToolExecutionInterceptOutcome {
-                result: outcome.result,
-                annotation: outcome
-                    .annotation
-                    .filter(|annotation| !annotation.is_null()),
-                pending_marks: outcome.pending_marks.into_iter().map(Into::into).collect(),
-            })
+            serde_json::to_value(next(next_args).await?)
+                .map_err(|error| FlowError::Internal(error.to_string()))
         })
+    });
+    let result = func.call_with_json_next(primary, next_json).await?;
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct JsOutcome {
+        result: Json,
+        #[serde(default)]
+        annotation: Option<Json>,
+        #[serde(default)]
+        pending_marks: Vec<JsPendingMarkSpec>,
+    }
+    let outcome: JsOutcome = serde_json::from_value(result).map_err(|error| {
+        FlowError::InvalidArgument(format!(
+            "tool execution intercept must return {{ result, annotation?, pendingMarks? }}; return {{ result: downstream.result, annotation: downstream.annotation }} after next(args): {error}"
+        ))
+    })?;
+    Ok(ToolExecutionInterceptOutcome {
+        result: outcome.result,
+        annotation: outcome
+            .annotation
+            .filter(|annotation| !annotation.is_null()),
+        pending_marks: outcome.pending_marks.into_iter().map(Into::into).collect(),
     })
 }
 

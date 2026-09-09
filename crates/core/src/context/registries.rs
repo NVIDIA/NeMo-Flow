@@ -16,7 +16,7 @@ use crate::api::registry::{
 use crate::api::runtime::{
     EventSanitizeFn, EventSubscriberFn, LlmConditionalFn, LlmExecutionFn, LlmRequestInterceptFn,
     LlmSanitizeRequestFn, LlmSanitizeResponseFn, LlmStreamExecutionFn, ToolConditionalFn,
-    ToolExecutionFn, ToolInterceptFn, ToolSanitizeFn,
+    ToolExecutionContextFn, ToolInterceptFn, ToolSanitizeFn,
 };
 use crate::registry::SortedRegistry;
 
@@ -45,7 +45,8 @@ pub(crate) struct ScopeLocalRegistries {
     /// Tool request intercepts that can rewrite arguments before execution.
     pub(crate) tool_request_intercepts: SortedRegistry<Intercept<ToolInterceptFn>>,
     /// Tool execution intercepts that wrap or replace callback execution.
-    pub(crate) tool_execution_intercepts: SortedRegistry<ExecutionIntercept<ToolExecutionFn>>,
+    pub(crate) tool_execution_intercepts:
+        SortedRegistry<ExecutionIntercept<ToolExecutionContextFn>>,
     /// LLM request sanitizers applied to emitted LLM-start payloads.
     pub(crate) llm_sanitize_request_guardrails: SortedRegistry<Guardrail<LlmSanitizeRequestFn>>,
     /// LLM response sanitizers applied to emitted LLM-end payloads.

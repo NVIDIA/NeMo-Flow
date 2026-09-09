@@ -144,6 +144,62 @@ func TestToolCallExecuteBasic(t *testing.T) {
 	}
 }
 
+func TestToolExecutionInterceptV2ReceivesToolCallID(t *testing.T) {
+	const interceptName = "go_tool_exec_context"
+	var seenMu sync.Mutex
+	var seen ToolExecutionContext
+	if err := RegisterToolExecutionInterceptV2(interceptName, 1,
+		func(ctx ToolExecutionContext, next func(json.RawMessage) (ToolExecutionResult, error)) (ToolExecutionInterceptOutcome, error) {
+			seenMu.Lock()
+			seen = ctx
+			seenMu.Unlock()
+			downstream, err := next(ctx.Arguments)
+			if err != nil {
+				return ToolExecutionInterceptOutcome{}, err
+			}
+			return ToolExecutionInterceptOutcome{Result: downstream.Result}, nil
+		},
+	); err != nil {
+		t.Fatalf(registerFailed, err)
+	}
+	t.Cleanup(func() { _ = DeregisterToolExecutionIntercept(interceptName) })
+
+	result, err := ToolCallExecute(
+		"context_tool",
+		json.RawMessage(`{"value":7}`),
+		func(args json.RawMessage) (ToolExecutionResult, error) {
+			return ToolExecutionResult{Result: args}, nil
+		},
+		WithToolCallID("go-call-abc"),
+	)
+	if err != nil {
+		t.Fatalf(toolCallExecuteFailed, err)
+	}
+
+	seenMu.Lock()
+	defer seenMu.Unlock()
+	if seen.ToolName != "context_tool" {
+		t.Fatalf("unexpected tool name: %q", seen.ToolName)
+	}
+	if seen.ToolCallID != "go-call-abc" {
+		t.Fatalf("tool call id did not reach the intercept: %q", seen.ToolCallID)
+	}
+	var args map[string]any
+	if err := json.Unmarshal(seen.Arguments, &args); err != nil {
+		t.Fatalf("decode context arguments: %v", err)
+	}
+	if args["value"] != float64(7) {
+		t.Fatalf("unexpected context arguments: %s", seen.Arguments)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(result.Result, &payload); err != nil {
+		t.Fatalf("decode result payload: %v", err)
+	}
+	if payload["value"] != float64(7) {
+		t.Fatalf("unexpected result payload: %s", result.Result)
+	}
+}
+
 func TestToolExecutionResultAnnotationRoundTrip(t *testing.T) {
 	const interceptName = "go_tool_result_annotation"
 	if err := RegisterToolExecutionIntercept(interceptName, 1,

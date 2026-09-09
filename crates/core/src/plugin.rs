@@ -37,15 +37,15 @@ use crate::api::registry::{
     register_llm_sanitize_request_guardrail, register_llm_sanitize_response_guardrail,
     register_llm_stream_execution_intercept, register_mark_sanitize_guardrail,
     register_scope_sanitize_end_guardrail, register_scope_sanitize_start_guardrail,
-    register_tool_conditional_execution_guardrail, register_tool_execution_intercept,
+    register_tool_conditional_execution_guardrail, register_tool_execution_intercept_v2,
     register_tool_request_intercept, register_tool_sanitize_request_guardrail,
     register_tool_sanitize_response_guardrail,
 };
 use crate::api::runtime::{
     ConditionalMiddlewareGuardrailFn, EventMetadataInjectorFn, EventSanitizeFn, EventSubscriberFn,
     LlmConditionalFn, LlmExecutionFn, LlmRequestInterceptFn, LlmSanitizeRequestFn,
-    LlmSanitizeResponseFn, LlmStreamExecutionFn, ToolConditionalFn, ToolExecutionFn,
-    ToolInterceptFn, ToolSanitizeFn,
+    LlmSanitizeResponseFn, LlmStreamExecutionFn, ToolConditionalFn, ToolExecutionContextFn,
+    ToolExecutionFn, ToolInterceptFn, ToolSanitizeFn, tool_execution_fn_with_context,
 };
 use crate::api::subscriber::{deregister_subscriber, register_subscriber};
 pub use nemo_relay_types::plugin::{ConfigDiagnostic, DiagnosticLevel};
@@ -957,17 +957,38 @@ impl PluginRegistrationContext {
         Ok(())
     }
 
-    /// Registers a tool execution intercept and records its rollback closure.
+    /// Registers a tool execution intercept using the legacy callback shape and
+    /// records its rollback closure.
+    ///
+    /// The callback receives `(tool_name, arguments, next)` and cannot observe
+    /// the managed `tool_call_id`; use
+    /// [`Self::register_tool_execution_intercept_v2`] for that.
     pub fn register_tool_execution_intercept(
         &mut self,
         name: &str,
         priority: i32,
         callback: ToolExecutionFn,
     ) -> Result<()> {
+        self.register_tool_execution_intercept_v2(
+            name,
+            priority,
+            tool_execution_fn_with_context(callback),
+        )
+    }
+
+    /// Registers a tool execution intercept that receives the full
+    /// [`ToolExecutionContext`](crate::api::runtime::ToolExecutionContext) and
+    /// records its rollback closure.
+    pub fn register_tool_execution_intercept_v2(
+        &mut self,
+        name: &str,
+        priority: i32,
+        callback: ToolExecutionContextFn,
+    ) -> Result<()> {
         let qualified_name = self.qualify_name(name);
-        register_tool_execution_intercept(&qualified_name, priority, callback).map_err(|err| {
-            PluginError::RegistrationFailed(format!("tool execution intercept: {err}"))
-        })?;
+        register_tool_execution_intercept_v2(&qualified_name, priority, callback).map_err(
+            |err| PluginError::RegistrationFailed(format!("tool execution intercept: {err}")),
+        )?;
 
         let name_owned = qualified_name;
         self.registrations.push(PluginRegistration::new(

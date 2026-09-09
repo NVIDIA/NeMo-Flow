@@ -32,8 +32,9 @@ use crate::api::runtime::{
     LlmCodecIdentity, LlmConditionalFn, LlmExecutionFn, LlmExecutionNextFn, LlmJsonStream,
     LlmRequestInterceptFn, LlmSanitizeRequestContext, LlmSanitizeRequestFn,
     LlmSanitizeResponseContext, LlmSanitizeResponseFn, LlmStreamExecutionFn,
-    LlmStreamExecutionNextFn, MiddlewareContinuationContext, ToolConditionalFn, ToolExecutionFn,
-    ToolExecutionNextFn, ToolInterceptFn, ToolSanitizeFn,
+    LlmStreamExecutionNextFn, MiddlewareContinuationContext, ToolConditionalFn,
+    ToolExecutionContext, ToolExecutionContextFn, ToolExecutionFn, ToolExecutionNextFn,
+    ToolInterceptFn, ToolSanitizeFn,
 };
 use crate::api::runtime::{
     ScopeStackHandle, ThreadScopeStackBinding, capture_thread_scope_stack, create_scope_stack,
@@ -3577,11 +3578,17 @@ fn wrap_native_async_tool_execution(
     cb: NemoRelayNativeAsyncMiddlewareCb,
     user_data: *mut c_void,
     free_fn: NemoRelayNativeFreeFn,
-) -> ToolExecutionFn {
+) -> ToolExecutionContextFn {
     let user_data = make_user_data(instance, user_data, free_fn);
-    Arc::new(move |name, args, next| {
+    Arc::new(move |context: ToolExecutionContext, next| {
         let user_data = user_data.clone();
-        let invocation = serde_json::json!({"name": name, "value": args});
+        // `tool_call_id` is an additive field on the tool-invocation envelope;
+        // plugins built before it existed ignore it.
+        let invocation = serde_json::json!({
+            "name": context.tool_name(),
+            "value": context.arguments(),
+            "tool_call_id": context.tool_call_id(),
+        });
         Box::pin(async move {
             let outcome = invoke_native_async_callback(
                 cb,
@@ -3818,7 +3825,7 @@ unsafe extern "C" fn native_plugin_context_register_async_middleware(
                 wrap_native_async_tool_json(instance, cb, user_data, free_fn),
             ),
         NemoRelayNativeAsyncMiddlewareKind::ToolExecutionIntercept => context
-            .register_tool_execution_intercept(
+            .register_tool_execution_intercept_v2(
                 &name,
                 priority,
                 wrap_native_async_tool_execution(instance, cb, user_data, free_fn),

@@ -204,6 +204,11 @@ type ToolRequestFn = Arc<dyn Fn(String, Json) -> BoxFutureResult<Json> + Send + 
 type ToolExecutionFn = Arc<
     dyn Fn(&str, Json, ToolNext) -> BoxFutureResult<ToolExecutionInterceptOutcome> + Send + Sync,
 >;
+type ToolExecutionContextFn = Arc<
+    dyn Fn(ToolExecutionContext, ToolNext) -> BoxFutureResult<ToolExecutionInterceptOutcome>
+        + Send
+        + Sync,
+>;
 type LlmSanitizeRequestFn = Arc<
     dyn Fn(LlmRequest, LlmSanitizeRequestContext) -> BoxFutureResult<Option<LlmRequest>>
         + Send
@@ -211,6 +216,43 @@ type LlmSanitizeRequestFn = Arc<
 >;
 type LlmSanitizeResponseFn =
     Arc<dyn Fn(Json, LlmSanitizeResponseContext) -> BoxFutureResult<Option<Json>> + Send + Sync>;
+
+/// Per-call context supplied to a tool execution intercept.
+///
+/// `tool_call_id` is the provider-issued correlation identifier recorded on the
+/// managed tool call, and is `None` when the call did not record one.
+#[derive(Debug, Clone)]
+pub struct ToolExecutionContext {
+    tool_name: String,
+    arguments: Json,
+    tool_call_id: Option<String>,
+}
+
+impl ToolExecutionContext {
+    /// Returns the tool name associated with the execution.
+    #[must_use]
+    pub fn tool_name(&self) -> &str {
+        &self.tool_name
+    }
+
+    /// Returns the JSON argument payload entering this intercept.
+    #[must_use]
+    pub fn arguments(&self) -> &Json {
+        &self.arguments
+    }
+
+    /// Consumes the context and returns its JSON argument payload.
+    #[must_use]
+    pub fn into_arguments(self) -> Json {
+        self.arguments
+    }
+
+    /// Returns the provider-issued tool-call correlation identifier.
+    #[must_use]
+    pub fn tool_call_id(&self) -> Option<&str> {
+        self.tool_call_id.as_deref()
+    }
+}
 
 /// Active codec context supplied to an LLM request sanitizer.
 #[derive(Clone)]
@@ -338,6 +380,7 @@ struct WorkerHandlers {
     tool_conditionals: HashMap<String, ToolConditionalFn>,
     tool_requests: HashMap<String, ToolRequestFn>,
     tool_executions: HashMap<String, ToolExecutionFn>,
+    tool_execution_contexts: HashMap<String, ToolExecutionContextFn>,
     llm_sanitize_requests: HashMap<String, LlmSanitizeRequestFn>,
     llm_sanitize_responses: HashMap<String, LlmSanitizeResponseFn>,
     llm_conditionals: HashMap<String, LlmConditionalFn>,
@@ -633,6 +676,33 @@ impl PluginContext {
         self.handlers.tool_executions.insert(
             name.into(),
             Arc::new(move |tool, value, next| Box::pin(callback(tool, value, next))),
+        );
+    }
+
+    /// Registers a tool execution intercept receiving the full call context.
+    ///
+    /// The callback receives a [`ToolExecutionContext`] carrying the tool name,
+    /// the arguments entering this intercept, and the managed `tool_call_id`,
+    /// so an intercept that completes execution without calling
+    /// [`ToolNext::call`] can associate its result with the originating call.
+    pub fn register_tool_execution_intercept_v2<F, Fut>(
+        &mut self,
+        name: &str,
+        priority: i32,
+        callback: F,
+    ) where
+        F: Fn(ToolExecutionContext, ToolNext) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<ToolExecutionInterceptOutcome>> + Send + 'static,
+    {
+        self.push_registration(
+            name,
+            RegistrationSurface::ToolExecutionIntercept,
+            priority,
+            false,
+        );
+        self.handlers.tool_execution_contexts.insert(
+            name.into(),
+            Arc::new(move |context, next| Box::pin(callback(context, next))),
         );
     }
 
@@ -2368,11 +2438,22 @@ impl WorkerService {
         scope: &Option<ScopeContext>,
     ) -> Result<InvokeResponse> {
         let payload = tool_payload(request.payload)?;
-        let handler = self.tool_execution(&request.registration_name)?;
         let next = ToolNext {
             runtime: self.runtime.clone(),
             continuation_id: request.continuation_id,
         };
+        // A registration name lives in exactly one handler map, so checking the
+        // context map first is unambiguous rather than a precedence rule.
+        if let Some(handler) = self.tool_execution_context(&request.registration_name)? {
+            let context = ToolExecutionContext {
+                tool_name: payload.tool_name,
+                arguments: payload.value,
+                tool_call_id: payload.tool_call_id,
+            };
+            let future = with_thread_scope(scope, || handler(context, next));
+            return tool_execution_response(future.await?);
+        }
+        let handler = self.tool_execution(&request.registration_name)?;
         let future = with_thread_scope(scope, || handler(&payload.tool_name, payload.value, next));
         tool_execution_response(future.await?)
     }
@@ -2598,6 +2679,16 @@ impl WorkerService {
             })
     }
 
+    fn tool_execution_context(&self, name: &str) -> Result<Option<ToolExecutionContextFn>> {
+        Ok(self
+            .handlers
+            .lock()
+            .map_err(|err| WorkerSdkError::Callback(format!("handler lock poisoned: {err}")))?
+            .tool_execution_contexts
+            .get(name)
+            .cloned())
+    }
+
     fn llm_sanitize_request(&self, name: &str) -> Result<LlmSanitizeRequestFn> {
         self.handlers
             .lock()
@@ -2666,6 +2757,7 @@ impl WorkerService {
 struct ToolPayload {
     tool_name: String,
     value: Json,
+    tool_call_id: Option<String>,
 }
 
 struct LlmPayload {
@@ -2752,6 +2844,7 @@ fn tool_payload(
             Ok(ToolPayload {
                 tool_name: value.tool_name,
                 value: json,
+                tool_call_id: value.tool_call_id,
             })
         }
         _ => Err(WorkerSdkError::InvalidInput("expected tool payload".into())),

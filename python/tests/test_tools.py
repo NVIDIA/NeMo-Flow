@@ -479,6 +479,71 @@ class TestToolIntercepts:
         )
         assert intercepts.deregister_tool_execution("py_exec_int")
 
+    async def test_execution_intercept_v2_receives_tool_call_id(self):
+        seen = {}
+
+        async def context_intercept(context, next_call):
+            seen["tool_name"] = context.tool_name
+            seen["tool_call_id"] = context.tool_call_id
+            seen["arguments"] = context.arguments
+            downstream = await next_call(context.arguments)
+            return ToolExecutionInterceptOutcome(downstream.result)
+
+        intercepts.register_tool_execution_v2("py_exec_ctx", 1, context_intercept)
+        try:
+            result = await tools.execute(
+                "ctx_tool",
+                {"value": 42},
+                lambda args: ToolExecutionResult(args),
+                tool_call_id="call-abc123",
+            )
+        finally:
+            assert intercepts.deregister_tool_execution("py_exec_ctx")
+
+        assert result.result == {"value": 42}
+        assert seen["tool_name"] == "ctx_tool"
+        assert seen["tool_call_id"] == "call-abc123"
+        assert seen["arguments"] == {"value": 42}
+
+    async def test_execution_intercept_v2_tool_call_id_is_none_when_absent(self):
+        seen = {}
+
+        async def context_intercept(context, next_call):
+            seen["tool_call_id"] = context.tool_call_id
+            downstream = await next_call(context.arguments)
+            return ToolExecutionInterceptOutcome(downstream.result)
+
+        intercepts.register_tool_execution_v2("py_exec_ctx_none", 1, context_intercept)
+        try:
+            await tools.execute("plain_tool", {}, lambda args: ToolExecutionResult(args))
+        finally:
+            assert intercepts.deregister_tool_execution("py_exec_ctx_none")
+
+        assert seen["tool_call_id"] is None
+
+    async def test_legacy_and_v2_execution_intercepts_share_priority_order(self):
+        order = []
+
+        async def legacy_intercept(name, args, next_call):
+            order.append("legacy")
+            downstream = await next_call(args)
+            return ToolExecutionInterceptOutcome(downstream.result)
+
+        async def context_intercept(context, next_call):
+            order.append("context")
+            downstream = await next_call(context.arguments)
+            return ToolExecutionInterceptOutcome(downstream.result)
+
+        intercepts.register_tool_execution("py_exec_legacy_first", 1, legacy_intercept)
+        intercepts.register_tool_execution_v2("py_exec_ctx_second", 2, context_intercept)
+        try:
+            await tools.execute("mixed_tool", {"value": 1}, lambda args: ToolExecutionResult(args))
+        finally:
+            assert intercepts.deregister_tool_execution("py_exec_legacy_first")
+            assert intercepts.deregister_tool_execution("py_exec_ctx_second")
+
+        assert order == ["legacy", "context"]
+
     def test_duplicate_intercept_raises(self):
         intercepts.register_tool_request("py_dup_int", 1, False, lambda n, a: a)
         with pytest.raises(RuntimeError):

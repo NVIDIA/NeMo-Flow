@@ -1096,6 +1096,7 @@ async fn worker_service_reports_structured_callback_and_payload_errors() {
                             schema: "nemo.relay.Json@1".into(),
                             json: b"{".to_vec(),
                         }),
+                        tool_call_id: None,
                     },
                 )),
                 ..tool_invoke(
@@ -3043,6 +3044,7 @@ fn tool_invoke(
             ToolInvocation {
                 tool_name: "tool".into(),
                 value: Some(json_env(value)),
+                tool_call_id: None,
             },
         )),
     }

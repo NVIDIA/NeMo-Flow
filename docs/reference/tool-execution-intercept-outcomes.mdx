@@ -89,6 +89,66 @@ are never included in the application-visible tool result or passed to tool
 sanitize-response guardrails. They pass through the mark sanitizer registry
 when materialized.
 
+## Tool Execution Context
+
+An execution intercept can receive the tool call's context instead of only its
+arguments. The context carries three fields:
+
+| Field | Description |
+| --- | --- |
+| `tool_name` | Name of the tool being executed. |
+| `arguments` | JSON argument payload entering this intercept. |
+| `tool_call_id` | Provider-issued correlation identifier recorded on the managed tool call, or absent when the call did not record one. |
+
+`tool_call_id` is the same identifier that Relay records on tool lifecycle
+events. An intercept that completes execution itself, without invoking the
+remaining chain, uses it to associate its result with the originating tool
+call.
+
+Each binding keeps its existing registration function on the argument-only
+callback shape and adds a second registration function for the context shape.
+Both shapes share one registry, so they order together by priority and a single
+deregistration removes either.
+
+| Surface | Argument-only registration | Context registration |
+| --- | --- | --- |
+| Python | `register_tool_execution(name, priority, fn)` | `register_tool_execution_v2(name, priority, fn)` |
+| Rust | `register_tool_execution_intercept` | `register_tool_execution_intercept_v2` |
+| Go | `RegisterToolExecutionIntercept` | `RegisterToolExecutionInterceptV2` |
+| Node.js | `registerToolExecutionIntercept` | `registerToolExecutionInterceptV2` |
+| Public C | `nemo_relay_register_tool_execution_intercept` | `nemo_relay_register_tool_execution_intercept_v2` |
+| `grpc-v1` worker SDKs | `register_tool_execution_intercept` | `register_tool_execution_intercept_v2` |
+
+Scope-local and plugin-context registrations follow the same naming. The
+context callback takes two parameters rather than three, because the arguments
+move onto the context:
+
+```python
+async def measure(context, next_call):
+    downstream = await next_call(context.arguments)
+    record(context.tool_call_id, context.tool_name, downstream.result)
+    return ToolExecutionInterceptOutcome(result=downstream.result)
+
+nemo_relay.intercepts.register_tool_execution_v2("measure", 10, measure)
+```
+
+```javascript
+registerToolExecutionInterceptV2('measure', 10, async (context, next) => {
+  const downstream = await next(context.arguments);
+  record(context.toolCallId, context.toolName, downstream.result);
+  return { result: downstream.result };
+});
+```
+
+Node.js and the public C API never passed the tool name to the argument-only
+shape, so the context registration is a strict capability gain there. In
+Node.js the context object uses `toolName`, `arguments`, and `toolCallId`. The
+public C callback receives a single `context_json` string carrying `tool_name`,
+`arguments`, and `tool_call_id`; new context fields may be added to that object
+without another ABI change, so C callbacks must ignore unknown fields. The
+`grpc-v1` `ToolInvocation` message carries the identifier in an optional
+`tool_call_id` field, which older workers and hosts ignore.
+
 ## Binding Contract
 
 Managed callbacks, continuations, and execute helpers use the same logical

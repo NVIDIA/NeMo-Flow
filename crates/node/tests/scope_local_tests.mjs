@@ -43,6 +43,7 @@ const {
   scopeRegisterToolRequestIntercept,
   scopeDeregisterToolRequestIntercept,
   scopeRegisterToolExecutionIntercept,
+  scopeRegisterToolExecutionInterceptV2,
   scopeDeregisterToolExecutionIntercept,
   scopeRegisterLlmSanitizeRequestGuardrail,
   scopeDeregisterLlmSanitizeRequestGuardrail,
@@ -501,6 +502,35 @@ describe('Scope-local auto-cleanup on scope pop', () => {
       null,
     );
     assert.equal(result.sawIntercept, false);
+  });
+
+  it('scope-local v2 execution intercept receives the managed toolCallId', async () => {
+    const scope = pushScope('sl_ctx_tool_exec', ScopeType.Agent, null, null);
+    let seen = null;
+    scopeRegisterToolExecutionInterceptV2(scope.uuid, 'sl_ctx_tool_exec_int', 10, async (context, next) => {
+      seen = context;
+      const downstream = await next(context.arguments);
+      return { result: downstream.result };
+    });
+    try {
+      const result = await toolCallExecute(
+        'sl_ctx_tool',
+        { x: 5 },
+        (args) => ({ result: args.x }),
+        null,
+        null,
+        null,
+        null,
+        'sl-call-77',
+      );
+      assert.deepEqual(result, { result: 5 });
+      assert.equal(scopeDeregisterToolExecutionIntercept(scope.uuid, 'sl_ctx_tool_exec_int'), true);
+    } finally {
+      popScope(scope);
+    }
+    assert.equal(seen.toolName, 'sl_ctx_tool');
+    assert.equal(seen.toolCallId, 'sl-call-77');
+    assert.deepEqual(seen.arguments, { x: 5 });
   });
 
   it('scope-local tool execution intercept is cleaned up when scope is popped', async () => {

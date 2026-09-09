@@ -821,6 +821,21 @@ class LlmRequestInterceptOutcome:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class ToolExecutionContext:
+    """Per-call context provided to a tool execution intercept.
+
+    ``tool_call_id`` is the provider-issued correlation identifier recorded on
+    the managed tool call, or ``None`` when the call did not record one. It lets
+    an intercept that completes execution without calling
+    :meth:`ToolNext.call` associate its result with the originating tool call.
+    """
+
+    tool_name: str
+    arguments: Json
+    tool_call_id: str | None = None
+
+
 @dataclass(slots=True)
 class ToolExecutionResult:
     """Canonical application-visible result of tool execution."""
@@ -1029,6 +1044,10 @@ ToolExecutionCallback: TypeAlias = Callable[
     [str, Json, "ToolNext"],
     ToolExecutionInterceptOutcome | Awaitable[ToolExecutionInterceptOutcome],
 ]
+ToolExecutionContextCallback: TypeAlias = Callable[
+    ["ToolExecutionContext", "ToolNext"],
+    ToolExecutionInterceptOutcome | Awaitable[ToolExecutionInterceptOutcome],
+]
 LlmSanitizeRequestCallback: TypeAlias = Callable[
     [LlmRequest, LlmSanitizeRequestContext], LlmRequest | None | Awaitable[LlmRequest | None]
 ]
@@ -1062,6 +1081,7 @@ class _Handlers:
     tool_conditionals: dict[str, ToolConditionalCallback]
     tool_requests: dict[str, ToolRequestCallback]
     tool_executions: dict[str, ToolExecutionCallback]
+    tool_execution_contexts: dict[str, "ToolExecutionContextCallback"]
     llm_sanitize_requests: dict[str, LlmSanitizeRequestCallback]
     llm_sanitize_responses: dict[str, LlmSanitizeResponseCallback]
     llm_conditionals: dict[str, LlmConditionalCallback]
@@ -1085,6 +1105,7 @@ class _Handlers:
             tool_conditionals={},
             tool_requests={},
             tool_executions={},
+            tool_execution_contexts={},
             llm_sanitize_requests={},
             llm_sanitize_responses={},
             llm_conditionals={},
@@ -1377,6 +1398,28 @@ class PluginContext:
         """
         self._push_registration(name, pb.TOOL_EXECUTION_INTERCEPT, priority, False)
         self._handlers.tool_executions[name] = callback
+
+    def register_tool_execution_intercept_v2(
+        self,
+        name: str,
+        callback: ToolExecutionContextCallback,
+        *,
+        priority: int = 0,
+    ) -> None:
+        """Register tool execution middleware receiving the full call context.
+
+        Args:
+            name: Component-local registration name.
+            callback: Function receiving ``(context, next_call)`` and returning
+                :class:`ToolExecutionInterceptOutcome`, directly or through an
+                awaitable. ``context`` is a :class:`ToolExecutionContext`
+                exposing ``tool_name``, ``arguments``, and the managed
+                ``tool_call_id``. The callback can call :meth:`ToolNext.call`
+                zero, one, or multiple times while the invocation is active.
+            priority: Execution order. Lower values run first.
+        """
+        self._push_registration(name, pb.TOOL_EXECUTION_INTERCEPT, priority, False)
+        self._handlers.tool_execution_contexts[name] = callback
 
     def register_llm_sanitize_request_guardrail(
         self,
@@ -2501,13 +2544,26 @@ class _WorkerService(pb_grpc.PluginWorkerServicer):
                 )
                 return _json_response(result)
             if request.surface == pb.TOOL_EXECUTION_INTERCEPT:
-                result = await _maybe_await(
-                    self._handler(self._handlers.tool_executions, request.registration_name)(
-                        request.tool.tool_name,
-                        _decode_required_envelope(request.tool.value, "tool value"),
-                        ToolNext(self._runtime, request.continuation_id),
+                # A registration name lives in exactly one handler map, so
+                # checking the context map first is unambiguous.
+                context_callback = self._handlers.tool_execution_contexts.get(request.registration_name)
+                if context_callback is not None:
+                    context = ToolExecutionContext(
+                        tool_name=request.tool.tool_name,
+                        arguments=_decode_required_envelope(request.tool.value, "tool value"),
+                        tool_call_id=(request.tool.tool_call_id if request.tool.HasField("tool_call_id") else None),
                     )
-                )
+                    result = await _maybe_await(
+                        context_callback(context, ToolNext(self._runtime, request.continuation_id))
+                    )
+                else:
+                    result = await _maybe_await(
+                        self._handler(self._handlers.tool_executions, request.registration_name)(
+                            request.tool.tool_name,
+                            _decode_required_envelope(request.tool.value, "tool value"),
+                            ToolNext(self._runtime, request.continuation_id),
+                        )
+                    )
                 if not isinstance(result, ToolExecutionInterceptOutcome):
                     raise WorkerSdkError("tool execution intercept must return ToolExecutionInterceptOutcome")
                 return pb.InvokeResponse(

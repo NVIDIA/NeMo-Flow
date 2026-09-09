@@ -876,6 +876,7 @@ async fn callback_helpers_cover_worker_response_edges() {
             "tool_intercept_missing_result",
             "lookup",
             json!({}),
+            None,
             Arc::new(|args| Box::pin(async move { Ok(ToolExecutionResult::new(args)) })),
         )
         .await
@@ -891,6 +892,7 @@ async fn callback_helpers_cover_worker_response_edges() {
             "tool_intercept_invalid_result",
             "lookup",
             json!({}),
+            None,
             Arc::new(|args| Box::pin(async move { Ok(ToolExecutionResult::new(args)) })),
         )
         .await
@@ -1378,7 +1380,7 @@ async fn callback_timeout_sends_explicit_worker_cancellation() {
         "timeout",
         RegistrationSurface::ToolRequestIntercept,
         None,
-        Some(invoke_request_payload_tool("tool", json!({}))),
+        Some(invoke_request_payload_tool("tool", json!({}), None)),
     );
     let invocation_id = request.invocation_id.clone();
 
@@ -1442,7 +1444,7 @@ async fn dropping_callback_future_cancels_worker_and_cleans_host_state() {
         "cancel",
         RegistrationSurface::ToolExecutionIntercept,
         Some(continuation_id),
-        Some(invoke_request_payload_tool("tool", json!({}))),
+        Some(invoke_request_payload_tool("tool", json!({}), None)),
     );
     let scope_stack_id = request
         .scope

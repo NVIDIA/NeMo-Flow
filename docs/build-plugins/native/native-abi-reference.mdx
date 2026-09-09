@@ -166,6 +166,15 @@ For a tool continuation, the result callback receives canonical
 optional `pending_marks`. Pending marks belong to the intercept outcome only. Release
 each host-owned result string with the matching host-table operation after decoding it.
 
+The asynchronous tool-execution invocation envelope carries `name`, `value`, and
+`tool_call_id`. `tool_call_id` is the provider-issued correlation identifier
+recorded on the managed tool call, and is JSON `null` when the call did not
+record one. It is an additive field, so it needs no ABI change and plugins built
+before it existed ignore it; conversely, plugins that read it must tolerate its
+absence when running against an older host. The raw
+`NemoRelayNativeToolExecutionCb` callback does not carry the identifier — use the
+asynchronous middleware path when a native plugin needs it.
+
 The host can poll a callback on different Tokio workers, and separate invocations can
 run concurrently. Plugin code must synchronize `user_data` and opaque handles. Do not
 race final release with settlement, cancellation inspection, stream operations, codec

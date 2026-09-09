@@ -533,6 +533,31 @@ class TestScopeLocalExecutionIntercept:
         assert result.result["value"] == 12
         assert result.result["intercepted"] is True
 
+    async def test_execution_intercept_v2_receives_tool_call_id(self):
+        seen = {}
+
+        async def context_intercept(context, next_call):
+            seen["tool_name"] = context.tool_name
+            seen["tool_call_id"] = context.tool_call_id
+            seen["arguments"] = context.arguments
+            downstream = await next_call(context.arguments)
+            return ToolExecutionInterceptOutcome(downstream.result)
+
+        with scope.scope("exec_ctx_scope", ScopeType.Agent) as handle:
+            scope_local.register_tool_execution_v2(handle, "sl_exec_ctx", 1, context_intercept)
+            result = await tools.execute(
+                "exec_ctx_tool",
+                {"x": 5},
+                lambda args: ToolExecutionResult(args),
+                tool_call_id="scope-call-77",
+            )
+            assert scope_local.deregister_tool_execution(handle, "sl_exec_ctx")
+
+        assert result.result == {"x": 5}
+        assert seen["tool_name"] == "exec_ctx_tool"
+        assert seen["tool_call_id"] == "scope-call-77"
+        assert seen["arguments"] == {"x": 5}
+
 
 # ---------------------------------------------------------------------------
 # Deregistration within scope

@@ -3,8 +3,9 @@
 
 use super::{
     NemoRelayFreeFn, NemoRelayStatus, NemoRelayToolConditionalCb, NemoRelayToolExecInterceptCb,
-    NemoRelayToolSanitizeCb, c_char, c_str_to_string, clear_last_error, core_registry_api,
-    status_from_error, wrap_tool_conditional_fn, wrap_tool_exec_intercept_fn,
+    NemoRelayToolExecInterceptContextCb, NemoRelayToolSanitizeCb, c_char, c_str_to_string,
+    clear_last_error, core_registry_api, status_from_error, wrap_tool_conditional_fn,
+    wrap_tool_exec_intercept_context_fn, wrap_tool_exec_intercept_fn,
     wrap_tool_request_intercept_fn, wrap_tool_sanitize_fn,
 };
 
@@ -270,7 +271,55 @@ pub unsafe extern "C" fn nemo_relay_register_tool_execution_intercept(
     }
 }
 
+/// Register a tool execution intercept that receives the full call context.
+///
+/// The callback receives `(context_json, next_fn, next_ctx)`, where
+/// `context_json` is a JSON object with `tool_name`, `arguments`, and
+/// `tool_call_id`. Call `next_fn(args, next_ctx)` to invoke the next intercept
+/// or the original tool function, or skip calling it to short-circuit.
+///
+/// `tool_call_id` is the provider-issued identifier recorded on the managed
+/// tool call and is `null` when the call did not record one. It lets an
+/// intercept that short-circuits associate its result with the originating
+/// call.
+///
+/// Intercepts registered here share one registry with those registered through
+/// `nemo_relay_register_tool_execution_intercept`, so both shapes order
+/// together by priority and
+/// `nemo_relay_deregister_tool_execution_intercept` removes either.
+///
+/// # Parameters
+/// - `name`: Unique intercept name.
+/// - `priority`: Execution priority (lower runs first).
+/// - `exec_cb`: Middleware callback receiving the context and a next function.
+/// - `exec_user_data`: Opaque pointer for the execution callback.
+/// - `exec_free`: Optional destructor for `exec_user_data`.
+///
+/// # Safety
+/// `name` must be a valid C string. Callback pointers must be valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nemo_relay_register_tool_execution_intercept_v2(
+    name: *const c_char,
+    priority: i32,
+    exec_cb: NemoRelayToolExecInterceptContextCb,
+    exec_user_data: *mut libc::c_void,
+    exec_free: NemoRelayFreeFn,
+) -> NemoRelayStatus {
+    clear_last_error();
+    let name = match c_str_to_string(name) {
+        Ok(s) => s,
+        Err(status) => return status,
+    };
+    let exec = wrap_tool_exec_intercept_context_fn(exec_cb, exec_user_data, exec_free);
+    match core_registry_api::register_tool_execution_intercept_v2(&name, priority, exec) {
+        Ok(()) => NemoRelayStatus::Ok,
+        Err(e) => status_from_error(&e),
+    }
+}
+
 /// Deregister a tool execution intercept by name.
+///
+/// Removes an intercept registered through either registration shape.
 ///
 /// # Safety
 /// `name` must be a valid C string.
