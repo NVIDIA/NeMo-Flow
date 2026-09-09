@@ -22,6 +22,94 @@ use tower::ServiceExt as _;
 
 type CapturedProviderRequest = Arc<std::sync::Mutex<Option<(HeaderMap, bytes::Bytes)>>>;
 
+#[tokio::test]
+async fn shared_model_catalogs_disable_cache_reuse_between_credentials() {
+    let provider = Router::new().route(
+        "/v1/models",
+        axum::routing::get(|headers: HeaderMap| async move {
+            Response::builder()
+                .header(axum::http::header::CACHE_CONTROL, "public, max-age=3600")
+                .header(axum::http::header::CACHE_CONTROL, "private")
+                .body(Body::from(
+                    headers[AUTHORIZATION].to_str().unwrap().to_owned(),
+                ))
+                .unwrap()
+        }),
+    );
+    let provider_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let provider_origin = format!("http://{}", provider_listener.local_addr().unwrap());
+    let provider_task =
+        tokio::spawn(async { axum::serve(provider_listener, provider).await.unwrap() });
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let state = test_daemon_state_at(
+        true,
+        "",
+        GatewayConfig {
+            openai_base_url: provider_origin,
+            ..GatewayConfig::default()
+        },
+        origin.clone(),
+    );
+    let daemon_task = tokio::spawn({
+        let state = Arc::clone(&state);
+        async move { axum::serve(listener, router(state)).await.unwrap() }
+    });
+    let app = router(Arc::clone(&state));
+    for (index, provider_auth) in [(1_u8, "Bearer first-user"), (2, "Bearer second-user")] {
+        let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([index; 32]);
+        let identity = MachineIdentity::generate().unwrap().identity;
+        assert_eq!(
+            enroll_test_mcp(&state, &origin, &identity, &token, provider_auth)
+                .await
+                .status(),
+            StatusCode::OK,
+        );
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get("/models")
+                    .header(CLIENT_TOKEN_HEADER, &token)
+                    .header(AUTHORIZATION, provider_auth)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[axum::http::header::CACHE_CONTROL],
+            "no-store"
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get_all(axum::http::header::CACHE_CONTROL)
+                .iter()
+                .count(),
+            1
+        );
+        assert_eq!(
+            response.into_body().collect().await.unwrap().to_bytes(),
+            provider_auth
+        );
+    }
+    for path in ["/models", "/v1/models"] {
+        let response = app
+            .clone()
+            .oneshot(Request::get(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response.headers()[axum::http::header::CACHE_CONTROL],
+            "no-store"
+        );
+    }
+    daemon_task.abort();
+    provider_task.abort();
+}
+
 #[tokio::test(start_paused = true)]
 async fn challenge_admission_limits_transport_peers_before_polling_bodies() {
     let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0x91; 32]);

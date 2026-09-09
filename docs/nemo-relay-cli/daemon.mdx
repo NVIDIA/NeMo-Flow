@@ -107,6 +107,10 @@ in `--pass-through` mode. Unknown credentials return `401`; registered routes
 without a live MCP reference are unavailable and return `503`. Daemon restart
 requires MCP re-registration to restore these in-memory route bindings.
 
+The shared `/models` and `/v1/models` GET endpoints return
+`Cache-Control: no-store`, overriding provider cache policy to prevent
+cross-credential catalog reuse. LLM streaming response headers are unchanged.
+
 Worker activation still requires the broker-issued, one-time grant delivered
 through the protected inherited channel. Knowing the daemon address alone
 does not allow a worker to register or replace an existing worker.

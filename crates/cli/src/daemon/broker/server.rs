@@ -1235,7 +1235,22 @@ async fn heartbeat_worker(
     }
 }
 
-async fn public_proxy(
+async fn public_proxy(state: State<Arc<DaemonState>>, request: Request<Body>) -> Response<Body> {
+    let catalog =
+        request.method() == Method::GET && matches!(request.uri().path(), "/models" | "/v1/models");
+    let mut response = public_proxy_inner(state, request).await;
+    if catalog {
+        // Shared catalog URLs are keyed by a private credential, not by their URI. Override
+        // provider cache policy for GET responses, without changing LLM streaming headers.
+        response.headers_mut().insert(
+            axum::http::header::CACHE_CONTROL,
+            HeaderValue::from_static("no-store"),
+        );
+    }
+    response
+}
+
+async fn public_proxy_inner(
     State(state): State<Arc<DaemonState>>,
     mut request: Request<Body>,
 ) -> Response<Body> {
