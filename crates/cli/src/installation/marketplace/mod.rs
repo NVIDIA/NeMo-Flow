@@ -28,7 +28,7 @@ use crate::installation::{InstallRequest, UninstallRequest};
 
 use crate::installation::operation_lock::{DEFAULT_OPERATION_LOCK_TIMEOUT, PluginOperationLock};
 use assets::{
-    marketplace_manifest, plugin_hooks, plugin_manifest, plugin_mcp_config,
+    absolute_or_self, marketplace_manifest, plugin_hooks, plugin_manifest, plugin_mcp_config,
     write_plugin_marketplace, write_plugin_marketplace_for_generation,
 };
 use host::{
@@ -1572,14 +1572,18 @@ fn collect_host_plugin_readiness(
                 plugin.join(crate::installation::generation::GENERATION_FILE_NAME);
             readiness.push(
                 "Generated hooks",
-                InstallGeneration::capture(generation_fence.clone()).and_then(|generation| {
-                    let expected =
-                        plugin_hooks(host, &relay, &generation_fence, generation.token())?;
-                    generated_manifest_check(
-                        &plugin.join("hooks").join("hooks.json"),
-                        &expected,
-                        "hooks",
-                    )
+                absolute_or_self(&generation_fence).and_then(|generation_fence| {
+                    let hook_config = crate::hooks::persistent_hook_config_path(&generation_fence);
+                    InstallGeneration::capture(generation_fence.clone()).and_then(|generation| {
+                        crate::hooks::HookCommandConfig::load(&hook_config)?;
+                        let expected =
+                            plugin_hooks(host, &relay, &generation_fence, generation.token())?;
+                        generated_manifest_check(
+                            &plugin.join("hooks").join("hooks.json"),
+                            &expected,
+                            "hooks",
+                        )
+                    })
                 }),
             );
         }
