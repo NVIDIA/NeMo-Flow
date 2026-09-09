@@ -416,7 +416,6 @@ fn cli_parses_daemon_server_defaults_and_pass_through() {
     assert_eq!(command.bind, std::net::Ipv4Addr::LOCALHOST);
     assert_eq!(command.port, 47_632);
     assert!(!command.pass_through);
-    assert!(command.client_token_file.is_none());
     assert!(command.command.is_none());
 
     let cli = Cli::try_parse_from(["nemo-relay", "daemon", "--pass-through"]).unwrap();
@@ -425,19 +424,9 @@ fn cli_parses_daemon_server_defaults_and_pass_through() {
     };
     assert!(command.pass_through);
 
-    let cli = Cli::try_parse_from([
-        "nemo-relay",
-        "daemon",
-        "--client-token-file",
-        "/etc/nemo-relay/client-tokens",
-    ])
-    .unwrap();
-    let Some(Command::Daemon(command)) = cli.command else {
-        panic!("expected daemon command");
-    };
-    assert_eq!(
-        command.client_token_file.as_deref(),
-        Some(std::path::Path::new("/etc/nemo-relay/client-tokens"))
+    assert!(
+        Cli::try_parse_from(["nemo-relay", "daemon", "--client-token-file", "/tmp/tokens"])
+            .is_err()
     );
 
     let cli = Cli::try_parse_from([

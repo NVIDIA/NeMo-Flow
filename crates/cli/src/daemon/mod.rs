@@ -25,7 +25,6 @@ pub(crate) struct ServerOptions {
     pub(crate) gateway: crate::server::GatewayOverrides,
     pub(crate) tls_cert: Option<PathBuf>,
     pub(crate) tls_key: Option<PathBuf>,
-    pub(crate) client_token_file: Option<PathBuf>,
 }
 
 pub(crate) async fn serve(options: ServerOptions) -> Result<(), CliError> {

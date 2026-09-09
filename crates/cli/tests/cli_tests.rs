@@ -5414,8 +5414,6 @@ fn cli_daemon_mcp_launches_worker_and_forwards_pi_hook() {
     let address = probe.local_addr().unwrap();
     drop(probe);
     let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0x6c_u8; 32]);
-    let token_file = temp.path().join("daemon-client-tokens");
-    std::fs::write(&token_file, format!("{token}\n")).unwrap();
     let config_home = temp.path().join("xdg");
 
     let daemon = ChildGuard::new(
@@ -5424,13 +5422,8 @@ fn cli_daemon_mcp_launches_worker_and_forwards_pi_hook() {
             .env("HOME", temp.path())
             .env("XDG_CONFIG_HOME", &config_home)
             .env("NEMO_RELAY_TEST_SKIP_IMPLICIT_CONFIG", "1")
-            .args([
-                "daemon",
-                "--port",
-                &address.port().to_string(),
-                "--client-token-file",
-            ])
-            .arg(&token_file)
+            .env_remove("NEMO_RELAY_CLIENT_TOKEN")
+            .args(["daemon", "--port", &address.port().to_string()])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -5561,13 +5554,8 @@ fn cli_daemon_mcp_launches_worker_and_forwards_pi_hook() {
             .env("HOME", temp.path())
             .env("XDG_CONFIG_HOME", &config_home)
             .env("NEMO_RELAY_TEST_SKIP_IMPLICIT_CONFIG", "1")
-            .args([
-                "daemon",
-                "--port",
-                &address.port().to_string(),
-                "--client-token-file",
-            ])
-            .arg(&token_file)
+            .env_remove("NEMO_RELAY_CLIENT_TOKEN")
+            .args(["daemon", "--port", &address.port().to_string()])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -5618,8 +5606,6 @@ fn cli_pass_through_daemon_serves_managed_hooks_and_pi_provider_routing() {
     let address = probe.local_addr().unwrap();
     drop(probe);
     let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0x3d_u8; 32]);
-    let token_file = temp.path().join("daemon-client-tokens");
-    std::fs::write(&token_file, format!("{token}\n")).unwrap();
     let daemon_origin = format!("http://{address}");
     let daemon = ChildGuard::new(
         Command::new(gateway_bin())
@@ -5627,20 +5613,51 @@ fn cli_pass_through_daemon_serves_managed_hooks_and_pi_provider_routing() {
             .env("HOME", temp.path())
             .env("XDG_CONFIG_HOME", temp.path().join("xdg"))
             .env("NEMO_RELAY_TEST_SKIP_IMPLICIT_CONFIG", "1")
+            .env_remove("NEMO_RELAY_CLIENT_TOKEN")
             .args([
                 "daemon",
                 "--port",
                 &address.port().to_string(),
                 "--pass-through",
-                "--client-token-file",
             ])
-            .arg(&token_file)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
             .unwrap(),
     );
     wait_for_port_open(address);
+
+    let mut mcp = ChildGuard::new(
+        Command::new(gateway_bin())
+            .current_dir(temp.path())
+            .env("HOME", temp.path())
+            .env("XDG_CONFIG_HOME", temp.path().join("xdg"))
+            .env("NEMO_RELAY_CLIENT_TOKEN", &token)
+            .args(["daemon", "mcp", "--daemon-address", &daemon_origin])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    mcp.child_mut().stdin.as_mut().unwrap().write_all(
+        b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\"}}\n",
+    ).unwrap();
+    let stdout = mcp.child_mut().stdout.take().unwrap();
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let mut response = String::new();
+        let result = BufReader::new(stdout)
+            .read_line(&mut response)
+            .map(|_| response);
+        let _ = sender.send(result);
+    });
+    let response = receiver
+        .recv_timeout(Duration::from_secs(20))
+        .unwrap()
+        .unwrap();
+    let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+    assert_eq!(response["result"]["serverInfo"]["name"], "nemo-relay");
 
     for (agent, expected) in [
         ("codex", "{}"),
@@ -5675,24 +5692,6 @@ fn cli_pass_through_daemon_serves_managed_hooks_and_pi_provider_routing() {
         );
         assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), expected);
     }
-
-    let mcp = Command::new(gateway_bin())
-        .current_dir(temp.path())
-        .env("HOME", temp.path())
-        .env("XDG_CONFIG_HOME", temp.path().join("xdg"))
-        .env("NEMO_RELAY_CLIENT_TOKEN", &token)
-        .args(["daemon", "mcp", "--daemon-address", &daemon_origin])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mcp = wait_child_with_output(mcp);
-    assert!(
-        mcp.status.success(),
-        "pass-through MCP registration failed: {}",
-        String::from_utf8_lossy(&mcp.stderr)
-    );
 
     let unattached_worker = Command::new(gateway_bin())
         .current_dir(temp.path())

@@ -725,7 +725,6 @@ fn daemon_router_with_ready_worker(
         config: GatewayConfig::default(),
         upstream: pooled_client().expect("daemon pass-through client"),
         worker_clients: WorkerClientPool::new().expect("daemon worker clients"),
-        allowed_route_tokens: HashSet::from([credential.digest()]),
         challenges: Mutex::new(HashMap::new()),
         activations: Mutex::new(HashMap::new()),
         mcp_sessions: Mutex::new(HashMap::new()),
@@ -799,7 +798,6 @@ fn daemon_router_with_pass_through(
         config,
         upstream: client_for(protocol),
         worker_clients: WorkerClientPool::new().expect("daemon worker clients"),
-        allowed_route_tokens: HashSet::from([credential.digest()]),
         challenges: Mutex::new(HashMap::new()),
         activations: Mutex::new(HashMap::new()),
         mcp_sessions: Mutex::new(HashMap::new()),
@@ -819,7 +817,6 @@ fn daemon_router_with_two_ready_workers(
     worker_tokens: [&str; 2],
 ) -> (Router, Vec<Arc<WorkerTarget>>, tempfile::TempDir) {
     let registry = Registry::new(false);
-    let mut allowed_route_tokens = HashSet::new();
     let mut targets = Vec::with_capacity(2);
 
     for index in 0..2 {
@@ -863,7 +860,6 @@ fn daemon_router_with_two_ready_workers(
         registry
             .mark_worker_ready(fingerprint, &activation_id, Arc::clone(&target))
             .expect("publish test worker");
-        allowed_route_tokens.insert(credential.digest());
         targets.push(target);
     }
 
@@ -886,7 +882,6 @@ fn daemon_router_with_two_ready_workers(
         config: GatewayConfig::default(),
         upstream: client_for(protocol),
         worker_clients: WorkerClientPool::new().expect("daemon worker clients"),
-        allowed_route_tokens,
         challenges: Mutex::new(HashMap::new()),
         activations: Mutex::new(HashMap::new()),
         mcp_sessions: Mutex::new(HashMap::new()),
@@ -1976,7 +1971,6 @@ fn lifecycle_daemon_router(
         config: GatewayConfig::default(),
         upstream: pooled_client().expect("daemon pass-through client"),
         worker_clients: WorkerClientPool::new().expect("daemon worker clients"),
-        allowed_route_tokens: HashSet::from([credential.digest()]),
         challenges: Mutex::new(HashMap::new()),
         activations: Mutex::new(HashMap::new()),
         mcp_sessions: Mutex::new(HashMap::from([(

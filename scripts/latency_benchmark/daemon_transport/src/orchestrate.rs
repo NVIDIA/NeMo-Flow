@@ -142,7 +142,7 @@ impl WorkerHarness {
             .arg(daemon_port.to_string())
             .arg("--advertise-address")
             .arg(&proxy_origin)
-            .env("NEMO_RELAY_CLIENT_TOKEN", &route_token)
+            .env_remove("NEMO_RELAY_CLIENT_TOKEN")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())

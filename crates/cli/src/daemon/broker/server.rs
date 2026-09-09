@@ -3,7 +3,7 @@
 
 //! Public daemon listener, authenticated broker control plane, and streaming data plane.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::error::Error as StdError;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
@@ -60,7 +60,7 @@ use crate::daemon::common::protocol::{
 };
 use crate::daemon::common::routes::{ProviderRoute, PublicRoute};
 use crate::daemon::common::state::{
-    ActiveWorkerGenerations, ROUTE_TOKEN_ENV, RouteCredential, load_or_create_daemon_identity,
+    ActiveWorkerGenerations, RouteCredential, load_or_create_daemon_identity,
 };
 use crate::daemon::common::transport::{
     PooledClient, RelayBody, box_body, hold_body, pooled_client, prepare_forward_request,
@@ -76,7 +76,6 @@ const MAX_PENDING_MCP_CHALLENGES: usize = 384;
 const MAX_PENDING_WORKER_CHALLENGES: usize = 128;
 const MAX_STAGED_WORKER_SESSIONS: usize = 4_096;
 const MAX_MCP_CONTROL_SESSIONS: usize = 8_192;
-const MAX_ALLOWED_ROUTE_TOKENS: usize = 65_536;
 const MAX_CONCURRENT_TLS_HANDSHAKES: usize = 256;
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -145,7 +144,6 @@ struct DaemonState {
     config: GatewayConfig,
     upstream: PooledClient,
     worker_clients: WorkerClientPool,
-    allowed_route_tokens: HashSet<TokenDigest>,
     challenges: Mutex<HashMap<ChallengeId, PendingChallenge>>,
     activations: Mutex<HashMap<String, Activation>>,
     mcp_sessions: Mutex<HashMap<String, McpControlSession>>,
@@ -165,7 +163,6 @@ pub(crate) async fn serve(options: ServerOptions) -> Result<(), CliError> {
     let local = listener.local_addr()?;
     let public_origin = daemon_origin(&options, local)?;
     let resolved = crate::configuration::resolve_server_config(&options.gateway)?;
-    let allowed_route_tokens = load_allowed_route_tokens(options.client_token_file.as_deref())?;
     let state = Arc::new(DaemonState {
         registry: Registry::new(options.pass_through),
         identity: load_or_create_daemon_identity()?,
@@ -175,7 +172,6 @@ pub(crate) async fn serve(options: ServerOptions) -> Result<(), CliError> {
         config: resolved.gateway,
         upstream: pooled_client().map_err(|error| CliError::Launch(error.to_string()))?,
         worker_clients: WorkerClientPool::new()?,
-        allowed_route_tokens,
         challenges: Mutex::new(HashMap::new()),
         activations: Mutex::new(HashMap::new()),
         mcp_sessions: Mutex::new(HashMap::new()),
@@ -335,9 +331,6 @@ async fn register_mcp(
         Ok(credential) => credential,
         Err(response) => return response,
     };
-    if !state.allowed_route_tokens.contains(&credential.digest()) {
-        return control_message(StatusCode::UNAUTHORIZED, "invalid route credential");
-    }
     let transcript = &request.proof.transcript;
     if transcript.initiator.role != ComponentRole::Mcp
         || transcript.route_token_digest != Some(credential.digest())
@@ -398,6 +391,8 @@ async fn register_mcp(
         Ok(selection) => selection,
         Err(response) => return response,
     };
+    // Enrollment is open to reachable clients with a valid identity proof. The registry binds
+    // this credential digest to that fingerprint and rejects attempts to rebind either side.
     let directive = match state.registry.register_mcp(
         McpRegistration {
             fingerprint: transcript.initiator_fingerprint,
@@ -1201,9 +1196,6 @@ async fn public_proxy(
         Ok(credential) => credential,
         Err(response) => return response,
     };
-    if !state.allowed_route_tokens.contains(&credential.digest()) {
-        return control_message(StatusCode::UNAUTHORIZED, "invalid route credential");
-    }
     strip_public_relay_headers(request.headers_mut(), route);
     if responses_websocket_probe(&request) {
         return StatusCode::UPGRADE_REQUIRED.into_response();
@@ -1211,16 +1203,12 @@ async fn public_proxy(
     if !public_method_allowed(request.method(), request.uri().path()) {
         return StatusCode::METHOD_NOT_ALLOWED.into_response();
     }
-    let target = if state.registry.is_global_pass_through() {
-        ResolvedTarget::PassThrough
-    } else {
-        match state.registry.resolve_target(&credential.digest()) {
-            Ok(target) => target,
-            Err(ResolveError::UnknownToken) => {
-                return control_message(StatusCode::UNAUTHORIZED, "invalid route credential");
-            }
-            Err(ResolveError::Unavailable(_)) => return unavailable_response(),
+    let target = match state.registry.resolve_target(&credential.digest()) {
+        Ok(target) => target,
+        Err(ResolveError::UnknownToken) => {
+            return control_message(StatusCode::UNAUTHORIZED, "invalid route credential");
         }
+        Err(ResolveError::Unavailable(_)) => return unavailable_response(),
     };
     match (target, route) {
         (ResolvedTarget::PassThrough, PublicRoute::Hook(hook)) => {
@@ -2089,55 +2077,6 @@ fn public_credential(headers: &HeaderMap) -> Result<RouteCredential, Response<Bo
         .ok_or_else(|| control_message(StatusCode::UNAUTHORIZED, "invalid route credential"))?;
     RouteCredential::parse(value.to_owned())
         .map_err(|_| control_message(StatusCode::UNAUTHORIZED, "invalid route credential"))
-}
-
-fn load_allowed_route_tokens(path: Option<&Path>) -> Result<HashSet<TokenDigest>, CliError> {
-    let mut digests = HashSet::new();
-    if let Some(value) = std::env::var_os(ROUTE_TOKEN_ENV) {
-        let value = value.into_string().map_err(|_| {
-            CliError::Config(format!("{ROUTE_TOKEN_ENV} must contain valid Unicode text"))
-        })?;
-        let credential = RouteCredential::parse(value)?;
-        digests.insert(credential.digest());
-    }
-    if let Some(path) = path {
-        let bytes = crate::filesystem::bounded::read_bounded_regular_file(
-            path,
-            "daemon client-token allowlist",
-        )
-        .map_err(CliError::Config)?;
-        let text = std::str::from_utf8(&bytes).map_err(|_| {
-            CliError::Config(format!(
-                "daemon client-token allowlist {} must be UTF-8",
-                path.display()
-            ))
-        })?;
-        for (index, line) in text.lines().enumerate() {
-            let value = line.trim();
-            if value.is_empty() || value.starts_with('#') {
-                continue;
-            }
-            if digests.len() >= MAX_ALLOWED_ROUTE_TOKENS {
-                return Err(CliError::Config(format!(
-                    "daemon client-token allowlist exceeds {MAX_ALLOWED_ROUTE_TOKENS} entries"
-                )));
-            }
-            let credential = RouteCredential::parse(value.to_owned()).map_err(|_| {
-                CliError::Config(format!(
-                    "daemon client-token allowlist {} has an invalid token on line {}",
-                    path.display(),
-                    index + 1
-                ))
-            })?;
-            digests.insert(credential.digest());
-        }
-    }
-    if digests.is_empty() {
-        return Err(CliError::Config(format!(
-            "daemon requires an administrator-provisioned client token via {ROUTE_TOKEN_ENV} or --client-token-file"
-        )));
-    }
-    Ok(digests)
 }
 
 fn validate_worker_endpoint(

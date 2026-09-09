@@ -10,6 +10,7 @@ use crate::daemon::common::control::{
     WorkerBootstrap, WorkerNetworkHintProof, WorkerReadyPayload, WorkerRegisterResponse,
 };
 use crate::daemon::common::routes::HookRoute;
+use crate::daemon::common::state::ROUTE_TOKEN_ENV;
 use crate::daemon::common::worker_tls::pooled_worker_tls_client;
 use crate::daemon::worker::test_router_with_control_tokens;
 use crate::test_support::{EnvScope, PLUGIN_CONFIG_TEST_LOCK};
@@ -20,6 +21,158 @@ use http_body_util::BodyExt as _;
 use tower::ServiceExt as _;
 
 type CapturedProviderRequest = Arc<std::sync::Mutex<Option<(HeaderMap, bytes::Bytes)>>>;
+
+async fn enroll_test_mcp(
+    state: &Arc<DaemonState>,
+    origin: &str,
+    identity: &MachineIdentity,
+    token: &str,
+    session: &str,
+) -> Response<Body> {
+    let credential = RouteCredential::parse(token.to_owned()).unwrap();
+    let handshake = begin_handshake(
+        &control_client().unwrap(),
+        origin,
+        ComponentRole::Mcp,
+        identity,
+        session,
+        Some(credential.digest()),
+    )
+    .await
+    .unwrap();
+    let worker_network = WorkerNetworkHintProof::sign(
+        WorkerNetworkHint::new("127.0.0.1", None).unwrap(),
+        &handshake.proof.transcript.daemon_target,
+        session,
+        &handshake.proof.transcript.challenge_id,
+        &identity.fingerprint(),
+        identity,
+    )
+    .unwrap();
+    register_mcp(
+        State(Arc::clone(state)),
+        HeaderMap::from_iter([(
+            HeaderName::from_static(CLIENT_TOKEN_HEADER),
+            HeaderValue::from_str(token).unwrap(),
+        )]),
+        Json(McpRegisterRequest {
+            proof: handshake.proof,
+            worker_network,
+        }),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn open_enrollment_binds_new_tokens_without_allowlist_and_prevents_route_takeover() {
+    for pass_through in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let first = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0xa1; 32]);
+        let second = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0xa2; 32]);
+        let state = test_daemon_state_at(
+            pass_through,
+            &first,
+            GatewayConfig::default(),
+            origin.clone(),
+        );
+        let server = tokio::spawn({
+            let state = Arc::clone(&state);
+            async move { axum::serve(listener, router(state)).await.unwrap() }
+        });
+        let app = router(Arc::clone(&state));
+        let identity = MachineIdentity::generate().unwrap().identity;
+        let other_identity = MachineIdentity::generate().unwrap().identity;
+        for (token, machine, session) in [
+            (&first, &identity, "first"),
+            (&second, &other_identity, "second"),
+        ] {
+            // Rejection must happen from the request head, before reading even one body frame.
+            let body = Body::from_stream(futures_util::stream::poll_fn(
+                |_| -> std::task::Poll<Option<Result<bytes::Bytes, std::io::Error>>> {
+                    panic!("unregistered request body polled")
+                },
+            ));
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::post("/hooks/pi")
+                        .header(CLIENT_TOKEN_HEADER, token)
+                        .body(body)
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            let response = enroll_test_mcp(&state, &origin, machine, token, session).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let response: McpRegisterResponse =
+                serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                    .unwrap();
+            assert_eq!(
+                matches!(response.directive, BrokerDirective::UsePassThrough),
+                pass_through
+            );
+            assert_eq!(
+                matches!(response.directive, BrokerDirective::LaunchWorker { .. }),
+                !pass_through
+            );
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::post("/hooks/pi")
+                        .header(CLIENT_TOKEN_HEADER, token)
+                        .body(Body::from("{}"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                if pass_through {
+                    StatusCode::OK
+                } else {
+                    StatusCode::SERVICE_UNAVAILABLE
+                }
+            );
+        }
+        assert_eq!(
+            enroll_test_mcp(&state, &origin, &other_identity, &first, "takeover")
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED,
+        );
+        let third = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0xa3; 32]);
+        assert_eq!(
+            enroll_test_mcp(&state, &origin, &identity, &third, "rebind")
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED,
+        );
+        state
+            .registry
+            .release_mcp(
+                identity.fingerprint(),
+                &McpSessionId::new("first").unwrap(),
+                u64::MAX,
+            )
+            .unwrap();
+        let response = app
+            .oneshot(
+                Request::post("/hooks/pi")
+                    .header(CLIENT_TOKEN_HEADER, &first)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        if pass_through {
+            assert!(lock(&state.activations).is_empty());
+        }
+        server.abort();
+    }
+}
 
 #[test]
 fn worker_endpoint_rejects_bind_only_and_non_origin_values() {
@@ -53,31 +206,6 @@ fn public_credential_requires_exactly_one_valid_value() {
         HeaderValue::from_bytes(&[0xff]).expect("opaque header value"),
     );
     assert!(public_credential(&non_utf8).is_err());
-}
-
-#[cfg(unix)]
-#[test]
-fn administrator_token_environment_rejects_non_unicode_and_oversized_allowlists() {
-    use std::os::unix::ffi::OsStrExt;
-
-    let environment = EnvScope::set(&[(
-        ROUTE_TOKEN_ENV,
-        Some(std::ffi::OsStr::from_bytes(b"token-\xff")),
-    )]);
-    assert!(load_allowed_route_tokens(None).is_err());
-    drop(environment);
-
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("too-many-tokens");
-    let mut contents = String::new();
-    for index in 0..=MAX_ALLOWED_ROUTE_TOKENS {
-        let mut bytes = [0_u8; 32];
-        bytes[..8].copy_from_slice(&(index as u64).to_le_bytes());
-        contents.push_str(&base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes));
-        contents.push('\n');
-    }
-    std::fs::write(&path, contents).unwrap();
-    assert!(load_allowed_route_tokens(Some(&path)).is_err());
 }
 
 #[test]
@@ -216,17 +344,6 @@ async fn worker_response_body_errors_trigger_the_route_callback_once() {
 }
 
 #[test]
-fn administrator_token_file_is_hashed_into_the_daemon_allowlist() {
-    let directory = tempfile::tempdir().expect("temporary allowlist directory");
-    let path = directory.path().join("client-tokens");
-    let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0x42_u8; 32]);
-    std::fs::write(&path, format!("# managed credentials\n{token}\n")).expect("write allowlist");
-    let allowed = load_allowed_route_tokens(Some(&path)).expect("load allowlist");
-    assert!(allowed.contains(&TokenDigest::from_token(token.as_bytes())));
-    assert!(!allowed.contains(&TokenDigest::from_token(b"not-authorized")));
-}
-
-#[test]
 fn responses_websocket_probe_is_narrow() {
     let probe = Request::get("/backend-api/codex/responses")
         .header(axum::http::header::UPGRADE, "WebSocket")
@@ -299,6 +416,22 @@ async fn global_pass_through_authenticates_and_forwards_only_provider_headers() 
             openai_auth_header: Some("Bearer configured-provider".into()),
             ..GatewayConfig::default()
         },
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    // The challenge transcript must name the same origin as the serving daemon.
+    let mut state = state;
+    Arc::get_mut(&mut state).unwrap().public_origin = origin.clone();
+    let server = tokio::spawn({
+        let state = Arc::clone(&state);
+        async move { axum::serve(listener, router(state)).await.unwrap() }
+    });
+    let identity = MachineIdentity::generate().unwrap().identity;
+    assert_eq!(
+        enroll_test_mcp(&state, &origin, &identity, &token, "pass-through")
+            .await
+            .status(),
+        StatusCode::OK
     );
     let app = router(state);
 
@@ -373,6 +506,7 @@ async fn global_pass_through_authenticates_and_forwards_only_provider_headers() 
         ));
     }
     provider_task.abort();
+    server.abort();
 }
 
 #[tokio::test]
@@ -630,7 +764,7 @@ fn test_daemon_state(pass_through: bool, token: &str, config: GatewayConfig) -> 
 
 fn test_daemon_state_at(
     pass_through: bool,
-    token: &str,
+    _token: &str,
     config: GatewayConfig,
     public_origin: String,
 ) -> Arc<DaemonState> {
@@ -638,7 +772,6 @@ fn test_daemon_state_at(
     let generation_path = generation_directory
         .keep()
         .join("active-worker-generations.json");
-    let credential = RouteCredential::parse(token.to_owned()).expect("route credential");
     Arc::new(DaemonState {
         registry: Registry::new(pass_through),
         descriptor: crate::daemon::common::control::descriptor(ComponentRole::Daemon),
@@ -647,7 +780,6 @@ fn test_daemon_state_at(
         config,
         upstream: pooled_client().expect("daemon client"),
         worker_clients: WorkerClientPool::new().expect("worker clients"),
-        allowed_route_tokens: HashSet::from([credential.digest()]),
         challenges: Mutex::new(HashMap::new()),
         activations: Mutex::new(HashMap::new()),
         mcp_sessions: Mutex::new(HashMap::new()),
@@ -973,7 +1105,6 @@ fn advertised_https_is_valid_behind_a_reverse_proxy_without_native_tls() {
         gateway: crate::server::GatewayOverrides::default(),
         tls_cert: None,
         tls_key: None,
-        client_token_file: None,
     };
     assert_eq!(
         daemon_origin(&options, "127.0.0.1:8080".parse().unwrap()).expect("proxy origin"),
@@ -1000,7 +1131,6 @@ fn daemon_origin_enforces_bind_and_tls_advertisement_contracts() {
         gateway: crate::server::GatewayOverrides::default(),
         tls_cert: None,
         tls_key: None,
-        client_token_file: None,
     };
     assert_eq!(
         daemon_origin(&loopback, local).unwrap(),
@@ -1073,25 +1203,6 @@ fn daemon_origin_enforces_bind_and_tls_advertisement_contracts() {
 }
 
 #[tokio::test]
-async fn route_token_allowlist_reports_missing_invalid_and_non_utf8_inputs() {
-    let _guard = PLUGIN_CONFIG_TEST_LOCK.lock().await;
-    let _environment = EnvScope::set(&[(ROUTE_TOKEN_ENV, None)]);
-    assert!(load_allowed_route_tokens(None).is_err());
-
-    let directory = tempfile::tempdir().unwrap();
-    let invalid = directory.path().join("invalid-token");
-    std::fs::write(&invalid, "not-a-route-token\n").unwrap();
-    assert!(load_allowed_route_tokens(Some(&invalid)).is_err());
-
-    let non_utf8 = directory.path().join("non-utf8");
-    std::fs::write(&non_utf8, [0xff]).unwrap();
-    assert!(load_allowed_route_tokens(Some(&non_utf8)).is_err());
-
-    let missing = directory.path().join("missing");
-    assert!(load_allowed_route_tokens(Some(&missing)).is_err());
-}
-
-#[tokio::test]
 async fn daemon_startup_rejects_an_unpaired_tls_identity_after_initializing_state() {
     let _guard = PLUGIN_CONFIG_TEST_LOCK.lock().await;
     let state_directory = tempfile::tempdir().unwrap();
@@ -1108,7 +1219,6 @@ async fn daemon_startup_rejects_an_unpaired_tls_identity_after_initializing_stat
         gateway: crate::server::GatewayOverrides::default(),
         tls_cert: Some(state_directory.path().join("certificate.pem")),
         tls_key: None,
-        client_token_file: None,
     })
     .await
     .expect_err("unpaired TLS configuration");
@@ -1119,9 +1229,8 @@ async fn daemon_startup_rejects_an_unpaired_tls_identity_after_initializing_stat
 async fn daemon_plain_listener_starts_and_reports_address_conflicts() {
     let _guard = PLUGIN_CONFIG_TEST_LOCK.lock().await;
     let state_directory = tempfile::tempdir().unwrap();
-    let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0x47_u8; 32]);
     let _environment = EnvScope::set(&[
-        (ROUTE_TOKEN_ENV, Some(std::ffi::OsStr::new(&token))),
+        (ROUTE_TOKEN_ENV, None),
         ("XDG_CONFIG_HOME", Some(state_directory.path().as_os_str())),
     ]);
     let reserved = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1135,7 +1244,6 @@ async fn daemon_plain_listener_starts_and_reports_address_conflicts() {
         gateway: crate::server::GatewayOverrides::default(),
         tls_cert: None,
         tls_key: None,
-        client_token_file: None,
     };
     let running = tokio::spawn(serve(options));
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -1166,7 +1274,6 @@ async fn daemon_plain_listener_starts_and_reports_address_conflicts() {
             gateway: crate::server::GatewayOverrides::default(),
             tls_cert: None,
             tls_key: None,
-            client_token_file: None,
         }
     })
     .await
@@ -2585,7 +2692,6 @@ async fn authenticated_control_plane_activates_heartbeats_and_drains_a_worker() 
         config: GatewayConfig::default(),
         upstream: pooled_client().expect("daemon client"),
         worker_clients: WorkerClientPool::new().expect("worker clients"),
-        allowed_route_tokens: HashSet::from([credential.digest()]),
         challenges: Mutex::new(HashMap::new()),
         activations: Mutex::new(HashMap::new()),
         mcp_sessions: Mutex::new(HashMap::new()),

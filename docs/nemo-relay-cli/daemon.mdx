@@ -61,20 +61,24 @@ header value. Managed diagnostics reject a missing, duplicate, or mismatched
 credential header.
 
 The same credential identifies MCP registration, Codex and Claude LLM
-requests, Pi provider requests, and managed hook requests. The daemon must
-also be provisioned with the permitted credentials: either set the same
-environment variable for a single-route deployment or pass an
-administrator-owned allowlist with `--client-token-file`. The daemon hashes
-the credentials at startup, stores only those digests, removes the public
-header before forwarding a request, and preserves the caller's provider
-authentication.
+requests, Pi provider requests, and managed hook requests. The daemon does
+not require a token file or a token environment variable. During signed MCP
+registration, it binds the credential digest to the user-machine fingerprint.
+An existing binding cannot be reassigned to another fingerprint. The daemon
+stores only credential digests, removes the public header before forwarding
+a request, and preserves the caller's provider authentication.
+
+Enrollment is open to anyone who can reach the daemon and prove possession
+of their machine identity. This proof establishes identity, not organizational
+authorization. Restrict daemon access to trusted users through your network
+or authenticated reverse proxy; do not expose open enrollment to an untrusted
+network. TLS remains required for non-loopback communication.
 
 ## Start the Daemon
 
 Start the daemon with its loopback defaults:
 
 ```bash
-export NEMO_RELAY_CLIENT_TOKEN='<credential>'
 nemo-relay daemon
 ```
 
@@ -87,23 +91,19 @@ nemo-relay daemon \
   [--port <PORT>] \
   [--advertise-address <URL>] \
   [--pass-through] \
-  [--client-token-file <PATH>] \
   [--tls-cert <PEM>] \
   [--tls-key <PKCS8-PEM>]
 ```
 
-For a fleet, place one base64url-encoded 256-bit credential on each nonempty
-line of the allowlist. Lines beginning with `#` are comments. Install the file
-with administrator ownership and permissions that prevent managed users from
-reading it, then start the daemon with:
+Provision `NEMO_RELAY_CLIENT_TOKEN` in client environments only. Start and
+keep an MCP connection active before sending LLM or hook requests, including
+in `--pass-through` mode. Unknown credentials return `401`; registered routes
+without a live MCP reference are unavailable and return `503`. Daemon restart
+requires MCP re-registration to restore these in-memory route bindings.
 
-```bash
-nemo-relay daemon --client-token-file /etc/nemo-relay/client-tokens
-```
-
-At least one credential must be provisioned through the environment, the
-allowlist, or both. Supplying a syntactically valid but unprovisioned
-credential cannot create a broker route.
+Worker activation still requires the broker-issued, one-time grant delivered
+through the protected inherited channel. Knowing the daemon address alone
+does not allow a worker to register or replace an existing worker.
 
 The daemon accepts only `127.0.0.1` or `0.0.0.0` for `--bind`. A daemon bound
 to `0.0.0.0` requires a concrete, reachable origin URL through

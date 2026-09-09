@@ -36,9 +36,6 @@ pub(crate) struct DaemonCommand {
     /// Route directly to configured providers and never activate a worker.
     #[arg(long)]
     pub(crate) pass_through: bool,
-    /// Administrator-owned file containing one permitted client token per line.
-    #[arg(long, value_name = "PATH")]
-    pub(crate) client_token_file: Option<PathBuf>,
     #[command(subcommand)]
     pub(crate) command: Option<DaemonSubcommand>,
 }
@@ -158,7 +155,6 @@ pub(crate) async fn execute(
                 gateway: server.to_runtime(),
                 tls_cert: command.tls_cert,
                 tls_key: command.tls_key,
-                client_token_file: command.client_token_file,
             })
             .await?;
         }
