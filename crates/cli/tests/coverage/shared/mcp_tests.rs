@@ -211,6 +211,10 @@ fn invalid_and_unknown_requests_return_jsonrpc_errors() {
         Some(jsonrpc_error(json!(4), -32601, "Method not found"))
     );
     assert_eq!(
+        response_for(&json!({"jsonrpc":"2.0", "id":6, "method":null})),
+        Some(jsonrpc_error(json!(6), -32600, "Invalid Request"))
+    );
+    assert_eq!(
         response_for(&json!({"jsonrpc":"2.0", "id":5, "method":"initialize", "params":{}})),
         Some(jsonrpc_error(json!(5), -32602, "Missing protocolVersion"))
     );

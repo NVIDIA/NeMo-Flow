@@ -14,11 +14,11 @@ use std::time::{Duration, Instant};
 
 use listeners::{Listener, Process, Protocol};
 
-use super::completions::CompletionsCommand;
 use super::serve::ServerArgs;
 use super::*;
 use crate::commands::configure::ConfigSubcommand;
-use crate::commands::model_pricing::{PricingSubcommand, PricingValidateCommand};
+use crate::commands::hook_forward::GatewayModeArg;
+use crate::commands::model_pricing::{PricingScopeArgs, PricingSubcommand, PricingValidateCommand};
 use crate::commands::plugins::{
     PluginsCommand, PluginsEditCommand, PluginsInspectCommand, PluginsListCommand,
     PluginsScopeArgs, PluginsSubcommand, PluginsValidateCommand,
@@ -90,15 +90,57 @@ fn easy_path_setup_inherits_explicit_plugin_target() {
 #[test]
 fn operational_command_names_cover_logging_exempt_commands() {
     for (args, expected) in [
+        (vec!["nemo-relay", "daemon"], "daemon"),
         (vec!["nemo-relay", "codex"], "codex"),
         (vec!["nemo-relay", "pi"], "pi"),
         (vec!["nemo-relay", "config"], "config"),
         (vec!["nemo-relay", "gateway", "start"], "gateway"),
         (vec!["nemo-relay", "gateway", "stop"], "gateway"),
+        (vec!["nemo-relay", "uninstall", "pi"], "uninstall"),
     ] {
         let cli = Cli::try_parse_from(args).unwrap();
         assert_eq!(cli.command.unwrap().log_name(), expected);
     }
+}
+
+#[test]
+fn command_scope_and_gateway_mode_conversions_cover_every_variant() {
+    assert_eq!(
+        crate::plugins::ConfigurationScope::from(PluginsScopeArgs {
+            user: true,
+            global: true,
+        }),
+        crate::plugins::ConfigurationScope::Invalid
+    );
+    assert_eq!(
+        crate::plugins::ConfigurationScope::from(PricingScopeArgs {
+            user: true,
+            global: false,
+        }),
+        crate::plugins::ConfigurationScope::User
+    );
+    assert_eq!(
+        crate::plugins::ConfigurationScope::from(PricingScopeArgs {
+            user: false,
+            global: true,
+        }),
+        crate::plugins::ConfigurationScope::Global
+    );
+    assert_eq!(
+        crate::plugins::ConfigurationScope::from(PricingScopeArgs {
+            user: true,
+            global: true,
+        }),
+        crate::plugins::ConfigurationScope::Invalid
+    );
+    assert_eq!(
+        crate::hooks::GatewayMode::from(GatewayModeArg::HookOnly),
+        crate::hooks::GatewayMode::HookOnly
+    );
+    assert_eq!(
+        crate::hooks::GatewayMode::from(GatewayModeArg::Passthrough),
+        crate::hooks::GatewayMode::Passthrough
+    );
 }
 
 #[test]
@@ -366,6 +408,372 @@ fn cli_parses_native_mcp_subcommand_and_bind_override() {
 }
 
 #[test]
+fn cli_parses_daemon_server_defaults_and_pass_through() {
+    let cli = Cli::try_parse_from(["nemo-relay", "daemon"]).unwrap();
+    let Some(Command::Daemon(command)) = cli.command else {
+        panic!("expected daemon command");
+    };
+    assert_eq!(command.bind, std::net::Ipv4Addr::LOCALHOST);
+    assert_eq!(command.port, 47_632);
+    assert!(!command.pass_through);
+    assert!(command.client_token_file.is_none());
+    assert!(command.command.is_none());
+
+    let cli = Cli::try_parse_from(["nemo-relay", "daemon", "--pass-through"]).unwrap();
+    let Some(Command::Daemon(command)) = cli.command else {
+        panic!("expected daemon command");
+    };
+    assert!(command.pass_through);
+
+    let cli = Cli::try_parse_from([
+        "nemo-relay",
+        "daemon",
+        "--client-token-file",
+        "/etc/nemo-relay/client-tokens",
+    ])
+    .unwrap();
+    let Some(Command::Daemon(command)) = cli.command else {
+        panic!("expected daemon command");
+    };
+    assert_eq!(
+        command.client_token_file.as_deref(),
+        Some(std::path::Path::new("/etc/nemo-relay/client-tokens"))
+    );
+
+    let cli = Cli::try_parse_from([
+        "nemo-relay",
+        "daemon",
+        "--advertise-address",
+        "https://relay.example.com:443",
+        "--tls-cert",
+        "/etc/nemo-relay/tls.crt",
+        "--tls-key",
+        "/etc/nemo-relay/tls.key",
+    ])
+    .unwrap();
+    let Some(Command::Daemon(command)) = cli.command else {
+        panic!("expected daemon command");
+    };
+    assert_eq!(
+        command.tls_cert.as_deref(),
+        Some(std::path::Path::new("/etc/nemo-relay/tls.crt"))
+    );
+    assert_eq!(
+        command.tls_key.as_deref(),
+        Some(std::path::Path::new("/etc/nemo-relay/tls.key"))
+    );
+    assert!(
+        Cli::try_parse_from([
+            "nemo-relay",
+            "daemon",
+            "--tls-cert",
+            "/etc/nemo-relay/tls.crt",
+        ])
+        .is_err()
+    );
+}
+
+#[test]
+fn cli_requires_explicit_valid_daemon_targets_for_clients() {
+    for arguments in [
+        vec!["nemo-relay", "daemon", "mcp"],
+        vec!["nemo-relay", "daemon", "hook", "codex"],
+        vec!["nemo-relay", "daemon", "worker"],
+        vec![
+            "nemo-relay",
+            "daemon",
+            "mcp",
+            "--daemon-address",
+            "http://relay.example.com:47632",
+        ],
+        vec![
+            "nemo-relay",
+            "daemon",
+            "mcp",
+            "--daemon-address",
+            "https://relay.example.com",
+        ],
+        vec![
+            "nemo-relay",
+            "daemon",
+            "mcp",
+            "--daemon-address",
+            "https://0.0.0.0:47632",
+        ],
+    ] {
+        assert!(Cli::try_parse_from(arguments).is_err());
+    }
+
+    for address in [
+        "http://127.0.0.1:47632",
+        "http://localhost:47632",
+        "https://relay.example.com:443",
+        "https://relay.example.com:8443",
+    ] {
+        assert!(
+            Cli::try_parse_from(["nemo-relay", "daemon", "mcp", "--daemon-address", address,])
+                .is_ok(),
+            "address should be accepted: {address}"
+        );
+    }
+}
+
+#[test]
+fn cli_rejects_daemon_listener_flags_for_daemon_clients() {
+    for arguments in [
+        vec![
+            "nemo-relay",
+            "daemon",
+            "--bind",
+            "127.0.0.1",
+            "mcp",
+            "--daemon-address",
+            "http://127.0.0.1:47632",
+        ],
+        vec![
+            "nemo-relay",
+            "daemon",
+            "--port",
+            "47633",
+            "worker",
+            "--daemon-address",
+            "http://127.0.0.1:47632",
+        ],
+        vec![
+            "nemo-relay",
+            "daemon",
+            "--advertise-address",
+            "https://relay.example.com:443",
+            "hook",
+            "codex",
+            "--daemon-address",
+            "http://127.0.0.1:47632",
+        ],
+        vec![
+            "nemo-relay",
+            "daemon",
+            "--pass-through",
+            "mcp",
+            "--daemon-address",
+            "http://127.0.0.1:47632",
+        ],
+    ] {
+        assert!(
+            Cli::try_parse_from(arguments).is_err(),
+            "daemon listener flags must not be accepted by a daemon client subcommand"
+        );
+    }
+}
+
+#[test]
+fn cli_parses_managed_hook_agent_and_failure_policy() {
+    let cli = Cli::try_parse_from([
+        "nemo-relay",
+        "daemon",
+        "hook",
+        "claude",
+        "--daemon-address",
+        "https://relay.example.com:8443",
+        "--fail-closed",
+    ])
+    .unwrap();
+    let Some(Command::Daemon(command)) = cli.command else {
+        panic!("expected daemon command");
+    };
+    let Some(daemon::DaemonSubcommand::Hook(hook)) = command.command else {
+        panic!("expected daemon hook command");
+    };
+    assert_eq!(hook.agent, AgentArg::Claude);
+    assert!(hook.fail_closed);
+    assert!(!hook.fail_open);
+
+    assert!(
+        Cli::try_parse_from([
+            "nemo-relay",
+            "daemon",
+            "hook",
+            "pi",
+            "--daemon-address",
+            "http://127.0.0.1:47632",
+            "--fail-open",
+            "--fail-closed",
+        ])
+        .is_err()
+    );
+}
+
+#[test]
+fn cli_worker_defaults_to_loopback_with_an_implicit_ephemeral_port() {
+    let cli = Cli::try_parse_from([
+        "nemo-relay",
+        "daemon",
+        "worker",
+        "--daemon-address",
+        "http://127.0.0.1:47632",
+    ])
+    .unwrap();
+    let Some(Command::Daemon(command)) = cli.command else {
+        panic!("expected daemon command");
+    };
+    let Some(daemon::DaemonSubcommand::Worker(worker)) = command.command else {
+        panic!("expected daemon worker command");
+    };
+    assert_eq!(worker.bind, std::net::Ipv4Addr::LOCALHOST);
+    assert_eq!(worker.port, None);
+
+    for arguments in [
+        vec![
+            "nemo-relay",
+            "daemon",
+            "worker",
+            "--daemon-address",
+            "http://127.0.0.1:47632",
+            "--bind",
+            "192.0.2.1",
+        ],
+        vec![
+            "nemo-relay",
+            "daemon",
+            "worker",
+            "--daemon-address",
+            "http://127.0.0.1:47632",
+            "--port",
+            "0",
+        ],
+    ] {
+        assert!(Cli::try_parse_from(arguments).is_err());
+    }
+}
+
+#[test]
+fn cli_parses_managed_bundle_creation_as_an_ambient_config_free_command() {
+    let cli = Cli::try_parse_from([
+        "nemo-relay",
+        "daemon",
+        "managed-bundle",
+        "--output",
+        "/srv/nemo-relay/bundle-v1",
+        "--daemon-address",
+        "https://relay.example.com:443",
+        "--dispatcher-command",
+        "/opt/nvidia/bin/nemo-relay-dispatch",
+        "--platform",
+        "linux",
+        "--agent",
+        "codex",
+        "--agent",
+        "claude",
+    ])
+    .unwrap();
+    let command = cli.command.unwrap();
+    assert!(command.skips_logging());
+    let Command::Daemon(command) = command else {
+        panic!("expected daemon command");
+    };
+    let Some(daemon::DaemonSubcommand::ManagedBundle(bundle)) = command.command else {
+        panic!("expected managed-bundle command");
+    };
+    assert_eq!(bundle.output, PathBuf::from("/srv/nemo-relay/bundle-v1"));
+    assert_eq!(
+        bundle.dispatcher_command,
+        "/opt/nvidia/bin/nemo-relay-dispatch"
+    );
+    assert_eq!(bundle.platform, daemon::ManagedPlatformArg::Linux);
+    assert_eq!(bundle.agents, [AgentArg::Codex, AgentArg::Claude]);
+
+    assert!(
+        Cli::try_parse_from([
+            "nemo-relay",
+            "daemon",
+            "managed-bundle",
+            "--output",
+            "/srv/nemo-relay/bundle-v1",
+            "--daemon-address",
+            "https://relay.example.com:443",
+            "--dispatcher-command",
+            "/opt/nvidia/bin/nemo-relay-dispatch",
+            "--platform",
+            "linux",
+        ])
+        .is_err(),
+        "at least one explicit managed agent is required"
+    );
+}
+
+#[tokio::test]
+async fn daemon_execute_validates_server_and_worker_bind_contracts() {
+    let cli = Cli::try_parse_from(["nemo-relay", "daemon", "--bind", "0.0.0.0"]).unwrap();
+    let Command::Daemon(command) = cli.command.unwrap() else {
+        panic!("daemon command");
+    };
+    assert!(matches!(daemon::execute(command, &cli.server).await,
+        Err(crate::error::CliError::Config(message)) if message.contains("requires --advertise-address")));
+
+    let cli = Cli::try_parse_from([
+        "nemo-relay",
+        "daemon",
+        "worker",
+        "--daemon-address",
+        "http://127.0.0.1:47632",
+        "--bind",
+        "0.0.0.0",
+    ])
+    .unwrap();
+    let Command::Daemon(command) = cli.command.unwrap() else {
+        panic!("daemon worker command");
+    };
+    assert!(matches!(daemon::execute(command, &cli.server).await,
+        Err(crate::error::CliError::Config(message)) if message == "a worker bound to 0.0.0.0 requires --advertise-address"));
+}
+
+#[tokio::test]
+async fn daemon_execute_creates_an_immutable_managed_bundle() {
+    let directory = tempfile::tempdir().unwrap();
+    let output = directory.path().join("bundle-v1");
+    let cli = Cli::try_parse_from([
+        "nemo-relay",
+        "daemon",
+        "managed-bundle",
+        "--output",
+        output.to_str().unwrap(),
+        "--daemon-address",
+        "https://relay.example.com:443",
+        "--dispatcher-command",
+        "/opt/nvidia/bin/nemo-relay-dispatch",
+        "--platform",
+        "linux",
+        "--agent",
+        "codex",
+        "--agent",
+        "pi",
+    ])
+    .unwrap();
+    let Command::Daemon(command) = cli.command.unwrap() else {
+        panic!("managed bundle command");
+    };
+    assert_eq!(
+        daemon::execute(command, &cli.server).await.unwrap(),
+        ExitCode::SUCCESS
+    );
+    for relative in [
+        "nemo-relay-managed-v1.manifest.json",
+        "codex/plugin-v1/.codex-plugin/plugin.json",
+        "codex/plugin-v1/.mcp.json",
+        "codex/plugin-v1/hooks/hooks.json",
+        "codex/settings-v1/config.toml",
+        "pi/extension-v1/README.md",
+        "pi/extension-v1/index.ts",
+        "pi/extension-v1/managed-config.json",
+        "pi/extension-v1/package.json",
+        "pi/extension-v1/tsconfig.json",
+    ] {
+        let metadata = std::fs::metadata(output.join(relative)).unwrap();
+        assert!(metadata.is_file(), "missing {relative}");
+        assert!(metadata.permissions().readonly(), "{relative} is writable");
+    }
+}
+
+#[test]
 fn cli_logging_options_override_environment_source() {
     let _environment = crate::test_support::EnvScope::set(&[
         (
@@ -630,7 +1038,7 @@ fn multi_agent_operations_attempt_every_target_before_reporting_errors() {
 }
 
 #[test]
-fn safe_dispatch_helpers_cover_completions_and_plugins_paths() {
+fn safe_dispatch_helpers_cover_plugins_paths() {
     let temp = tempfile::tempdir().unwrap();
     let _env = EnvScope::hermetic(&temp);
     let config_path = temp.path().join("config.toml");
@@ -639,15 +1047,6 @@ fn safe_dispatch_helpers_cover_completions_and_plugins_paths() {
         config: Some(config_path),
         ..ServerArgs::default()
     };
-
-    assert_eq!(
-        run_completions(CompletionsCommand {
-            shell: Some(clap_complete::Shell::Bash),
-            install: false,
-        })
-        .unwrap(),
-        ExitCode::SUCCESS
-    );
 
     assert_eq!(
         run_plugins(
@@ -916,4 +1315,63 @@ fn install_dir_is_cleared_for_pi_under_all_and_kept_everywhere_else() {
         "named explicitly, the flag is the user's stated intent and must still error"
     );
     assert_eq!(install::scoped_for(CodingAgent::Pi, all, None), None);
+}
+
+#[test]
+fn doctor_accepts_a_managed_bundle_without_changing_personal_install_flags() {
+    const DIGEST: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let cli = Cli::try_parse_from([
+        "nemo-relay",
+        "doctor",
+        "--managed-bundle",
+        "/opt/nvidia/nemo-relay-managed-v1",
+        "--managed-bundle-sha256",
+        DIGEST,
+        "--json",
+    ])
+    .unwrap();
+    let command = cli.command.unwrap();
+    assert!(command.skips_logging());
+    let Command::Doctor(command) = command else {
+        panic!("expected doctor command");
+    };
+    assert_eq!(
+        command.managed_bundle,
+        Some(PathBuf::from("/opt/nvidia/nemo-relay-managed-v1"))
+    );
+    assert_eq!(command.managed_bundle_sha256.unwrap().to_string(), DIGEST);
+    assert!(command.json);
+
+    for arguments in [
+        vec![
+            "nemo-relay",
+            "doctor",
+            "--managed-bundle",
+            "/managed",
+            "--plugin",
+            "codex",
+            "--managed-bundle-sha256",
+            DIGEST,
+        ],
+        vec![
+            "nemo-relay",
+            "doctor",
+            "--managed-bundle",
+            "/managed",
+            "--managed-bundle-sha256",
+            DIGEST,
+            "--offline",
+        ],
+        vec!["nemo-relay", "doctor", "--managed-bundle", "/managed"],
+        vec![
+            "nemo-relay",
+            "doctor",
+            "--managed-bundle",
+            "/managed",
+            "--managed-bundle-sha256",
+            "ABCDEF",
+        ],
+    ] {
+        assert!(Cli::try_parse_from(arguments).is_err());
+    }
 }

@@ -2624,6 +2624,17 @@ fn print_preview_renders_default_plugin_config() {
 }
 
 #[test]
+fn document_preview_applies_typed_components_without_persisting() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("plugins.toml");
+    let document = PluginConfigDocument::read(&path).unwrap();
+    let components = editable_components(document.config()).unwrap();
+
+    preview_document(&document, &components, &[]).unwrap();
+    assert!(!path.exists());
+}
+
+#[test]
 fn validate_config_reports_plugin_diagnostics() {
     let config = PluginConfig {
         components: vec![PluginComponentSpec {

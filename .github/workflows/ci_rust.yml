@@ -111,6 +111,7 @@ jobs:
         with:
           cache: false
           toolchain: ${{ steps.ci-config.outputs.rust_version }}
+          components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
@@ -168,6 +169,16 @@ jobs:
           flags: rust-${{ matrix.platform }}
           name: rust-${{ matrix.platform }}
           verbose: true
+
+      - name: Check daemon transport benchmark
+        if: ${{ matrix.platform == 'linux-amd64' }}
+        working-directory: ${{ env.NEMO_RELAY_CI_WORKSPACE }}
+        run: just check-daemon-transport-benchmark
+
+      - name: Run daemon transport benchmark smoke check
+        if: ${{ matrix.platform == 'linux-amd64' }}
+        working-directory: ${{ env.NEMO_RELAY_CI_WORKSPACE }}
+        run: just daemon-transport-benchmark-smoke
 
   Package:
     name: Package (${{ matrix.platform }})

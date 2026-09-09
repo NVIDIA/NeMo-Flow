@@ -11,6 +11,14 @@ use serde_json::Value;
 
 use crate::agents::CodingAgent;
 
+#[test]
+fn null_hook_configuration_normalizes_to_an_empty_object() {
+    assert_eq!(
+        super::merging::hook_config_root(serde_json::Value::Null).unwrap(),
+        json!({})
+    );
+}
+
 struct BootstrapConfigHome {
     _guard: std::sync::MutexGuard<'static, ()>,
     previous: Option<std::ffi::OsString>,

@@ -42,6 +42,8 @@ use setup::{
 };
 #[cfg(test)]
 use setup::{run_plugin_doctor, run_plugin_setup};
+#[cfg(test)]
+pub(crate) use state::register_managed_integration;
 use state::{
     CanonicalizeOrSelf, HostRegistrationProgress, PluginInstallOptions, PluginLayout, PluginState,
     default_install_dir, mark_plugin_setup_installed, read_state, remove_path, state_path,
