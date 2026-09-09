@@ -26,11 +26,12 @@ pub(super) fn render_request(
     surface: ProviderSurface,
     request: &AnnotatedLlmRequest,
 ) -> Option<LlmRequest> {
+    let mut request = request.clone();
     let template = LlmRequest {
         headers: Map::new(),
-        content: request_template(surface, request),
+        content: request_template(surface, &mut request)?,
     };
-    let mut rendered = request_codec(surface).encode(request, &template).ok()?;
+    let mut rendered = request_codec(surface).encode(&request, &template).ok()?;
     rendered.headers.clear();
     let provider_hint = match surface {
         ProviderSurface::AnthropicMessages => Some("anthropic.messages"),
@@ -66,28 +67,69 @@ pub(super) fn render_response(
     Some(rendered)
 }
 
-fn request_template(surface: ProviderSurface, request: &AnnotatedLlmRequest) -> Json {
-    match surface {
+fn request_template(surface: ProviderSurface, request: &mut AnnotatedLlmRequest) -> Option<Json> {
+    Some(match surface {
         ProviderSurface::OpenAIChat | ProviderSurface::AnthropicMessages => {
             json!({"messages": []})
         }
         ProviderSurface::OpenAIResponses => json!({"input": []}),
-        ProviderSurface::OCIGenAI => {
-            let api_format = match request.api_specific.as_ref() {
-                Some(nemo_relay::codec::request::ApiSpecificRequest::OCIGenAI {
-                    api_format: Some(api_format),
-                    ..
-                }) => api_format.as_str(),
-                _ => "GENERIC",
-            };
-            match api_format {
-                "COHERE" => json!({"apiFormat": "COHERE"}),
-                "COHEREV2" => json!({"apiFormat": "COHEREV2", "messages": []}),
-                _ => json!({"apiFormat": "GENERIC", "messages": []}),
-            }
-        }
+        ProviderSurface::OCIGenAI => oci_request_template(request)?,
         ProviderSurface::GeminiGenerateContent => json!({"contents": []}),
+    })
+}
+
+fn oci_request_template(request: &mut AnnotatedLlmRequest) -> Option<Json> {
+    use nemo_relay::codec::request::ApiSpecificRequest;
+
+    let (api_format, compartment_id, had_serving_mode) = match request.api_specific.as_ref() {
+        Some(ApiSpecificRequest::OCIGenAI {
+            compartment_id,
+            serving_mode,
+            api_format,
+        }) => (
+            api_format.as_deref().unwrap_or("GENERIC").to_string(),
+            compartment_id.clone(),
+            serving_mode.is_some(),
+        ),
+        _ => ("GENERIC".to_string(), None, false),
+    };
+    let chat_request = match api_format.as_str() {
+        "COHERE" => json!({"apiFormat": "COHERE"}),
+        "COHEREV2" => json!({"apiFormat": "COHEREV2", "messages": []}),
+        _ => json!({"apiFormat": "GENERIC", "messages": []}),
+    };
+    let needs_envelope = request.model.is_some() || compartment_id.is_some() || had_serving_mode;
+    if !needs_envelope {
+        return Some(chat_request);
     }
+
+    let model = request.model.clone()?;
+    let serving_mode = json!({
+        "servingType": "ON_DEMAND",
+        "modelId": model,
+    });
+    match request.api_specific.as_mut() {
+        Some(ApiSpecificRequest::OCIGenAI {
+            serving_mode: target,
+            ..
+        }) => *target = Some(serving_mode.clone()),
+        None => {
+            request.api_specific = Some(ApiSpecificRequest::OCIGenAI {
+                compartment_id: None,
+                serving_mode: Some(serving_mode.clone()),
+                api_format: Some(api_format),
+            });
+        }
+        Some(_) => return None,
+    }
+
+    let mut envelope = Map::new();
+    if let Some(compartment_id) = compartment_id {
+        envelope.insert("compartmentId".into(), Json::String(compartment_id));
+    }
+    envelope.insert("servingMode".into(), serving_mode);
+    envelope.insert("chatRequest".into(), chat_request);
+    Some(Json::Object(envelope))
 }
 
 fn render_openai_chat_response(response: &AnnotatedLlmResponse) -> Json {
@@ -502,8 +544,12 @@ fn insert_f64(object: &mut Map<String, Json>, key: &str, value: Option<f64>) {
 mod tests {
     use super::*;
 
+    use std::collections::BTreeMap;
+
     use nemo_relay::api::llm::LlmRequest;
     use nemo_relay::codec::resolve::response_codec;
+
+    use crate::trajectory::{CustomMarkPayloadPolicy, TrajectorySanitizer};
 
     const SURFACES: [ProviderSurface; 5] = [
         ProviderSurface::OpenAIChat,
@@ -652,6 +698,74 @@ mod tests {
             let decoded = request_codec(ProviderSurface::OCIGenAI)
                 .decode(&rendered)
                 .unwrap_or_else(|error| panic!("{api_format} projection was invalid: {error}"));
+            assert_eq!(decoded.messages.len(), 1);
+        }
+    }
+
+    #[test]
+    fn oci_enveloped_requests_render_from_sanitized_annotations() {
+        let cases = [
+            (
+                "GENERIC",
+                json!({
+                    "messages": [{"role": "USER", "content": [{"type": "TEXT", "text": "SECRET"}]}],
+                }),
+            ),
+            ("COHERE", json!({"message": "SECRET"})),
+            (
+                "COHEREV2",
+                json!({
+                    "messages": [{"role": "USER", "content": [{"type": "TEXT", "text": "SECRET"}]}],
+                }),
+            ),
+        ];
+        let sanitizer = TrajectorySanitizer::new(
+            "[REDACTED]".into(),
+            CustomMarkPayloadPolicy::RedactAllLeaves,
+            BTreeMap::new(),
+        );
+
+        for (api_format, chat_request) in cases {
+            let request = LlmRequest {
+                headers: Map::new(),
+                content: json!({
+                    "compartmentId": "SECRET",
+                    "servingMode": {
+                        "servingType": "ON_DEMAND",
+                        "modelId": "trusted-model",
+                        "future": "SECRET",
+                    },
+                    "chatRequest": {
+                        "apiFormat": api_format,
+                        "future": "SECRET",
+                    },
+                }),
+            };
+            let mut request = request;
+            request.content["chatRequest"]
+                .as_object_mut()
+                .unwrap()
+                .extend(chat_request.as_object().unwrap().clone());
+            let annotated = request_codec(ProviderSurface::OCIGenAI)
+                .decode(&request)
+                .unwrap();
+            let sanitized = sanitizer.sanitize_annotated_request(annotated).unwrap();
+
+            let rendered = render_request(ProviderSurface::OCIGenAI, &sanitized)
+                .unwrap_or_else(|| panic!("{api_format} enveloped request projection failed"));
+            let serialized = serde_json::to_string(&rendered).unwrap();
+            assert!(!serialized.contains("SECRET"), "{api_format}: {serialized}");
+            assert!(rendered.headers.is_empty());
+            assert_eq!(rendered.content["compartmentId"], "[REDACTED]");
+            assert_eq!(
+                rendered.content["servingMode"],
+                json!({"servingType": "ON_DEMAND", "modelId": "trusted-model"})
+            );
+            assert_eq!(rendered.content["chatRequest"]["apiFormat"], api_format);
+            let decoded = request_codec(ProviderSurface::OCIGenAI)
+                .decode(&rendered)
+                .unwrap_or_else(|error| panic!("{api_format} projection was invalid: {error}"));
+            assert_eq!(decoded.model.as_deref(), Some("trusted-model"));
             assert_eq!(decoded.messages.len(), 1);
         }
     }
