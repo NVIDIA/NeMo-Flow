@@ -1079,6 +1079,36 @@ fn refresh_preflight_retires_multiple_directories_for_one_host() {
 }
 
 #[test]
+fn refresh_preflight_debug_commit_and_unknown_target_operations_are_stable() {
+    let home = tempdir().unwrap();
+    let _home = HomeScope::enter(home.path());
+    let install = tempdir().unwrap();
+    write_installed_state(CodingAgent::Codex, install.path());
+    let layout = PluginLayout::new(CodingAgent::Codex, install.path());
+    let mut preflight =
+        retire_integrations_for_refresh(&[(CodingAgent::Codex, install.path().to_path_buf())])
+            .unwrap();
+
+    assert_eq!(
+        format!("{preflight:?}"),
+        "RefreshIntegrationsPreflight { retirement_count: 1 }"
+    );
+    let absent = install.path().join("absent");
+    preflight.commit_target(CodingAgent::ClaudeCode, &absent);
+    preflight
+        .restore_failed_target(CodingAgent::ClaudeCode, &absent)
+        .unwrap();
+    preflight.commit_target(CodingAgent::Codex, install.path());
+    drop(preflight);
+
+    assert!(
+        std::fs::read_to_string(layout.generation_fence)
+            .unwrap()
+            .starts_with("retired:")
+    );
+}
+
+#[test]
 fn refresh_preflight_skips_an_unsafe_dangling_codex_target_and_retires_later_targets() {
     let home = tempdir().unwrap();
     let _home = HomeScope::enter(home.path());

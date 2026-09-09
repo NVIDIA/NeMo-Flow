@@ -68,6 +68,16 @@ fn a_blank_header_names_nothing() {
     )));
 }
 
+#[test]
+fn a_non_text_header_is_rejected() {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        UPSTREAM_BASE_URL_HEADER,
+        HeaderValue::from_bytes(b"https://example.com/\xff").unwrap(),
+    );
+    assert!(is_rejected(client_named_upstream_base(&headers, true)));
+}
+
 /// Each of these would reach somewhere the caller should not be able to send credentialed traffic.
 #[test]
 fn only_absolute_http_urls_with_a_bare_host_are_accepted() {

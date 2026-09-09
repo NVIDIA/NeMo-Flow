@@ -234,3 +234,7 @@ fn create_symlink(_target: &Path, path: &Path) -> Result<(), String> {
         path.display()
     ))
 }
+
+#[cfg(test)]
+#[path = "../../tests/coverage/shared/filesystem_snapshot_tests.rs"]
+mod tests;
