@@ -1280,30 +1280,9 @@ fn force_uninstall_host_locked(
             && state.marker_absent_recovery
         {
             layout.validate_persisted_state(&state)?;
-            if !path_is_absent_no_follow(&layout.marketplace_root, "marketplace root")?
-                || !path_is_absent_no_follow(&layout.generation_fence, "MCP generation marker")?
-            {
-                return Err(unsafe_generation_fence_error(
-                    host,
-                    "or its marketplace root reappeared during a marker-absent cleanup retry",
-                ));
-            }
-            let retirement = acquire_dangling_generation_retirement(host, &layout)?;
-            return force_uninstall_dangling_marketplace_locked(
-                host,
-                &layout,
-                retirement,
-                options,
-                runner,
-                setup_runner,
-                host_registration_report(host, options, runner).ok(),
-            );
-        }
-        if path_is_absent_no_follow(&layout.marketplace_root, "marketplace root")?
-            && path_is_absent_no_follow(&layout.generation_fence, "MCP generation marker")?
-            && let Ok(registration) = host_registration_report(host, options, runner)
-            && is_recoverable_dangling_marketplace(host, &layout, &registration)?
-        {
+            let registration = host_registration_report(host, options, runner)?;
+            let classification = classify_dangling_marketplace(host, &layout, &registration)?;
+            validate_marker_absent_retry(host, &layout, &state, &registration, classification)?;
             let retirement = acquire_dangling_generation_retirement(host, &layout)?;
             return force_uninstall_dangling_marketplace_locked(
                 host,
@@ -1314,6 +1293,26 @@ fn force_uninstall_host_locked(
                 setup_runner,
                 Some(registration),
             );
+        }
+        if let Ok(registration) = host_registration_report(host, options, runner) {
+            match classify_dangling_marketplace(host, &layout, &registration)? {
+                DanglingMarketplaceClassification::Recoverable => {
+                    let retirement = acquire_dangling_generation_retirement(host, &layout)?;
+                    return force_uninstall_dangling_marketplace_locked(
+                        host,
+                        &layout,
+                        retirement,
+                        options,
+                        runner,
+                        setup_runner,
+                        Some(registration),
+                    );
+                }
+                DanglingMarketplaceClassification::Unsafe => {
+                    return Err(unsafe_dangling_marketplace_error(host));
+                }
+                DanglingMarketplaceClassification::NotDangling => {}
+            }
         }
     }
     let mut errors = Vec::new();
@@ -1412,7 +1411,7 @@ fn force_uninstall_dangling_marketplace_locked(
             }
         };
 
-    let plugin_removal_error = if retry_progress.is_some_and(|state| state.host_plugin_removed)
+    let plugin_removal_error = if retry_progress.is_some()
         && registration
             .as_ref()
             .is_some_and(|report| report.host_plugin_registered == Some(false))
@@ -1421,8 +1420,7 @@ fn force_uninstall_dangling_marketplace_locked(
     } else {
         run_host_plugin_removal(host, options, runner).err()
     };
-    let marketplace_removal_error = if retry_progress
-        .is_some_and(|state| state.host_marketplace_removed)
+    let marketplace_removal_error = if retry_progress.is_some()
         && registration
             .as_ref()
             .is_some_and(|report| !report.host_marketplace_registered)
@@ -1431,24 +1429,18 @@ fn force_uninstall_dangling_marketplace_locked(
     } else {
         run_host_marketplace_removal(host, options, runner).err()
     };
-    let mut host_plugin_removed = plugin_removal_error.is_none();
-    let mut host_marketplace_removed = marketplace_removal_error.is_none();
-    if plugin_removal_error.is_some() || marketplace_removal_error.is_some() {
-        match host_registration_report(host, options, runner) {
-            Ok(report) => {
-                if plugin_removal_error.is_some() {
-                    host_plugin_removed = report.host_plugin_registered == Some(false);
-                }
-                if marketplace_removal_error.is_some() {
-                    host_marketplace_removed = !report.host_marketplace_registered;
-                }
-            }
-            Err(error) => {
-                errors.push(format!(
-                    "could not verify host registration cleanup after removal failed: {error}"
-                ));
-            }
-        }
+    let (host_plugin_removed, host_marketplace_removed, verification_error) =
+        reconcile_host_removal_results(
+            host,
+            options,
+            runner,
+            plugin_removal_error.as_deref(),
+            marketplace_removal_error.as_deref(),
+        );
+    if let Some(error) = verification_error {
+        errors.push(format!(
+            "could not verify host registration cleanup after removal failed: {error}"
+        ));
     }
     if !host_plugin_removed && let Some(error) = plugin_removal_error {
         errors.push(format!("failed to unregister the host plugin: {error}"));
@@ -1527,6 +1519,33 @@ fn force_uninstall_dangling_marketplace_locked(
     }
 }
 
+fn reconcile_host_removal_results(
+    host: impl MarketplaceHost,
+    options: &PluginInstallOptions,
+    runner: &dyn CommandRunner,
+    plugin_removal_error: Option<&str>,
+    marketplace_removal_error: Option<&str>,
+) -> (bool, bool, Option<String>) {
+    let mut host_plugin_removed = plugin_removal_error.is_none();
+    let mut host_marketplace_removed = marketplace_removal_error.is_none();
+    if plugin_removal_error.is_none() && marketplace_removal_error.is_none() {
+        return (host_plugin_removed, host_marketplace_removed, None);
+    }
+
+    match host_registration_report(host, options, runner) {
+        Ok(report) => {
+            if plugin_removal_error.is_some() {
+                host_plugin_removed = report.host_plugin_registered == Some(false);
+            }
+            if marketplace_removal_error.is_some() {
+                host_marketplace_removed = !report.host_marketplace_registered;
+            }
+            (host_plugin_removed, host_marketplace_removed, None)
+        }
+        Err(error) => (host_plugin_removed, host_marketplace_removed, Some(error)),
+    }
+}
+
 fn retire_installed_generation(
     host: impl MarketplaceHost,
     layout: &PluginLayout,
@@ -1542,7 +1561,10 @@ fn retire_installed_generation(
     let mut existing_install = local_install_exists;
     if path_is_absent_no_follow(&generation_fence, "MCP generation marker")? {
         let registration = host_registration_report(host, options, runner)?;
-        if is_recoverable_dangling_marketplace(host, layout, &registration)? {
+        if matches!(
+            classify_dangling_marketplace(host, layout, &registration)?,
+            DanglingMarketplaceClassification::Recoverable
+        ) {
             return Err(dangling_marketplace_requires_force_error(host, "uninstall"));
         }
         existing_install |= registration.host_plugin_may_be_registered()
@@ -1639,23 +1661,116 @@ fn existing_plugin_install_requires_force_error(host: impl MarketplaceHost) -> S
     )
 }
 
-/// Limits automatic recovery to Codex's known dangling-marketplace failure, avoiding recovery
-/// from unrelated host failures.
-fn is_recoverable_dangling_marketplace(
+#[derive(Clone, Copy)]
+enum DanglingMarketplaceClassification {
+    NotDangling,
+    Recoverable,
+    Unsafe,
+}
+
+fn classify_dangling_marketplace(
     host: impl MarketplaceHost,
     layout: &PluginLayout,
     registration: &HostRegistrationReport,
-) -> Result<bool, String> {
+) -> Result<DanglingMarketplaceClassification, String> {
     if host.install_arg() != "codex"
         || registration.host_plugin_registered.is_some()
         || !registration.host_marketplace_registered
         || !registration.host_marketplace_unloadable
     {
-        return Ok(false);
+        return Ok(DanglingMarketplaceClassification::NotDangling);
     }
-    Ok(
-        path_is_absent_no_follow(&layout.marketplace_root, "marketplace root")?
-            && path_is_absent_no_follow(&layout.generation_fence, "MCP generation marker")?,
+    if !marketplace_source_matches_layout(
+        registration.host_marketplace_source.as_deref(),
+        &layout.marketplace_root,
+    ) {
+        return Err(unsafe_generation_fence_error(
+            host,
+            "is an unloadable Codex marketplace registration, but Codex reports a different marketplace source than the selected install directory",
+        ));
+    }
+    if path_is_absent_no_follow(&layout.marketplace_root, "marketplace root")?
+        && path_is_absent_no_follow(&layout.generation_fence, "MCP generation marker")?
+    {
+        Ok(DanglingMarketplaceClassification::Recoverable)
+    } else {
+        Ok(DanglingMarketplaceClassification::Unsafe)
+    }
+}
+
+fn marketplace_source_matches_layout(source: Option<&Path>, selected: &Path) -> bool {
+    let Some(source) = source else {
+        return false;
+    };
+    source == selected
+        || source.file_name() == selected.file_name()
+            && source
+                .parent()
+                .and_then(|parent| parent.canonicalize().ok())
+                .zip(
+                    selected
+                        .parent()
+                        .and_then(|parent| parent.canonicalize().ok()),
+                )
+                .is_some_and(|(source, selected)| source == selected)
+}
+
+fn validate_marker_absent_retry(
+    host: impl MarketplaceHost,
+    layout: &PluginLayout,
+    state: &PluginState,
+    registration: &HostRegistrationReport,
+    classification: DanglingMarketplaceClassification,
+) -> Result<(), String> {
+    if !path_is_absent_no_follow(&layout.marketplace_root, "marketplace root")?
+        || !path_is_absent_no_follow(&layout.generation_fence, "MCP generation marker")?
+    {
+        return Err(unsafe_dangling_marketplace_error(host));
+    }
+    match classification {
+        DanglingMarketplaceClassification::Unsafe => Err(unsafe_dangling_marketplace_error(host)),
+        DanglingMarketplaceClassification::Recoverable if state.host_marketplace_removed => {
+            Err(marker_absent_retry_conflict_error(host))
+        }
+        DanglingMarketplaceClassification::Recoverable => Ok(()),
+        DanglingMarketplaceClassification::NotDangling
+            if registration.host_plugin_registered == Some(false)
+                && !registration.host_marketplace_registered =>
+        {
+            Ok(())
+        }
+        DanglingMarketplaceClassification::NotDangling
+            if state.host_plugin_removed && registration.host_plugin_registered != Some(false) =>
+        {
+            Err(marker_absent_retry_conflict_error(host))
+        }
+        DanglingMarketplaceClassification::NotDangling
+            if state.host_marketplace_removed && registration.host_marketplace_registered =>
+        {
+            Err(marker_absent_retry_conflict_error(host))
+        }
+        DanglingMarketplaceClassification::NotDangling
+            if state.host_plugin_removed || state.host_marketplace_removed =>
+        {
+            Ok(())
+        }
+        DanglingMarketplaceClassification::NotDangling => {
+            Err(marker_absent_retry_conflict_error(host))
+        }
+    }
+}
+
+fn marker_absent_retry_conflict_error(host: impl MarketplaceHost) -> String {
+    unsafe_generation_fence_error(
+        host,
+        "has marker-absent recovery state that conflicts with the current Codex registration; do not remove that registration automatically",
+    )
+}
+
+fn unsafe_dangling_marketplace_error(host: impl MarketplaceHost) -> String {
+    unsafe_generation_fence_error(
+        host,
+        "is an unloadable Codex marketplace registration, but its marketplace root and generation marker are not both safely absent",
     )
 }
 
@@ -2442,12 +2557,24 @@ fn prepare_plugin_install(
     // roots, so `local_install_exists` covers everything the state file could point at.
     let previous_install_exists =
         local_install_exists || plugin_may_be_registered || marketplace_registered;
-    let exact_dangling_marketplace =
-        is_recoverable_dangling_marketplace(host, layout, &registration)?;
-    let marker_absent_retry = host.install_arg() == "codex"
-        && persisted
-            .as_ref()
-            .is_some_and(|state| state.marker_absent_recovery);
+    let dangling_classification = classify_dangling_marketplace(host, layout, &registration)?;
+    if matches!(
+        dangling_classification,
+        DanglingMarketplaceClassification::Unsafe
+    ) {
+        return Err(unsafe_dangling_marketplace_error(host));
+    }
+    let exact_dangling_marketplace = matches!(
+        dangling_classification,
+        DanglingMarketplaceClassification::Recoverable
+    );
+    let marker_absent_retry_state = persisted
+        .as_ref()
+        .filter(|state| host.install_arg() == "codex" && state.marker_absent_recovery);
+    if let Some(state) = marker_absent_retry_state {
+        validate_marker_absent_retry(host, layout, state, &registration, dangling_classification)?;
+    }
+    let marker_absent_retry = marker_absent_retry_state.is_some();
     let recoverable_dangling_marketplace = exact_dangling_marketplace || marker_absent_retry;
     let generation_fence_absent =
         path_is_absent_no_follow(&previous_generation_fence, "MCP generation marker")?;
@@ -2704,6 +2831,7 @@ fn cleanup_previous_install_for_replacement(
         }
         state.host_marketplace_removed = true;
         snapshot.original_marketplace_removed = true;
+        write_state_for_host(host, state, &options.install_dir, options)?;
         if let Some(plugin_error) = unknown_plugin_removal_error.take() {
             match host_registration_report(host, options, runner) {
                 Ok(report) if report.host_plugin_registered == Some(false) => {
@@ -2806,16 +2934,13 @@ fn begin_force_replacement(
     });
     let cleanup_result = if recoverable_dangling_marketplace {
         let persisted_recovery_progress = cleanup_state.marker_absent_recovery;
-        if persisted_recovery_progress {
-            // Persisted progress is useful only when fresh host evidence agrees. A registration
-            // may have reappeared between attempts; unknown evidence requires conservative
-            // removal.
-            cleanup_state.host_plugin_removed &= plugin_registered == Some(false);
-            cleanup_state.host_marketplace_removed &= !marketplace_registered;
-        } else {
+        if !persisted_recovery_progress {
             cleanup_state.host_plugin_removed = plugin_registered == Some(false);
             cleanup_state.host_marketplace_removed = !marketplace_registered;
             cleanup_state.plugin_setup_installed = previous_setup_installed;
+        } else {
+            cleanup_state.host_plugin_removed |= plugin_registered == Some(false);
+            cleanup_state.host_marketplace_removed |= !marketplace_registered;
         }
         cleanup_state.marker_absent_recovery = true;
         revalidate_dangling_paths(
@@ -2959,6 +3084,14 @@ fn restore_force_replacement(
             Err(errors.join("; "))
         };
     }
+    if snapshot.recoverable_dangling_marketplace && snapshot.original_marketplace_removed {
+        preserve_partial_dangling_recovery(host, layout, options, &mut errors);
+        return if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        };
+    }
     remove_promoted_replacement(host, layout, snapshot, options, runner, &mut errors);
     restore_replaced_paths(snapshot, &mut errors);
     if let Some(retirement) = snapshot.generation_retirement.as_mut()
@@ -2973,6 +3106,27 @@ fn restore_force_replacement(
         Ok(())
     } else {
         Err(errors.join("; "))
+    }
+}
+
+fn preserve_partial_dangling_recovery(
+    host: impl MarketplaceHost,
+    layout: &PluginLayout,
+    options: &PluginInstallOptions,
+    errors: &mut Vec<String>,
+) {
+    let retry_state = PluginState {
+        marketplace_root: layout.marketplace_root.clone(),
+        plugin_root: layout.plugin_root.clone(),
+        host_plugin_removed: false,
+        host_marketplace_removed: true,
+        plugin_setup_installed: false,
+        marker_absent_recovery: true,
+    };
+    if let Err(error) = write_state_for_host(host, &retry_state, &options.install_dir, options) {
+        errors.push(format!(
+            "failed to preserve Relay cleanup retry state: {error}"
+        ));
     }
 }
 
@@ -3011,22 +3165,18 @@ fn converge_committed_dangling_recovery(
         .host_marketplace_added
         .then(|| run_host_marketplace_removal(host, options, runner).err())
         .flatten();
-    let mut host_plugin_removed = plugin_removal_error.is_none();
-    let mut host_marketplace_removed = marketplace_removal_error.is_none();
-    if plugin_removal_error.is_some() || marketplace_removal_error.is_some() {
-        match host_registration_report(host, options, runner) {
-            Ok(report) => {
-                if plugin_removal_error.is_some() {
-                    host_plugin_removed = report.host_plugin_registered == Some(false);
-                }
-                if marketplace_removal_error.is_some() {
-                    host_marketplace_removed = !report.host_marketplace_registered;
-                }
-            }
-            Err(error) => errors.push(format!(
-                "failed to verify incomplete replacement registration cleanup: {error}"
-            )),
-        }
+    let (host_plugin_removed, host_marketplace_removed, verification_error) =
+        reconcile_host_removal_results(
+            host,
+            options,
+            runner,
+            plugin_removal_error.as_deref(),
+            marketplace_removal_error.as_deref(),
+        );
+    if let Some(error) = verification_error {
+        errors.push(format!(
+            "failed to verify incomplete replacement registration cleanup: {error}"
+        ));
     }
     if !host_plugin_removed && let Some(error) = plugin_removal_error {
         errors.push(format!(
@@ -3140,21 +3290,6 @@ fn reconcile_restored_registration(
     let report = match host_registration_report(host, options, runner) {
         Ok(report) => report,
         Err(error) => {
-            // Cleanup positively recorded removing the known-old marketplace even though the
-            // later host probe failed. Restore that known registration directly. The plugin's
-            // original tri-state remains unknown, so rollback must not invent it.
-            if snapshot.recoverable_dangling_marketplace
-                && snapshot.marketplace_registered
-                && snapshot.original_marketplace_removed
-                && let Err(restore_error) = run_host_marketplace_registration(
-                    host,
-                    &snapshot.original_marketplace_root,
-                    options,
-                    runner,
-                )
-            {
-                errors.push(restore_error);
-            }
             errors.push(error);
             return;
         }

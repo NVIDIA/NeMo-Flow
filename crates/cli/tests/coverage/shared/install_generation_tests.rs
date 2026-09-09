@@ -210,10 +210,14 @@ fn marker_absent_retirement_rejects_a_replaced_lock_inode_even_with_the_same_uui
     let retirement = GenerationRetirement::acquire_missing_for_plugin(&marker, &lock).unwrap();
 
     std::fs::remove_file(&lock).unwrap();
-    std::fs::write(&lock, contents).unwrap();
+    std::fs::write(&lock, &contents).unwrap();
     let error = retirement.revalidate_missing_marker().unwrap_err();
 
     assert!(error.contains("changed identity"), "{error}");
+    assert!(!marker.exists());
+    drop(retirement);
+    assert!(!marker.exists());
+    assert_eq!(std::fs::read(&lock).unwrap(), contents);
 }
 
 #[test]

@@ -134,7 +134,9 @@ replacing the lock.
 During a forced reinstall, removal of the old provider and hooks, plugin
 registration, and marketplace registration is one cleanup phase. Until all
 three areas have been cleaned, a failure restores only prior state Relay can
-prove existed. After all three are clean, cleanup is committed: a later install
+prove existed. Marketplace removal is durable progress because the generated
+tree is already gone, so a later probe failure records that removal and retries
+forward. After all three are clean, cleanup is committed: a later install
 failure does not recreate the dangling Codex registration. Relay keeps the
 validated lock and records the clean progress so another
 `nemo-relay install codex --force` or `nemo-relay integrations refresh` can
@@ -242,10 +244,12 @@ nemo-relay install codex --install-dir <path-to-plugins> --force
 nemo-relay integrations refresh
 ```
 
-Refresh attempts each managed target through the same forced-install recovery
-path. If one Codex target has an unsafe surviving lock, Relay reports that
-target, continues refreshing the others, and returns an error after every
-target has been attempted.
+Refresh preflight validates installed targets and retires their active MCP
+generations. A preflight failure stops the refresh before any target is
+attempted. A deleted Codex marketplace has no generation to retire, so its
+recovery remains in the per-target forced-install loop. If its surviving lock is
+unsafe, Relay reports that target, continues refreshing the others, and returns
+an error after every target has been attempted.
 
 Manual MCP configurations are not changed; reinstall them through Relay if you
 want Relay to manage future refreshes.
@@ -278,10 +282,12 @@ persistent hook commands reference a private Relay-owned configuration file;
 that file contains the generation-file path and immutable generation identity.
 Relay uses the configured hook failure policy. This prevents a legacy hook
 retained by a host process from reviving a retired installation. If install or
-uninstall reports a missing or invalid generation marker, follow its cleanup
-instructions. If the generated Codex marketplace was deleted but its
-registration remains, use the forced recovery described above. When forced
-recovery cannot validate the surviving lock, follow the error's manual cleanup
+uninstall reports a missing or invalid generation marker, follow the error's
+cleanup instructions. If the generated Codex marketplace was deleted but its
+registration remains, see
+[Recover a Deleted Codex Marketplace](#recover-a-deleted-codex-marketplace).
+For other missing or invalid generation markers, or when forced recovery
+cannot validate the surviving lock, follow the error's manual cleanup
 instructions: close the host and standalone `nemo-relay mcp` processes, remove
 the stale registration and state it identifies, and then run the requested
 `--force` command.
@@ -436,15 +442,16 @@ Code and Codex `run` flows. Existing fenced installations can be refreshed with
 `nemo-relay install <host> --force`. Relay refuses to replace an older MCP
 installation without a valid generation marker because a cached host process
 might still be running. The exact deleted-Codex-marketplace state can be
-recovered with the forced commands described above when its surviving lock is
+recovered through [Recover a Deleted Codex
+Marketplace](#recover-a-deleted-codex-marketplace) when its surviving lock is
 safe. For other missing-marker states, follow the manual cleanup steps in the
 error before you retry the forced install.
 
 This release removes the internal `nemo-relay plugin-shim` command. Refresh a
-fenced generated installation with `nemo-relay install <host> --force`; use the
-deleted-marketplace recovery described above for that exact Codex state, and
-use manual cleanup for other missing-marker states. For custom automation, use
-these supported replacements:
+fenced generated installation with `nemo-relay install <host> --force`; use
+[Recover a Deleted Codex Marketplace](#recover-a-deleted-codex-marketplace) for
+that exact Codex state, and use manual cleanup for other missing-marker states.
+For custom automation, use these supported replacements:
 
 | Removed Internal Command | Supported Replacement |
 | --- | --- |
