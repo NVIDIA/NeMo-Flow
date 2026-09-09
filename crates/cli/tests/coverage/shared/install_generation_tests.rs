@@ -64,6 +64,162 @@ fn plugin_retirement_accepts_an_equivalent_symlinked_external_lock_path() {
     retirement.restore_after_rollback().unwrap();
 }
 
+fn surviving_external_lock(marker: &Path, lock: &Path) {
+    write_new_generation_with_token_at(marker, lock).unwrap();
+    std::fs::remove_file(marker).unwrap();
+}
+
+fn expect_missing_retirement_error(result: Result<GenerationRetirement, String>) -> String {
+    match result {
+        Err(error) => error,
+        Ok(_) => panic!("unsafe marker-absent generation retirement was accepted"),
+    }
+}
+
+#[test]
+fn marker_absent_retirement_holds_and_reuses_the_surviving_lock_without_restoring_a_marker() {
+    let dir = tempdir().unwrap();
+    let marker = dir.path().join("plugin").join(GENERATION_FILE_NAME);
+    let lock = dir.path().join("generation.lock");
+    surviving_external_lock(&marker, &lock);
+
+    let mut retirement = GenerationRetirement::acquire_missing_for_plugin(&marker, &lock).unwrap();
+    assert!(retirement.original.marker_was_absent());
+    retirement.invalidate_for_replacement().unwrap();
+    assert!(!marker.exists());
+
+    let replacement = write_staged_generation_with_token(&marker, &lock).unwrap();
+    assert_eq!(retirement.active_visible_token().unwrap(), replacement);
+    retirement.retire_visible_replacement().unwrap();
+    std::fs::remove_file(&marker).unwrap();
+    retirement.restore_after_rollback().unwrap();
+
+    assert!(!marker.exists());
+    let retry = GenerationRetirement::acquire_missing_for_plugin(&marker, &lock).unwrap();
+    drop(retry);
+    assert!(!marker.exists());
+}
+
+#[test]
+fn marker_absent_retirement_rejects_missing_empty_malformed_and_non_regular_locks() {
+    let dir = tempdir().unwrap();
+    let marker = dir.path().join("plugin").join(GENERATION_FILE_NAME);
+    let missing = dir.path().join("missing.lock");
+    let error = expect_missing_retirement_error(GenerationRetirement::acquire_missing_for_plugin(
+        &marker, &missing,
+    ));
+    assert!(error.contains("failed to open"), "{error}");
+    assert!(!missing.exists());
+
+    let empty = dir.path().join("empty.lock");
+    std::fs::write(&empty, []).unwrap();
+    let error = expect_missing_retirement_error(GenerationRetirement::acquire_missing_for_plugin(
+        &marker, &empty,
+    ));
+    assert!(error.contains("is empty"), "{error}");
+    assert_eq!(std::fs::read(&empty).unwrap(), b"");
+
+    let malformed = dir.path().join("malformed.lock");
+    std::fs::write(&malformed, b"not-a-uuid\n").unwrap();
+    let error = expect_missing_retirement_error(GenerationRetirement::acquire_missing_for_plugin(
+        &marker, &malformed,
+    ));
+    assert!(error.contains("invalid identity"), "{error}");
+    assert_eq!(std::fs::read(&malformed).unwrap(), b"not-a-uuid\n");
+
+    let directory = dir.path().join("directory.lock");
+    std::fs::create_dir(&directory).unwrap();
+    let error = expect_missing_retirement_error(GenerationRetirement::acquire_missing_for_plugin(
+        &marker, &directory,
+    ));
+    assert!(error.contains("not a regular file"), "{error}");
+}
+
+#[test]
+fn marker_absent_retirement_rejects_contention_without_changing_the_lock() {
+    let dir = tempdir().unwrap();
+    let marker = dir.path().join("plugin").join(GENERATION_FILE_NAME);
+    let lock = dir.path().join("generation.lock");
+    surviving_external_lock(&marker, &lock);
+    let contents = std::fs::read(&lock).unwrap();
+    let first = GenerationRetirement::acquire_missing_for_plugin(&marker, &lock).unwrap();
+
+    let error =
+        expect_missing_retirement_error(GenerationRetirement::acquire_missing_with_timeout(
+            &marker,
+            &lock,
+            Duration::from_millis(20),
+        ));
+
+    assert!(error.contains("timed out waiting"), "{error}");
+    drop(first);
+    assert_eq!(std::fs::read(&lock).unwrap(), contents);
+}
+
+#[test]
+fn marker_absent_retirement_fails_closed_if_the_marker_reappears() {
+    let dir = tempdir().unwrap();
+    let marker = dir.path().join("plugin").join(GENERATION_FILE_NAME);
+    let lock = dir.path().join("generation.lock");
+    surviving_external_lock(&marker, &lock);
+    let retirement = GenerationRetirement::acquire_missing_for_plugin(&marker, &lock).unwrap();
+
+    std::fs::write(&marker, b"unexpected\n").unwrap();
+    let error = retirement.revalidate_missing_marker().unwrap_err();
+
+    assert!(error.contains("remain absent"), "{error}");
+    drop(retirement);
+    assert_eq!(std::fs::read(&marker).unwrap(), b"unexpected\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn marker_absent_retirement_rejects_symlinked_locks_and_reappearing_marker_symlinks() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempdir().unwrap();
+    let marker = dir.path().join("plugin").join(GENERATION_FILE_NAME);
+    let lock_target = dir.path().join("generation-target.lock");
+    let lock_link = dir.path().join("generation.lock");
+    surviving_external_lock(&marker, &lock_target);
+    symlink(&lock_target, &lock_link).unwrap();
+
+    let error = expect_missing_retirement_error(GenerationRetirement::acquire_missing_for_plugin(
+        &marker, &lock_link,
+    ));
+    assert!(error.contains("symlinked"), "{error}");
+
+    let mut retirement =
+        GenerationRetirement::acquire_missing_for_plugin(&marker, &lock_target).unwrap();
+    let marker_target = dir.path().join("unexpected-marker");
+    std::fs::write(&marker_target, b"unexpected\n").unwrap();
+    symlink(&marker_target, &marker).unwrap();
+    let error = retirement.revalidate_missing_marker().unwrap_err();
+    assert!(error.contains("a symlink"), "{error}");
+    retirement.commit_replacement();
+}
+
+#[cfg(unix)]
+#[test]
+fn marker_absent_retirement_rejects_a_replaced_lock_inode_even_with_the_same_uuid() {
+    let dir = tempdir().unwrap();
+    let marker = dir.path().join("plugin").join(GENERATION_FILE_NAME);
+    let lock = dir.path().join("generation.lock");
+    surviving_external_lock(&marker, &lock);
+    let contents = std::fs::read(&lock).unwrap();
+    let retirement = GenerationRetirement::acquire_missing_for_plugin(&marker, &lock).unwrap();
+
+    std::fs::remove_file(&lock).unwrap();
+    std::fs::write(&lock, &contents).unwrap();
+    let error = retirement.revalidate_missing_marker().unwrap_err();
+
+    assert!(error.contains("changed identity"), "{error}");
+    assert!(!marker.exists());
+    drop(retirement);
+    assert!(!marker.exists());
+    assert_eq!(std::fs::read(&lock).unwrap(), contents);
+}
+
 #[test]
 fn generation_markers_have_one_canonical_encoding() {
     let lock_path = PathBuf::from("generation.lock");
@@ -386,6 +542,29 @@ fn staged_generation_lock_remains_held_across_marketplace_promotion() {
 }
 
 #[test]
+fn promoted_generation_rejects_a_different_token_on_the_same_lock() {
+    let dir = tempdir().unwrap();
+    let staged_plugin = dir.path().join("staged").join("plugin");
+    let live_plugin = dir.path().join("live").join("plugin");
+    let staged_marker = staged_plugin.join(GENERATION_FILE_NAME);
+    let live_marker = live_plugin.join(GENERATION_FILE_NAME);
+    let lock_path = dir.path().join("replacement-generation.lock");
+    write_new_generation_with_token_at(&staged_marker, &lock_path).unwrap();
+    let mut retirement = GenerationRetirement::acquire(&staged_marker)
+        .unwrap()
+        .unwrap();
+
+    std::fs::create_dir_all(live_plugin.parent().unwrap()).unwrap();
+    std::fs::rename(&staged_plugin, &live_plugin).unwrap();
+    write_staged_generation_with_token(&live_marker, &lock_path).unwrap();
+
+    let error = retirement
+        .retarget_promoted_marker(&live_marker)
+        .unwrap_err();
+    assert!(error.contains("marker changed"), "{error}");
+}
+
+#[test]
 fn legacy_sibling_lock_can_be_released_for_tree_move_and_reacquired_for_rollback() {
     let dir = tempdir().unwrap();
     let plugin = dir.path().join("plugin");
@@ -559,7 +738,10 @@ fn rollback_can_restore_with_the_original_lock_still_held() {
         lock: Some(lock),
         lock_id,
         path: path.clone(),
-        original: GenerationMarker::active("generation-a", generation_lock_path(&path)),
+        original: GenerationRetirementOriginal::MarkerPresent(GenerationMarker::active(
+            "generation-a",
+            generation_lock_path(&path),
+        )),
         changed: true,
         committed: false,
         lock_released_for_tree_mutation: false,
@@ -584,7 +766,8 @@ fn rollback_restores_the_visible_path_after_atomic_marker_replacement() {
     let mut retirement = GenerationRetirement::acquire(&path).unwrap().unwrap();
     retirement.invalidate_for_replacement().unwrap();
 
-    atomic_write(&path, retirement.original.retired().encoded().as_bytes()).unwrap();
+    let original_marker = retirement.original.marker().unwrap();
+    atomic_write(&path, original_marker.retired().encoded().as_bytes()).unwrap();
 
     retirement.restore_after_rollback().unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), original_bytes);
@@ -614,7 +797,10 @@ fn invalidation_requires_a_live_exclusive_lock() {
         lock: None,
         lock_id: uuid::Uuid::nil().to_string(),
         path: path.clone(),
-        original: GenerationMarker::active("generation-a", generation_lock_path(&path)),
+        original: GenerationRetirementOriginal::MarkerPresent(GenerationMarker::active(
+            "generation-a",
+            generation_lock_path(&path),
+        )),
         changed: false,
         committed: false,
         lock_released_for_tree_mutation: false,
@@ -698,7 +884,10 @@ fn rollback_requires_the_original_transaction_lock() {
         lock: None,
         lock_id: uuid::Uuid::nil().to_string(),
         path: path.clone(),
-        original: GenerationMarker::active("generation-a", generation_lock_path(&path)),
+        original: GenerationRetirementOriginal::MarkerPresent(GenerationMarker::active(
+            "generation-a",
+            generation_lock_path(&path),
+        )),
         changed: true,
         committed: false,
         lock_released_for_tree_mutation: false,

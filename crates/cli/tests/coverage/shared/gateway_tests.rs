@@ -567,6 +567,42 @@ fn openai_upstream_url_accepts_origin_or_v1_base() {
 }
 
 #[test]
+fn anthropic_upstream_url_accepts_origin_or_v1_base() {
+    let mut config = GatewayConfig {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        openai_base_url: "http://openai".into(),
+        openai_auth_header: None,
+        anthropic_base_url: "http://anthropic".into(),
+        anthropic_auth_header: None,
+        metadata: None,
+        plugin_config: None,
+        max_hook_payload_bytes: crate::configuration::DEFAULT_MAX_HOOK_PAYLOAD_BYTES,
+        max_passthrough_body_bytes: crate::configuration::DEFAULT_MAX_PASSTHROUGH_BODY_BYTES,
+    };
+
+    assert_eq!(
+        ProviderRoute::AnthropicMessages.upstream_url(&config, "/v1/messages?beta=true"),
+        "http://anthropic/v1/messages?beta=true"
+    );
+    assert_eq!(
+        ProviderRoute::AnthropicCountTokens
+            .upstream_url(&config, "/v1/messages/count_tokens?beta=true"),
+        "http://anthropic/v1/messages/count_tokens?beta=true"
+    );
+
+    config.anthropic_base_url = "http://anthropic/v1".into();
+    assert_eq!(
+        ProviderRoute::AnthropicMessages.upstream_url(&config, "/v1/messages?beta=true"),
+        "http://anthropic/v1/messages?beta=true"
+    );
+    assert_eq!(
+        ProviderRoute::AnthropicCountTokens
+            .upstream_url(&config, "/v1/messages/count_tokens?beta=true"),
+        "http://anthropic/v1/messages/count_tokens?beta=true"
+    );
+}
+
+#[test]
 fn effective_upstream_request_overlays_runtime_body_and_headers() {
     let original_body = Bytes::from_static(br#"{"model":"original"}"#);
     let mut original_headers = HeaderMap::new();

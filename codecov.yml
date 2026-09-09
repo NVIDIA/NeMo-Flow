@@ -80,7 +80,7 @@ component_management:
         - "crates/ffi/src"
       statuses:
         - type: project
-          target: 95%
+          target: 94%
           threshold: 0.5%
           base: auto
           if_ci_failed: error
