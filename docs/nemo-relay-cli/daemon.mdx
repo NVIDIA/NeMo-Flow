@@ -74,6 +74,12 @@ authorization. Restrict daemon access to trusted users through your network
 or authenticated reverse proxy; do not expose open enrollment to an untrusted
 network. TLS remains required for non-loopback communication.
 
+Challenge requests are limited to 16 per transport-peer IP in a 15-second
+window, before the request body is read. MCP and worker challenges retain
+separate capacity limits. Forwarded IP headers do not override this limit:
+clients behind a reverse proxy share its peer budget. Apply additional
+per-client admission controls at the proxy for larger deployments.
+
 ## Start the Daemon
 
 Start the daemon with its loopback defaults:
@@ -351,6 +357,11 @@ observation by default. Set
 starting the worker to choose another bound. This setting changes only
 side-band observability; it does not cap, buffer, or truncate caller-visible
 delivery.
+
+Semantic observation has a separate 15-minute completion deadline, independent
+of the provider's 60-second response-head deadline. Exceeding the observation
+deadline marks only the captured observation as truncated; it does not stop
+caller-visible streaming.
 
 The managed worker deliberately ignores per-user Relay configuration,
 per-user plugin directories, and user lifecycle state. It loads only the

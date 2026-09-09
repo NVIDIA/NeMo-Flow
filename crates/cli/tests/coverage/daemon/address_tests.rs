@@ -54,6 +54,11 @@ fn unspecified_worker_requires_concrete_advertisement() {
         "worker/path",
         "user@host",
         "[::1]:8443",
+        "-worker",
+        "worker-",
+        "valid.-worker",
+        "worker-.valid",
+        &"a".repeat(254),
     ] {
         assert!(
             worker_advertised_address(local, Some(host)).is_err(),
@@ -66,4 +71,14 @@ fn unspecified_worker_requires_concrete_advertisement() {
             "[2001:db8::1]:43210"
         );
     }
+}
+
+#[test]
+fn concrete_worker_bind_rejects_advertisement() {
+    let local: SocketAddr = "127.0.0.1:43210".parse().unwrap();
+    assert_eq!(
+        worker_advertised_address(local, None).unwrap(),
+        local.to_string()
+    );
+    assert!(worker_advertised_address(local, Some("worker.example.com")).is_err());
 }

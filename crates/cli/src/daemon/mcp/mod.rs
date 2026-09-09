@@ -297,87 +297,131 @@ fn validate_heartbeat_interval(milliseconds: u64) -> Result<Duration, CliError> 
     Ok(interval)
 }
 
+/// A pending worker must not survive failed activation or cancellation. Readiness transfers
+/// ownership to the broker; only that success path disarms this guard.
+struct ActivationChild {
+    child: Child,
+    published: bool,
+}
+
+impl Drop for ActivationChild {
+    fn drop(&mut self) {
+        if !self.published {
+            let _ = self.child.start_kill();
+        }
+    }
+}
+
+type PendingLaunch = Option<(String, ActivationChild, tokio::time::Instant)>;
+
+async fn stop_pending_launch(launched: &mut PendingLaunch) -> Result<(), CliError> {
+    if let Some((_, mut child, _)) = launched.take() {
+        child.child.kill().await.map_err(CliError::Io)?;
+    }
+    Ok(())
+}
+
 async fn make_route_ready(
     lease: &mut McpLease,
     mut directive: BrokerDirective,
 ) -> Result<(), CliError> {
     let started = tokio::time::Instant::now();
-    let mut launched: Option<(String, Child, tokio::time::Instant)> = None;
-    loop {
-        match directive {
-            BrokerDirective::ReuseWorker { .. } | BrokerDirective::UsePassThrough => return Ok(()),
-            BrokerDirective::LaunchWorker { .. } => {
-                let bootstrap = WorkerBootstrap::from_directive(directive.clone())
-                    .expect("launch directive was matched");
-                let already_launched = launched
-                    .as_ref()
-                    .is_some_and(|(id, _, _)| id == &bootstrap.activation_id);
-                if !already_launched {
-                    match launch_worker(&lease.daemon_origin, &bootstrap).await {
-                        Ok(child) => {
-                            launched = Some((
-                                bootstrap.activation_id.clone(),
-                                child,
-                                tokio::time::Instant::now(),
-                            ));
-                        }
-                        Err(error) => {
-                            report_activation_failed(lease, &bootstrap.activation_id, &error)
-                                .await?;
-                            directive = refresh_registration(lease).await?.directive;
-                            continue;
+    let mut launched: PendingLaunch = None;
+    let result = async {
+        loop {
+            if started.elapsed() > ACTIVATION_POLL_MAX
+                && !matches!(
+                    directive,
+                    BrokerDirective::ReuseWorker { .. } | BrokerDirective::UsePassThrough
+                )
+            {
+                return Err(CliError::Launch(
+                    "timed out waiting for the broker route to become ready".into(),
+                ));
+            }
+            match directive {
+                BrokerDirective::ReuseWorker { .. } => {
+                    if let Some((_, child, _)) = launched.as_mut() {
+                        child.published = true;
+                    }
+                    launched.take();
+                    return Ok(());
+                }
+                BrokerDirective::UsePassThrough => return Ok(()),
+                BrokerDirective::LaunchWorker { .. } => {
+                    let bootstrap = WorkerBootstrap::from_directive(directive.clone())
+                        .expect("launch directive was matched");
+                    let already_launched = launched
+                        .as_ref()
+                        .is_some_and(|(id, _, _)| id == &bootstrap.activation_id);
+                    if !already_launched {
+                        stop_pending_launch(&mut launched).await?;
+                        match launch_worker(&lease.daemon_origin, &bootstrap).await {
+                            Ok(child) => {
+                                launched = Some((
+                                    bootstrap.activation_id.clone(),
+                                    child,
+                                    tokio::time::Instant::now(),
+                                ));
+                            }
+                            Err(error) => {
+                                report_activation_failed(lease, &bootstrap.activation_id, &error)
+                                    .await?;
+                                directive = refresh_registration(lease).await?.directive;
+                                continue;
+                            }
                         }
                     }
+                    if let Some((activation_id, child, _)) = launched.as_mut()
+                        && activation_id == &bootstrap.activation_id
+                        && let Some(status) = child.child.try_wait().map_err(CliError::Io)?
+                    {
+                        let error = CliError::Launch(format!(
+                            "activated worker exited before readiness with {status}"
+                        ));
+                        report_activation_failed(lease, &bootstrap.activation_id, &error).await?;
+                        directive = refresh_registration(lease).await?.directive;
+                        continue;
+                    }
+                    if launched
+                        .as_ref()
+                        .is_some_and(|(activation_id, _, started)| {
+                            activation_timed_out(
+                                &bootstrap.activation_id,
+                                activation_id,
+                                *started,
+                                tokio::time::Instant::now(),
+                            )
+                        })
+                    {
+                        let error = CliError::Launch(
+                            "activated worker did not register within 15 seconds".into(),
+                        );
+                        stop_pending_launch(&mut launched).await?;
+                        report_activation_failed(lease, &bootstrap.activation_id, &error).await?;
+                        directive = refresh_registration(lease).await?.directive;
+                        continue;
+                    }
+                    // Poll readiness through the authenticated lease rather than repeating the full
+                    // signed registration handshake while the worker starts.
+                    if let Some(updated) = poll_worker_activation(lease).await? {
+                        directive = updated;
+                        continue;
+                    }
                 }
-                if let Some((activation_id, child, _)) = launched.as_mut()
-                    && activation_id == &bootstrap.activation_id
-                    && let Some(status) = child.try_wait().map_err(CliError::Io)?
-                {
-                    let error = CliError::Launch(format!(
-                        "activated worker exited before readiness with {status}"
-                    ));
-                    report_activation_failed(lease, &bootstrap.activation_id, &error).await?;
-                    directive = refresh_registration(lease).await?.directive;
-                    continue;
-                }
-                if launched
-                    .as_ref()
-                    .is_some_and(|(activation_id, _, started)| {
-                        activation_timed_out(
-                            &bootstrap.activation_id,
-                            activation_id,
-                            *started,
-                            tokio::time::Instant::now(),
-                        )
-                    })
-                {
-                    let error = CliError::Launch(
-                        "activated worker did not register within 15 seconds".into(),
-                    );
-                    report_activation_failed(lease, &bootstrap.activation_id, &error).await?;
-                    directive = refresh_registration(lease).await?.directive;
-                    continue;
-                }
-                // Poll readiness through the authenticated lease rather than repeating the full
-                // signed registration handshake while the worker starts.
-                if let Some(updated) = poll_worker_activation(lease).await? {
-                    directive = updated;
-                    continue;
+                BrokerDirective::WaitForWorker { retry_after_ms } => {
+                    tokio::time::sleep(Duration::from_millis(retry_after_ms.clamp(10, 1_000)))
+                        .await;
                 }
             }
-            BrokerDirective::WaitForWorker { retry_after_ms } => {
-                tokio::time::sleep(Duration::from_millis(retry_after_ms.clamp(10, 1_000))).await;
+            if !matches!(directive, BrokerDirective::LaunchWorker { .. }) {
+                directive = refresh_registration(lease).await?.directive;
             }
-        }
-        if started.elapsed() > ACTIVATION_POLL_MAX {
-            return Err(CliError::Launch(
-                "timed out waiting for the broker route to become ready".into(),
-            ));
-        }
-        if !matches!(directive, BrokerDirective::LaunchWorker { .. }) {
-            directive = refresh_registration(lease).await?.directive;
         }
     }
+    .await;
+    let cleanup = stop_pending_launch(&mut launched).await;
+    result.and(cleanup)
 }
 
 async fn poll_worker_activation(lease: &mut McpLease) -> Result<Option<BrokerDirective>, CliError> {
@@ -424,30 +468,42 @@ fn apply_registration(lease: &mut McpLease, registration: &Registration) {
 async fn launch_worker(
     daemon_origin: &str,
     bootstrap: &WorkerBootstrap,
-) -> Result<Child, CliError> {
+) -> Result<ActivationChild, CliError> {
     let executable = std::env::current_exe().map_err(|error| {
         CliError::Launch(format!(
             "failed to resolve the nemo-relay executable: {error}"
         ))
     })?;
     let mut command = worker_command(&executable, daemon_origin, bootstrap);
-    let mut child = command
+    let child = command
         .spawn()
         .map_err(|error| CliError::Launch(format!("failed to launch daemon worker: {error}")))?;
-    let mut stdin = child.stdin.take().ok_or_else(|| {
-        CliError::Launch("failed to create the protected worker activation pipe".into())
-    })?;
-    let payload = serde_json::to_vec(bootstrap).map_err(|error| {
-        CliError::Launch(format!("failed to encode worker activation grant: {error}"))
-    })?;
-    stdin.write_all(&payload).await.map_err(|error| {
-        CliError::Launch(format!(
-            "failed to transfer worker activation grant: {error}"
-        ))
-    })?;
-    stdin.shutdown().await.map_err(|error| {
-        CliError::Launch(format!("failed to close worker activation pipe: {error}"))
-    })?;
+    let mut child = ActivationChild {
+        child,
+        published: false,
+    };
+    let transfer = async {
+        let mut stdin = child.child.stdin.take().ok_or_else(|| {
+            CliError::Launch("failed to create the protected worker activation pipe".into())
+        })?;
+        let payload = serde_json::to_vec(bootstrap).map_err(|error| {
+            CliError::Launch(format!("failed to encode worker activation grant: {error}"))
+        })?;
+        stdin.write_all(&payload).await.map_err(|error| {
+            CliError::Launch(format!(
+                "failed to transfer worker activation grant: {error}"
+            ))
+        })?;
+        stdin.shutdown().await.map_err(|error| {
+            CliError::Launch(format!("failed to close worker activation pipe: {error}"))
+        })?;
+        Ok::<(), CliError>(())
+    }
+    .await;
+    if let Err(error) = transfer {
+        child.child.kill().await.map_err(CliError::Io)?;
+        return Err(error);
+    }
     Ok(child)
 }
 

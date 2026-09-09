@@ -22,6 +22,110 @@ use tower::ServiceExt as _;
 
 type CapturedProviderRequest = Arc<std::sync::Mutex<Option<(HeaderMap, bytes::Bytes)>>>;
 
+#[tokio::test(start_paused = true)]
+async fn challenge_admission_limits_transport_peers_before_polling_bodies() {
+    let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0x91; 32]);
+    let state = test_daemon_state(false, &token, GatewayConfig::default());
+    let app = router(Arc::clone(&state));
+    let identity = MachineIdentity::generate().unwrap().identity;
+    let mut challenge = ChallengeRequest {
+        initiator: crate::daemon::common::control::descriptor(ComponentRole::Mcp),
+        initiator_instance_id: "limited-peer".into(),
+        initiator_public_identity: identity.public_identity(),
+        initiator_fingerprint: identity.fingerprint(),
+        initiator_nonce: ChallengeRecord::generate(1, 1).unwrap().challenge().nonce,
+    };
+    for port in 1..=CHALLENGES_PER_PEER_WINDOW {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post(CHALLENGE_PATH)
+                    .extension(ConnectInfo(SocketAddr::from(([192, 0, 2, 1], port as u16))))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_vec(&challenge).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post(CHALLENGE_PATH)
+                .extension(ConnectInfo(SocketAddr::from(([192, 0, 2, 1], 65535))))
+                .header("x-forwarded-for", "192.0.2.99")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from_stream(futures_util::stream::poll_fn(
+                    |_| -> std::task::Poll<Option<Result<Bytes, std::io::Error>>> {
+                        panic!("rate-limited challenge body polled")
+                    },
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(response.headers()[RETRY_AFTER], "15");
+    assert_eq!(
+        lock(&state.challenges).len(),
+        CHALLENGES_PER_PEER_WINDOW as usize
+    );
+
+    // A worker on another peer still has capacity and needs no MCP route-token header.
+    challenge.initiator = crate::daemon::common::control::descriptor(ComponentRole::Worker);
+    let request = |peer| {
+        Request::post(CHALLENGE_PATH)
+            .extension(ConnectInfo(SocketAddr::from((peer, 1))))
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(&challenge).unwrap()))
+            .unwrap()
+    };
+    assert_eq!(
+        app.clone()
+            .oneshot(request([192, 0, 2, 2]))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    tokio::time::advance(Duration::from_millis(CHALLENGE_LIFETIME_MS)).await;
+    assert_eq!(
+        app.oneshot(request([192, 0, 2, 1])).await.unwrap().status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn challenge_peer_tracking_is_bounded_and_expired_entries_are_reclaimed() {
+    let now = tokio::time::Instant::now();
+    let peers: ChallengePeers = Arc::new(Mutex::new(
+        (0..MAX_CHALLENGE_PEERS)
+            .map(|index| (IpAddr::V4(Ipv4Addr::from(index as u32)), (now, 1)))
+            .collect(),
+    ));
+    let app = Router::new()
+        .route("/", post(|| async { StatusCode::NO_CONTENT }))
+        .layer(from_fn_with_state(Arc::clone(&peers), limit_challenges));
+    let request = || {
+        Request::post("/")
+            .extension(ConnectInfo("192.0.2.1:1".parse::<SocketAddr>().unwrap()))
+            .body(Body::empty())
+            .unwrap()
+    };
+    assert_eq!(
+        app.clone().oneshot(request()).await.unwrap().status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(lock(&peers).len(), MAX_CHALLENGE_PEERS);
+    tokio::time::advance(Duration::from_millis(CHALLENGE_LIFETIME_MS)).await;
+    assert_eq!(
+        app.oneshot(request()).await.unwrap().status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(lock(&peers).len(), 1);
+}
+
 async fn enroll_test_mcp(
     state: &Arc<DaemonState>,
     origin: &str,
@@ -2076,6 +2180,35 @@ fn activation_endpoint_is_bound_to_signed_worker_network_policy() {
     ));
     assert!(!activation_endpoint_matches(
         "https://attacker.example.com:9443",
+        &activation
+    ));
+    let mut activation = activation;
+    activation.port = 443;
+    assert!(activation_endpoint_matches(
+        "https://worker.example.com:443",
+        &activation
+    ));
+    assert!(!activation_endpoint_matches(
+        "https://worker.example.com",
+        &activation
+    ));
+    assert!(!activation_endpoint_matches(
+        "https://worker.example.com:80",
+        &activation
+    ));
+    activation.bind_ip = Ipv4Addr::LOCALHOST;
+    activation.advertise_address = None;
+    activation.port = 80;
+    assert!(activation_endpoint_matches(
+        "http://127.0.0.1:80",
+        &activation
+    ));
+    assert!(!activation_endpoint_matches(
+        "http://127.0.0.1",
+        &activation
+    ));
+    assert!(!activation_endpoint_matches(
+        "http://127.0.0.1:443",
         &activation
     ));
 }

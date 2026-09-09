@@ -127,6 +127,7 @@ async fn dropping_delivery_marks_observation_cancelled_and_terminates_it() {
 
 #[tokio::test(start_paused = true)]
 async fn observation_body_deadline_terminates_a_stalled_observer() {
+    let started = tokio::time::Instant::now();
     let (_sender, receiver) = tokio::sync::mpsc::channel(1);
     let observation = ObservationReceiver {
         receiver,
@@ -142,6 +143,35 @@ async fn observation_body_deadline_terminates_a_stalled_observer() {
         observed.failure.as_deref(),
         Some("provider response observation timed out")
     );
+    assert_eq!(started.elapsed(), OBSERVATION_COMPLETION_TIMEOUT);
+}
+
+#[tokio::test(start_paused = true)]
+async fn successful_stream_observation_can_outlive_the_response_head_deadline() {
+    let (sender, receiver) = tokio::sync::mpsc::channel(4);
+    let signal = Arc::new(ObservationSignal::new());
+    let observation = ObservationReceiver {
+        receiver,
+        signal: Arc::clone(&signal),
+        status: StatusCode::OK,
+    };
+    let task = tokio::spawn(observation.finish(ProviderSurface::OpenAIChat, true));
+    tokio::task::yield_now().await;
+    sender.send(Bytes::from_static(b"data: {\"id\":\"long\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hello\"}}]}\n\n")).await.unwrap();
+    tokio::time::advance(RESPONSE_HEAD_TIMEOUT + Duration::from_secs(1)).await;
+    tokio::task::yield_now().await;
+    assert!(
+        !task.is_finished(),
+        "response-head deadline must not truncate observation"
+    );
+    sender.send(Bytes::from_static(b"data: {\"id\":\"long\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")).await.unwrap();
+    drop(sender);
+    signal.finish(OBSERVATION_COMPLETE);
+    let observed = task.await.unwrap();
+    assert_eq!(observed.terminal, OBSERVATION_COMPLETE);
+    assert!(!observed.truncated);
+    assert!(observed.failure.is_none());
+    assert!(observed.value.is_some());
 }
 
 #[test]
@@ -241,9 +271,8 @@ fn execution_middleware_is_explicitly_incompatible_with_raw_delivery() {
     );
 }
 
-#[tokio::test]
-async fn only_request_middleware_requires_request_body_decoding() {
-    let _guard = PLUGIN_CONFIG_TEST_LOCK.lock().await;
+#[test]
+fn only_request_middleware_requires_request_body_decoding() {
     let owner = RuntimeRegistrationOwner {
         kind: RuntimeRegistrationOwnerKind::GlobalApi,
         plugin_kind: None,
@@ -1487,8 +1516,9 @@ async fn managed_runtime_rejects_request_middleware_that_changes_stream_mode() {
     runtime.close().await.expect("close managed runtime");
 }
 
-#[test]
-fn managed_helper_error_and_metadata_paths_are_explicit() {
+#[tokio::test]
+async fn managed_helper_error_and_metadata_paths_are_explicit() {
+    let _guard = PLUGIN_CONFIG_TEST_LOCK.lock().await;
     let prepared = prepared_request(HeaderMap::new());
     let invalid_destination = LlmRequest {
         headers: serde_json::Map::from_iter([(

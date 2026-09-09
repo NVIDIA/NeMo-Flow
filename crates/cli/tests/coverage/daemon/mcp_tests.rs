@@ -14,6 +14,94 @@ use axum::{Json, Router};
 use tokio::net::TcpListener;
 
 #[test]
+fn pending_worker_child_fixture() {
+    if std::env::var_os("NEMO_RELAY_TEST_PENDING_WORKER_FIXTURE").is_none() {
+        return;
+    }
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    println!("PENDING_WORKER_READY {}", listener.local_addr().unwrap());
+    use std::io::Write as _;
+    std::io::stdout().flush().unwrap();
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line).unwrap();
+}
+
+async fn pending_worker_fixture() -> (ActivationChild, SocketAddr) {
+    use tokio::io::AsyncBufReadExt as _;
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "daemon::mcp::tests::pending_worker_child_fixture",
+            "--nocapture",
+        ])
+        .env("NEMO_RELAY_TEST_PENDING_WORKER_FIXTURE", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let child = ActivationChild {
+        child,
+        published: false,
+    };
+    let address = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut lines = tokio::io::BufReader::new(stdout).lines();
+        while let Some(line) = lines.next_line().await.unwrap() {
+            if let Some(address) = line.strip_prefix("PENDING_WORKER_READY ") {
+                return address.parse::<SocketAddr>().unwrap();
+            }
+        }
+        panic!("worker fixture exited before readiness");
+    })
+    .await
+    .unwrap();
+    (child, address)
+}
+
+#[tokio::test]
+async fn failed_activation_cleanup_reaps_child_and_frees_its_listener() {
+    let (child, address) = pending_worker_fixture().await;
+    let mut pending = Some((
+        "failed-activation".into(),
+        child,
+        tokio::time::Instant::now(),
+    ));
+    stop_pending_launch(&mut pending).await.unwrap();
+    assert!(pending.is_none());
+    let _replacement = TcpListener::bind(address)
+        .await
+        .expect("old worker listener released");
+    stop_pending_launch(&mut pending).await.unwrap();
+}
+
+#[tokio::test]
+async fn published_worker_survives_guard_drop_but_pending_worker_is_killed() {
+    for published in [false, true] {
+        let (mut child, address) = pending_worker_fixture().await;
+        child.published = published;
+        let mut stdin = child.child.stdin.take().unwrap();
+        drop(child);
+        if published {
+            let _connection = tokio::net::TcpStream::connect(address)
+                .await
+                .expect("published worker must remain alive");
+            stdin.write_all(b"exit\n").await.unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Ok(listener) = TcpListener::bind(address).await {
+                    break listener;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("worker must terminate");
+        drop(stdin);
+    }
+}
+
+#[test]
 fn launch_directive_is_the_only_directive_with_a_worker_bootstrap() {
     assert!(WorkerBootstrap::from_directive(BrokerDirective::UsePassThrough).is_none());
     assert!(

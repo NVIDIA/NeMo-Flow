@@ -13,9 +13,10 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use axum::body::Body;
-use axum::extract::{DefaultBodyLimit, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, State};
 use axum::http::header::{AUTHORIZATION, CONTENT_TYPE, RETRY_AFTER};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode, Uri};
+use axum::middleware::{Next, from_fn_with_state};
 use axum::response::IntoResponse;
 use axum::routing::post;
 use axum::serve::ListenerExt;
@@ -78,6 +79,10 @@ const MAX_STAGED_WORKER_SESSIONS: usize = 4_096;
 const MAX_MCP_CONTROL_SESSIONS: usize = 8_192;
 const MAX_CONCURRENT_TLS_HANDSHAKES: usize = 256;
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+// A single peer cannot consume either role's challenge pool, even across a window boundary.
+const CHALLENGES_PER_PEER_WINDOW: u32 = 16;
+const MAX_CHALLENGE_PEERS: usize = 1_024;
+type ChallengePeers = Arc<Mutex<HashMap<IpAddr, (tokio::time::Instant, u32)>>>;
 
 struct PendingChallenge {
     request: ChallengeRequest,
@@ -201,7 +206,7 @@ pub(crate) async fn serve(options: ServerOptions) -> Result<(), CliError> {
             listener.tap_io(|stream| {
                 let _ = stream.set_nodelay(true);
             }),
-            app,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
         )
         .with_graceful_shutdown(shutdown_signal())
         .await
@@ -213,8 +218,12 @@ pub(crate) async fn serve(options: ServerOptions) -> Result<(), CliError> {
 }
 
 fn router(state: Arc<DaemonState>) -> Router {
+    let peers: ChallengePeers = Arc::new(Mutex::new(HashMap::new()));
     let control = Router::new()
-        .route(CHALLENGE_PATH, post(issue_challenge))
+        .route(
+            CHALLENGE_PATH,
+            post(issue_challenge).route_layer(from_fn_with_state(peers, limit_challenges)),
+        )
         .route(MCP_REGISTER_PATH, post(register_mcp))
         .route(MCP_HEARTBEAT_PATH, post(heartbeat_mcp))
         .route(MCP_RELEASE_PATH, post(release_mcp))
@@ -228,6 +237,47 @@ fn router(state: Arc<DaemonState>) -> Router {
         .merge(control)
         .fallback(public_proxy)
         .with_state(state)
+}
+
+async fn limit_challenges(
+    State(peers): State<ChallengePeers>,
+    request: Request<Body>,
+    next: Next,
+) -> Response<Body> {
+    // Use the transport peer, never caller-controlled forwarding headers. In-process services
+    // without connection metadata share a conservative bucket rather than bypassing admission.
+    let peer = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED), |peer| peer.0.ip());
+    let admitted = {
+        let mut peers = lock(&peers);
+        let now = tokio::time::Instant::now();
+        let window = Duration::from_millis(CHALLENGE_LIFETIME_MS);
+        peers.retain(|_, (start, _)| now.duration_since(*start) < window);
+        if !peers.contains_key(&peer) && peers.len() >= MAX_CHALLENGE_PEERS {
+            false
+        } else {
+            let (_, count) = peers.entry(peer).or_insert((now, 0));
+            if *count >= CHALLENGES_PER_PEER_WINDOW {
+                false
+            } else {
+                *count += 1;
+                true
+            }
+        }
+    };
+    if !admitted {
+        let mut response = control_message(
+            StatusCode::TOO_MANY_REQUESTS,
+            "authentication challenge rate limit exceeded",
+        );
+        response
+            .headers_mut()
+            .insert(RETRY_AFTER, HeaderValue::from_static("15"));
+        return response;
+    }
+    next.run(request).await
 }
 
 async fn issue_challenge(
@@ -2119,10 +2169,14 @@ fn validate_worker_endpoint(
 }
 
 fn activation_endpoint_matches(endpoint: &str, activation: &Activation) -> bool {
+    // URL normalization erases explicit default ports. Read the original authority instead.
+    let Ok(uri) = endpoint.parse::<Uri>() else {
+        return false;
+    };
     let Ok(url) = reqwest::Url::parse(endpoint) else {
         return false;
     };
-    let (Some(host), Some(port)) = (url.host_str(), url.port()) else {
+    let (Some(host), Some(port)) = (url.host_str(), uri.port_u16()) else {
         return false;
     };
     let expected_host = activation
@@ -2269,7 +2323,7 @@ async fn serve_tls(
             _ = &mut shutdown => break,
             _ = connections.join_next(), if !connections.is_empty() => {}
             accepted = listener.accept() => {
-                let (stream, _) = match accepted {
+                let (stream, peer) = match accepted {
                     Ok(accepted) => accepted,
                     Err(error) => {
                         log::warn!(
@@ -2286,7 +2340,7 @@ async fn serve_tls(
                     continue;
                 };
                 let acceptor = acceptor.clone();
-                let service = app.clone();
+                let service = app.clone().layer(axum::Extension(ConnectInfo(peer)));
                 let mut shutdown_rx = shutdown_rx.clone();
                 connections.spawn(async move {
                     let Ok(Ok(stream)) = tokio::time::timeout(

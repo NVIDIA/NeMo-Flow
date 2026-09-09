@@ -89,6 +89,8 @@ impl Drop for GatewayCallCleanup {
 }
 
 const RESPONSE_HEAD_TIMEOUT: Duration = Duration::from_secs(60);
+/// Observation is off-path and has its own budget for long-running completions.
+const OBSERVATION_COMPLETION_TIMEOUT: Duration = Duration::from_secs(900);
 const OBSERVATION_QUEUE_FRAMES: usize = 32;
 const DEFAULT_OBSERVATION_CAPTURE_BYTES: usize = 4 * 1024 * 1024;
 const OBSERVATION_CAPTURE_BYTES_ENV: &str = "NEMO_RELAY_DAEMON_OBSERVATION_CAPTURE_BYTES";
@@ -1264,8 +1266,11 @@ impl ObservedResponse {
 impl ObservationReceiver {
     async fn finish(self, surface: ProviderSurface, streaming: bool) -> ObservedResponse {
         let status = self.status;
-        match tokio::time::timeout(RESPONSE_HEAD_TIMEOUT, self.finish_inner(surface, streaming))
-            .await
+        match tokio::time::timeout(
+            OBSERVATION_COMPLETION_TIMEOUT,
+            self.finish_inner(surface, streaming),
+        )
+        .await
         {
             Ok(observed) => observed,
             Err(_) => ObservedResponse {
