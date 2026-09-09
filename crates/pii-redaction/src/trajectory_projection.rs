@@ -615,4 +615,44 @@ mod tests {
                 });
         }
     }
+
+    #[test]
+    fn oci_cohere_request_projections_use_format_specific_templates() {
+        for api_format in ["COHERE", "COHEREV2"] {
+            let request: AnnotatedLlmRequest = serde_json::from_value(json!({
+                "messages": [{"role": "user", "content": "[REDACTED]"}],
+                "params": {"max_tokens": 8},
+                "api_specific": {
+                    "api": "oci_genai",
+                    "api_format": api_format,
+                },
+            }))
+            .unwrap();
+
+            let rendered = render_request(ProviderSurface::OCIGenAI, &request)
+                .unwrap_or_else(|| panic!("{api_format} request projection failed"));
+            assert!(rendered.headers.is_empty());
+            assert_eq!(rendered.content["apiFormat"], api_format);
+
+            match api_format {
+                "COHERE" => {
+                    assert_eq!(rendered.content["message"], "[REDACTED]");
+                    assert!(rendered.content.get("messages").is_none());
+                }
+                "COHEREV2" => {
+                    assert_eq!(
+                        rendered.content["messages"][0]["content"],
+                        json!([{"type": "TEXT", "text": "[REDACTED]"}])
+                    );
+                    assert!(rendered.content.get("message").is_none());
+                }
+                _ => unreachable!(),
+            }
+
+            let decoded = request_codec(ProviderSurface::OCIGenAI)
+                .decode(&rendered)
+                .unwrap_or_else(|error| panic!("{api_format} projection was invalid: {error}"));
+            assert_eq!(decoded.messages.len(), 1);
+        }
+    }
 }
