@@ -2529,11 +2529,6 @@ fn trajectory_component_preserves_normalized_cost_source_and_optimization_summar
     assert_eq!(summary.tokens_saved.prompt_tokens, Some(4));
     assert_eq!(summary.estimated_cost_saved, Some(0.25));
 
-    assert_eq!(response["id"], "SECRET-id");
-    assert_eq!(
-        response["choices"][0]["message"]["content"],
-        "SECRET response"
-    );
     assert!(deregister_subscriber("trajectory-normalized-accounting").unwrap());
     clear_plugin_configuration().unwrap();
 }
@@ -3736,39 +3731,49 @@ fn sanitized_trajectory_content_never_reaches_subscribers_or_exporters() {
             .build(),
     )
     .unwrap();
-    futures::executor::block_on(async {
-        llm_call_execute(
+    let raw_request = LlmRequest {
+        headers: [("authorization".into(), json!(raw_pii))]
+            .into_iter()
+            .collect(),
+        content: json!({
+            "model": "gpt-4o-mini",
+            "messages": [{"role": "user", "content": raw_context}],
+            "temperature": 0.25
+        }),
+    };
+    let raw_response = json!({
+        "id": "chatcmpl-private",
+        "model": "gpt-4o-mini",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": raw_context},
+            "finish_reason": "stop"
+        }],
+        "usage": {
+            "prompt_tokens": 7,
+            "completion_tokens": 3,
+            "total_tokens": 10,
+            "cost": {
+                "total": 0.01,
+                "currency": "USD",
+                "source": "provider_reported"
+            }
+        }
+    });
+    let provider_request = Arc::new(Mutex::new(None));
+    let captured_provider_request = Arc::clone(&provider_request);
+    let provider_response = raw_response.clone();
+    let provider: LlmExecutionNextFn = Arc::new(move |request| {
+        *captured_provider_request.lock().unwrap() = Some(request);
+        let response = provider_response.clone();
+        Box::pin(async move { Ok(response) })
+    });
+    let caller_response = futures::executor::block_on(async {
+        let caller_response = llm_call_execute(
             LlmCallExecuteParams::builder()
                 .name("openai")
-                .request(LlmRequest {
-                    headers: [("authorization".into(), json!(raw_pii))]
-                        .into_iter()
-                        .collect(),
-                    content: json!({
-                        "model": "gpt-4o-mini",
-                        "messages": [{"role": "user", "content": raw_context}],
-                        "temperature": 0.25
-                    }),
-                })
-                .func(noop_openai_chat_exec_fn(json!({
-                    "id": "chatcmpl-private",
-                    "model": "gpt-4o-mini",
-                    "choices": [{
-                        "index": 0,
-                        "message": {"role": "assistant", "content": raw_context},
-                        "finish_reason": "stop"
-                    }],
-                    "usage": {
-                        "prompt_tokens": 7,
-                        "completion_tokens": 3,
-                        "total_tokens": 10,
-                        "cost": {
-                            "total": 0.01,
-                            "currency": "USD",
-                            "source": "provider_reported"
-                        }
-                    }
-                })))
+                .request(raw_request.clone())
+                .func(provider)
                 .codec(Arc::new(OpenAIChatCodec))
                 .response_codec(Arc::new(OpenAIChatCodec))
                 .build(),
@@ -3791,7 +3796,17 @@ fn sanitized_trajectory_content_never_reaches_subscribers_or_exporters() {
         )
         .await
         .unwrap();
+        caller_response
     });
+    assert_eq!(caller_response, raw_response);
+    let provider_request = provider_request.lock().unwrap();
+    let provider_request = provider_request
+        .as_ref()
+        .expect("provider request captured");
+    assert_eq!(provider_request.content, raw_request.content);
+    for (key, value) in &raw_request.headers {
+        assert_eq!(provider_request.headers.get(key), Some(value));
+    }
     event(
         EmitMarkEventParams::builder()
             .name("hermes.checkpoint")
