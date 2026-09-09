@@ -955,14 +955,29 @@ def test_wrap_model_call_does_not_inject_extra_headers_for_models_that_reject_th
         messages=[HumanMessage(content="hello")],
         model_settings={"temperature": 0.0},
     )
+    seen_request: dict[str, ModelRequest[Any]] = {}
+
+    def add_relay_header(
+        _name: str,
+        llm_request: nemo_relay.LLMRequest,
+        annotated: nemo_relay.AnnotatedLLMRequest | None,
+    ) -> nemo_relay.LLMRequestInterceptOutcome:
+        llm_request.headers["x-relay-header"] = "value"
+        return nemo_relay.LLMRequestInterceptOutcome(llm_request, annotated)
 
     def handler(model_request: ModelRequest[Any]) -> ModelResponse[Any]:
+        seen_request["request"] = model_request
         result = model_request.model.invoke(model_request.messages, **model_request.model_settings)
         return ModelResponse(result=[result])
 
-    response = nemo_relay_middleware.wrap_model_call(request, handler)
+    nemo_relay.intercepts.register_llm_request("test_strict_model_relay_header", 1, False, add_relay_header)
+    try:
+        response = nemo_relay_middleware.wrap_model_call(request, handler)
+    finally:
+        nemo_relay.intercepts.deregister_llm_request("test_strict_model_relay_header")
 
     assert response.result[0].content == "strict-ok"
+    assert seen_request["request"].model_settings == {"temperature": 0.0}
 
 
 def test_langchain_model_response_codec_decodes_text_and_tool_calls():
