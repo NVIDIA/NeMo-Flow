@@ -2147,6 +2147,10 @@ async fn broker_release_enters_draining_while_admitted_stream_finishes() {
             .state,
         crate::daemon::broker::lifecycle::RouteStateKind::Draining
     );
+    assert_new_request_rejected(&client, daemon_address, ProviderKind::OpenAi, &token).await;
+    // Release acknowledges the registry transition before asynchronous generation revocation.
+    // The worker receives drain control only after revocation, so use that observable barrier.
+    wait_for_worker_drain_control(&client, worker_address).await;
     assert!(
         !harness
             .state
@@ -2154,9 +2158,6 @@ async fn broker_release_enters_draining_while_admitted_stream_finishes() {
             .matches(harness.fingerprint, &harness.generation_id)
             .expect("generation revocation")
     );
-    assert_new_request_rejected(&client, daemon_address, ProviderKind::OpenAi, &token).await;
-    wait_for_worker_drain_control(&client, worker_address).await;
-
     finish_causal_lifecycle_stream(&mut body, release_second).await;
     wait_for_in_flight_zero(&harness.target, &worker_handle).await;
     tokio::time::timeout(Duration::from_secs(2), async {
