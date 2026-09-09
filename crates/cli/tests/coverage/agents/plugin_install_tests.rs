@@ -3540,13 +3540,13 @@ fn dangling_recovery_rejects_a_registration_from_another_install_directory() {
     )
     .unwrap_err();
     assert!(uninstall_error.contains("different marketplace source"));
+    assert!(selected.generation_lock.exists());
+    assert!(runner.commands().is_empty());
+    drop(held_registered_lock);
     assert_eq!(
         std::fs::read(&registered.generation_lock).unwrap(),
         lock_contents
     );
-    assert!(selected.generation_lock.exists());
-    assert!(runner.commands().is_empty());
-    drop(held_registered_lock);
 }
 
 #[test]

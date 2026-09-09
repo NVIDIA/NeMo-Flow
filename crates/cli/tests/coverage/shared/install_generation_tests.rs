@@ -152,8 +152,8 @@ fn marker_absent_retirement_rejects_contention_without_changing_the_lock() {
         ));
 
     assert!(error.contains("timed out waiting"), "{error}");
-    assert_eq!(std::fs::read(&lock).unwrap(), contents);
     drop(first);
+    assert_eq!(std::fs::read(&lock).unwrap(), contents);
 }
 
 #[test]
