@@ -145,6 +145,9 @@ pub type ToolExecutionNextFn = Arc<
 /// A tool execution intercept receives the tool name, the current argument
 /// payload, and the continuation representing the rest of the chain.
 ///
+/// This is the legacy callback shape. It does not carry the managed
+/// `tool_call_id`; use [`ToolExecutionContextFn`] to receive it.
+///
 /// # Parameters
 /// - First argument: Tool name associated with the execution.
 /// - Second argument: Current JSON argument payload.
@@ -166,6 +169,121 @@ pub type ToolExecutionFn = Arc<
         + Send
         + Sync,
 >;
+
+/// Per-call context delivered to a tool execution intercept.
+///
+/// The context carries the tool name, the argument payload entering this
+/// intercept, and the provider-issued tool-call correlation identifier recorded
+/// on the managed tool handle. Intercepts that complete execution without
+/// invoking the remaining chain use `tool_call_id` to associate their result
+/// with the originating tool call.
+#[derive(Clone, Default)]
+pub struct ToolExecutionContext {
+    tool_name: String,
+    arguments: Json,
+    tool_call_id: Option<String>,
+}
+
+impl std::fmt::Debug for ToolExecutionContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ToolExecutionContext")
+            .field("tool_name", &self.tool_name)
+            .field("tool_call_id", &self.tool_call_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ToolExecutionContext {
+    /// Construct a context for a tool name and argument payload.
+    #[must_use]
+    pub fn new(tool_name: impl Into<String>, arguments: Json) -> Self {
+        Self {
+            tool_name: tool_name.into(),
+            arguments,
+            tool_call_id: None,
+        }
+    }
+
+    /// Attach the provider-issued tool-call correlation identifier.
+    #[must_use]
+    pub fn with_tool_call_id(mut self, tool_call_id: Option<String>) -> Self {
+        self.tool_call_id = tool_call_id;
+        self
+    }
+
+    /// Replace the argument payload, preserving the remaining fields.
+    #[must_use]
+    pub(crate) fn with_arguments(mut self, arguments: Json) -> Self {
+        self.arguments = arguments;
+        self
+    }
+
+    /// Return the tool name associated with the execution.
+    #[must_use]
+    pub fn tool_name(&self) -> &str {
+        &self.tool_name
+    }
+
+    /// Return the JSON argument payload entering this intercept.
+    #[must_use]
+    pub fn arguments(&self) -> &Json {
+        &self.arguments
+    }
+
+    /// Consume the context and return its JSON argument payload.
+    #[must_use]
+    pub fn into_arguments(self) -> Json {
+        self.arguments
+    }
+
+    /// Return the provider-issued tool-call correlation identifier, when the
+    /// managed tool call recorded one.
+    #[must_use]
+    pub fn tool_call_id(&self) -> Option<&str> {
+        self.tool_call_id.as_deref()
+    }
+}
+
+/// Wrap or replace tool execution with access to the full call context.
+///
+/// This is the canonical tool execution intercept shape. Unlike
+/// [`ToolExecutionFn`], the argument payload is carried on the context rather
+/// than passed separately, and the managed `tool_call_id` is available.
+///
+/// # Parameters
+/// - First argument: Per-call [`ToolExecutionContext`].
+/// - Second argument: Continuation for the remaining execution chain.
+///
+/// # Returns
+/// A future resolving to the canonical tool execution outcome, containing the
+/// tool result and any pending lifecycle marks produced by this intercept.
+///
+/// # Errors
+/// The future resolves to an error when the intercept or remaining execution
+/// chain fails.
+pub type ToolExecutionContextFn = Arc<
+    dyn Fn(
+            ToolExecutionContext,
+            ToolExecutionNextFn,
+        ) -> Pin<Box<dyn Future<Output = Result<ToolExecutionInterceptOutcome>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// Adapt a legacy [`ToolExecutionFn`] into a [`ToolExecutionContextFn`].
+///
+/// The adapter unpacks the tool name and arguments from the context and drops
+/// the `tool_call_id`, so legacy intercepts observe their original signature.
+#[must_use]
+pub fn tool_execution_fn_with_context(callable: ToolExecutionFn) -> ToolExecutionContextFn {
+    Arc::new(move |context: ToolExecutionContext, next| {
+        let callable = callable.clone();
+        let name = context.tool_name().to_string();
+        let args = context.into_arguments();
+        Box::pin(async move { callable(&name, args, next).await })
+    })
+}
 
 /// Internal continuation carrying both a tool result and accumulated marks.
 pub(crate) type ToolExecutionOutcomeNextFn = Arc<

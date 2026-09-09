@@ -130,6 +130,7 @@ from nemo_relay._native import (
     ScopeStack,
     ScopeType,
     ToolAttributes,
+    ToolExecutionContext,
     ToolExecutionInterceptOutcome,
     ToolExecutionResult,
     ToolHandle,
@@ -242,6 +243,14 @@ ToolRequestIntercept: TypeAlias = AbcCallable[[str, Json], Json | Awaitable[Json
 #: next callable. It may await and return ``next(args)`` or short-circuit.
 ToolExecutionIntercept: TypeAlias = Callable[
     [str, Json, Callable[[Json], Awaitable[ToolExecutionResult[Json]]]],
+    ToolExecutionInterceptOutcome | Awaitable[ToolExecutionInterceptOutcome],
+]
+#: Execution intercept callback that wraps tool execution and receives the full
+#: ``ToolExecutionContext``, including the managed ``tool_call_id``. The
+#: callback receives the context and the next callable. It may await and return
+#: ``next(context.arguments)`` or short-circuit.
+ToolExecutionContextIntercept: TypeAlias = Callable[
+    [ToolExecutionContext, Callable[[Json], Awaitable[ToolExecutionResult[Json]]]],
     ToolExecutionInterceptOutcome | Awaitable[ToolExecutionInterceptOutcome],
 ]
 #: Request intercept callback that returns the canonical request, annotation,
@@ -710,6 +719,7 @@ __all__ = [
     "ScopeHandle",
     "ToolHandle",
     "ToolExecutionResult",
+    "ToolExecutionContext",
     "ToolExecutionInterceptOutcome",
     "LLMHandle",
     "LLMRequest",
@@ -754,6 +764,7 @@ __all__ = [
     "LlmConditionalExecutionGuardrail",
     "ToolRequestIntercept",
     "ToolExecutionIntercept",
+    "ToolExecutionContextIntercept",
     "LlmRequestIntercept",
     "LlmExecutionIntercept",
     "LlmStreamExecutionIntercept",

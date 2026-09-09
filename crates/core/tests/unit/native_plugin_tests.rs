@@ -5322,11 +5322,14 @@ async fn native_async_wrappers_validate_callback_result_shapes() {
         None,
     );
     assert!(
-        tool_execution("tool", json!({}), tool_next(Ok(Json::Null)))
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("invalid native async tool outcome")
+        tool_execution(
+            ToolExecutionContext::new("tool", json!({})),
+            tool_next(Ok(Json::Null))
+        )
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("invalid native async tool outcome")
     );
 
     let fields = EventSanitizeFields::default();

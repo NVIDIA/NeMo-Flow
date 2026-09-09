@@ -44,6 +44,7 @@ from nemo_relay_plugin import (  # noqa: E402
     RuntimeRegistrationKind,
     RuntimeRegistrationOwnerKind,
     ScopeType,
+    ToolExecutionContext,
     ToolExecutionInterceptOutcome,
     ToolExecutionResult,
     ToolNext,
@@ -3454,3 +3455,69 @@ def _all_expected_surfaces() -> list[int]:
         pb.LLM_STREAM_EXECUTION_INTERCEPT,
         pb.CONDITIONAL_MIDDLEWARE_GUARDRAIL,
     ]
+
+
+async def test_tool_execution_intercept_v2_receives_tool_call_id():
+    seen: dict[str, Json] = {}
+
+    class ContextPlugin(WorkerPlugin):
+        plugin_id = "tests.context"
+
+        def register(self, ctx: PluginContext, config: Json) -> None:
+            del config
+
+            async def tool_execution(context: ToolExecutionContext, next_call: ToolNext):
+                seen["tool_name"] = context.tool_name
+                seen["arguments"] = context.arguments
+                seen["tool_call_id"] = context.tool_call_id
+                downstream = await next_call.call(context.arguments)
+                return ToolExecutionInterceptOutcome(result=downstream.result)
+
+            ctx.register_tool_execution_intercept_v2("context", tool_execution)
+
+    service = _service(ContextPlugin(), RecordingHostStub())
+    await _register(service)
+    response = await service.Invoke(
+        _invoke_request(
+            "context",
+            pb.TOOL_EXECUTION_INTERCEPT,
+            continuation_id="continuation-1",
+            tool=pb.ToolInvocation(
+                tool_name="lookup",
+                value=_json_envelope(JSON_SCHEMA, {"query": "relay"}),
+                tool_call_id="worker-call-9",
+            ),
+        ),
+        AbortContext(),
+    )
+
+    assert response.WhichOneof("result") == "tool_execution", response
+    assert seen["tool_name"] == "lookup"
+    assert seen["arguments"] == {"query": "relay"}
+    assert seen["tool_call_id"] == "worker-call-9"
+
+
+async def test_tool_execution_intercept_v2_tool_call_id_is_none_when_absent():
+    seen: dict[str, Json] = {}
+
+    class ContextPlugin(WorkerPlugin):
+        plugin_id = "tests.context_none"
+
+        def register(self, ctx: PluginContext, config: Json) -> None:
+            del config
+
+            async def tool_execution(context: ToolExecutionContext, next_call: ToolNext):
+                seen["tool_call_id"] = context.tool_call_id
+                downstream = await next_call.call(context.arguments)
+                return ToolExecutionInterceptOutcome(result=downstream.result)
+
+            ctx.register_tool_execution_intercept_v2("context_none", tool_execution)
+
+    service = _service(ContextPlugin(), RecordingHostStub())
+    await _register(service)
+    await service.Invoke(
+        _tool_request("context_none", pb.TOOL_EXECUTION_INTERCEPT, {"query": "relay"}),
+        AbortContext(),
+    )
+
+    assert seen["tool_call_id"] is None

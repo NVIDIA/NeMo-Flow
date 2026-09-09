@@ -48,12 +48,13 @@ use nemo_relay::api::registry::{
     register_llm_stream_execution_intercept, register_mark_sanitize_guardrail,
     register_scope_sanitize_end_guardrail, register_scope_sanitize_start_guardrail,
     register_tool_conditional_execution_guardrail, register_tool_execution_intercept,
-    register_tool_request_intercept, register_tool_sanitize_request_guardrail,
-    register_tool_sanitize_response_guardrail, scope_deregister_tool_request_intercept,
-    scope_register_llm_conditional_execution_guardrail, scope_register_llm_execution_intercept,
-    scope_register_llm_request_intercept, scope_register_llm_sanitize_request_guardrail,
-    scope_register_llm_sanitize_response_guardrail, scope_register_llm_stream_execution_intercept,
-    scope_register_mark_sanitize_guardrail, scope_register_scope_sanitize_end_guardrail,
+    register_tool_execution_intercept_v2, register_tool_request_intercept,
+    register_tool_sanitize_request_guardrail, register_tool_sanitize_response_guardrail,
+    scope_deregister_tool_request_intercept, scope_register_llm_conditional_execution_guardrail,
+    scope_register_llm_execution_intercept, scope_register_llm_request_intercept,
+    scope_register_llm_sanitize_request_guardrail, scope_register_llm_sanitize_response_guardrail,
+    scope_register_llm_stream_execution_intercept, scope_register_mark_sanitize_guardrail,
+    scope_register_scope_sanitize_end_guardrail,
     scope_register_tool_conditional_execution_guardrail, scope_register_tool_execution_intercept,
     scope_register_tool_request_intercept, scope_register_tool_sanitize_request_guardrail,
     scope_register_tool_sanitize_response_guardrail,
@@ -62,7 +63,7 @@ use nemo_relay::api::runtime::NemoRelayContextState;
 use nemo_relay::api::runtime::global_context;
 use nemo_relay::api::runtime::{
     LlmExecutionNextFn, LlmJsonStream, LlmStreamExecutionNextFn, LlmStreamInner, TASK_SCOPE_STACK,
-    ToolExecutionNextFn, capture_propagation_context, task_scope_top,
+    ToolExecutionContext, ToolExecutionNextFn, capture_propagation_context, task_scope_top,
 };
 use nemo_relay::api::runtime::{create_scope_stack, current_scope_stack, set_thread_scope_stack};
 use nemo_relay::api::scope::{EmitMarkEventParams, ScopeHandle, ScopeType, event};
@@ -674,6 +675,122 @@ async fn test_execution_intercept_calls_next() {
 
     // Cleanup
     deregister_tool_execution_intercept("passthrough").unwrap();
+}
+
+/// A context execution intercept observes the managed tool_call_id, tool name,
+/// and the arguments entering it, and legacy and context intercepts compose in
+/// priority order through the same registry.
+#[tokio::test]
+async fn test_execution_intercept_context_exposes_tool_call_id() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    reset_global();
+    setup_isolated_thread();
+
+    let observed = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen_context = Arc::new(Mutex::new(None::<(String, Option<String>, Json)>));
+
+    let legacy_observed = observed.clone();
+    register_tool_execution_intercept(
+        "legacy-first",
+        1,
+        Arc::new(move |_name, args, next| {
+            let legacy_observed = legacy_observed.clone();
+            Box::pin(async move {
+                legacy_observed.lock().unwrap().push("legacy".to_string());
+                next(args).await.map(Into::into)
+            })
+        }),
+    )
+    .unwrap();
+
+    let context_observed = observed.clone();
+    let context_seen = seen_context.clone();
+    register_tool_execution_intercept_v2(
+        "context-second",
+        2,
+        Arc::new(move |context: ToolExecutionContext, next| {
+            let context_observed = context_observed.clone();
+            let context_seen = context_seen.clone();
+            Box::pin(async move {
+                context_observed.lock().unwrap().push("context".to_string());
+                *context_seen.lock().unwrap() = Some((
+                    context.tool_name().to_string(),
+                    context.tool_call_id().map(str::to_string),
+                    context.arguments().clone(),
+                ));
+                next(context.into_arguments()).await.map(Into::into)
+            })
+        }),
+    )
+    .unwrap();
+
+    let func: ToolExecutionNextFn = Arc::new(move |args| Box::pin(async move { Ok(args.into()) }));
+
+    let result = tool_call_execute(
+        nemo_relay::api::tool::ToolCallExecuteParams::builder()
+            .name("context-tool")
+            .args(json!({"value": 7}))
+            .tool_call_id("call-abc123")
+            .func(func)
+            .build(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.result["value"], 7);
+    assert_eq!(
+        observed.lock().unwrap().as_slice(),
+        ["legacy", "context"],
+        "legacy and context intercepts share one registry and order by priority"
+    );
+
+    let (tool_name, tool_call_id, arguments) = seen_context.lock().unwrap().clone().unwrap();
+    assert_eq!(tool_name, "context-tool");
+    assert_eq!(tool_call_id.as_deref(), Some("call-abc123"));
+    assert_eq!(arguments, json!({"value": 7}));
+
+    deregister_tool_execution_intercept("legacy-first").unwrap();
+    deregister_tool_execution_intercept("context-second").unwrap();
+}
+
+/// A context execution intercept sees no tool_call_id when the managed call
+/// did not record one.
+#[tokio::test]
+async fn test_execution_intercept_context_without_tool_call_id() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    reset_global();
+    setup_isolated_thread();
+
+    let seen = Arc::new(Mutex::new(None::<Option<String>>));
+    let seen_intercept = seen.clone();
+    register_tool_execution_intercept_v2(
+        "context-no-id",
+        1,
+        Arc::new(move |context: ToolExecutionContext, next| {
+            let seen_intercept = seen_intercept.clone();
+            Box::pin(async move {
+                *seen_intercept.lock().unwrap() = Some(context.tool_call_id().map(str::to_string));
+                next(context.into_arguments()).await.map(Into::into)
+            })
+        }),
+    )
+    .unwrap();
+
+    let func: ToolExecutionNextFn = Arc::new(move |args| Box::pin(async move { Ok(args.into()) }));
+
+    tool_call_execute(
+        nemo_relay::api::tool::ToolCallExecuteParams::builder()
+            .name("plain-tool")
+            .args(json!({}))
+            .func(func)
+            .build(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(seen.lock().unwrap().clone().unwrap(), None);
+
+    deregister_tool_execution_intercept("context-no-id").unwrap();
 }
 
 /// Register an execution intercept that does NOT call next().

@@ -99,6 +99,10 @@ _ToolExecutionIntercept: TypeAlias = Callable[
     [str, _Json, Callable[[_Json], Awaitable["ToolExecutionResult[_Json]"]]],
     "ToolExecutionInterceptOutcome | Awaitable[ToolExecutionInterceptOutcome]",
 ]
+_ToolExecutionContextIntercept: TypeAlias = Callable[
+    ["ToolExecutionContext", Callable[[_Json], Awaitable["ToolExecutionResult[_Json]"]]],
+    "ToolExecutionInterceptOutcome | Awaitable[ToolExecutionInterceptOutcome]",
+]
 _LlmRequestIntercept: TypeAlias = Callable[
     [str, "LLMRequest", "AnnotatedLLMRequest | None"],
     "LLMRequestInterceptOutcome | Awaitable[LLMRequestInterceptOutcome]",
@@ -583,6 +587,21 @@ class ToolExecutionResult(Generic[_TToolResult]):
     def result(self) -> _TToolResult: ...
     @property
     def annotation(self) -> _Json | None: ...
+
+class ToolExecutionContext:
+    """Per-call context delivered to a tool execution intercept.
+
+    ``tool_call_id`` is the provider-issued correlation identifier recorded on
+    the managed tool call, or ``None`` when the call did not record one. It
+    lets an intercept that completes execution without invoking the remaining
+    chain associate its result with the originating tool call.
+    """
+    @property
+    def tool_name(self) -> str: ...
+    @property
+    def arguments(self) -> _Json: ...
+    @property
+    def tool_call_id(self) -> str | None: ...
 
 class ToolExecutionInterceptOutcome:
     """Canonical result returned by a tool execution intercept.
@@ -2196,6 +2215,23 @@ def register_tool_execution_intercept(name: str, priority: int, callable: _ToolE
     """
     ...
 
+def register_tool_execution_intercept_v2(name: str, priority: int, callable: _ToolExecutionContextIntercept) -> None:
+    """Register a global tool execution intercept receiving the call context.
+
+    Args:
+        name: Unique intercept name.
+        priority: Execution order; lower values run first.
+        callable: Middleware callback invoked as ``callable(context, next)``.
+            ``context`` is a ``ToolExecutionContext`` carrying ``tool_name``,
+            ``arguments``, and the managed ``tool_call_id``. The callback
+            returns ``ToolExecutionInterceptOutcome`` and may call or
+            short-circuit ``next``.
+
+    Returns:
+        ``None``.
+    """
+    ...
+
 def deregister_tool_execution_intercept(name: str) -> bool:
     """Remove a global tool execution intercept.
 
@@ -2440,6 +2476,28 @@ def scope_register_tool_execution_intercept(
             ``ToolExecutionInterceptOutcome`` while the owning scope is active.
             Its ``next`` continuation resolves to the canonical downstream
             ``ToolExecutionResult`` while Relay retains downstream pending marks.
+
+    Returns:
+        ``None``.
+    """
+    ...
+
+def scope_register_tool_execution_intercept_v2(
+    scope_uuid: str,
+    name: str,
+    priority: int,
+    callable: _ToolExecutionContextIntercept,
+) -> None:
+    """Register a scope-local tool execution intercept receiving the context.
+
+    Args:
+        scope_uuid: UUID of the owning scope.
+        name: Unique intercept name within that scope.
+        priority: Execution order; lower values run first.
+        callable: Middleware callback invoked as ``callable(context, next)``
+            while the owning scope is active. ``context`` is a
+            ``ToolExecutionContext`` carrying ``tool_name``, ``arguments``, and
+            the managed ``tool_call_id``.
 
     Returns:
         ``None``.

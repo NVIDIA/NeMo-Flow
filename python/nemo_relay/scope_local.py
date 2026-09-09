@@ -35,6 +35,7 @@ from nemo_relay import (
     LlmStreamExecutionIntercept,
     ScopeHandle,
     ToolConditionalExecutionGuardrail,
+    ToolExecutionContextIntercept,
     ToolExecutionIntercept,
     ToolRequestIntercept,
     ToolSanitizeGuardrail,
@@ -128,6 +129,9 @@ from nemo_relay._native import (
 )
 from nemo_relay._native import (
     scope_register_tool_execution_intercept as _register_tool_execution,
+)
+from nemo_relay._native import (
+    scope_register_tool_execution_intercept_v2 as _register_tool_execution_v2,
 )
 from nemo_relay._native import (
     scope_register_tool_request_intercept as _register_tool_request,
@@ -467,8 +471,40 @@ def register_tool_execution(scope_handle: ScopeHandle, name: str, priority: int,
         while ``fn`` is running. Each call gets an isolated snapshot of the
         scope stack visible when it begins. Unfinished or new calls are rejected
         after ``fn`` returns or raises.
+
+        This is the legacy callback shape and cannot observe the managed
+        ``tool_call_id``. Use :func:`register_tool_execution_v2` for that.
     """
     return _register_tool_execution(scope_handle.uuid, name, priority, fn)
+
+
+def register_tool_execution_v2(
+    scope_handle: ScopeHandle, name: str, priority: int, fn: ToolExecutionContextIntercept
+) -> None:
+    """Register scope-local tool execution middleware with the call context.
+
+    Args:
+        scope_handle: Owning scope handle. The registration is removed when
+            this scope is popped.
+        name: Unique intercept name within the owning scope.
+        priority: Execution order for the intercept. Lower values run first.
+        fn: Callable invoked as ``fn(context, next_call)``. ``context`` is a
+            ``ToolExecutionContext`` exposing ``tool_name``, ``arguments``, and
+            the managed ``tool_call_id``. It may call
+            ``next_call(context.arguments)`` to continue execution, modify the
+            result, or short-circuit the tool call entirely. It must return
+            ``ToolExecutionInterceptOutcome``.
+
+    Returns:
+        None: This function returns after the scope-local intercept is
+        registered.
+
+    Notes:
+        Intercepts registered here share one registry with those registered
+        through :func:`register_tool_execution`, so both shapes order together
+        by ``priority`` and :func:`deregister_tool_execution` removes either.
+    """
+    return _register_tool_execution_v2(scope_handle.uuid, name, priority, fn)
 
 
 def deregister_tool_execution(scope_handle: ScopeHandle, name: str) -> bool:
@@ -833,6 +869,7 @@ __all__ = [
     "register_tool_request",
     "deregister_tool_request",
     "register_tool_execution",
+    "register_tool_execution_v2",
     "deregister_tool_execution",
     # LLM guardrails
     "register_llm_sanitize_request",

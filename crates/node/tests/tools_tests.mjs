@@ -27,6 +27,7 @@ const {
   registerToolRequestIntercept,
   deregisterToolRequestIntercept,
   registerToolExecutionIntercept,
+  registerToolExecutionInterceptV2,
   deregisterToolExecutionIntercept,
   clearLastCallbackError,
   getLastCallbackError,
@@ -847,6 +848,69 @@ describe('Tool intercepts', () => {
       };
     });
     deregisterToolExecutionIntercept('node_tool_exec_int');
+  });
+
+  it('v2 execution intercept receives the managed toolCallId', async () => {
+    let seen = null;
+    registerToolExecutionInterceptV2('node_tool_exec_ctx', 10, async (context, next) => {
+      seen = context;
+      const downstream = await next(context.arguments);
+      return { result: downstream.result };
+    });
+    try {
+      const result = await toolCallExecute(
+        'ctx_tool',
+        { x: 10 },
+        (args) => ({ result: args.x + 1 }),
+        null,
+        null,
+        null,
+        null,
+        'node-call-abc',
+      );
+      assert.deepEqual(result, { result: 11 });
+    } finally {
+      assert.equal(deregisterToolExecutionIntercept('node_tool_exec_ctx'), true);
+    }
+    assert.equal(seen.toolName, 'ctx_tool');
+    assert.equal(seen.toolCallId, 'node-call-abc');
+    assert.deepEqual(seen.arguments, { x: 10 });
+  });
+
+  it('v2 execution intercept sees null toolCallId when absent', async () => {
+    let seen = null;
+    registerToolExecutionInterceptV2('node_tool_exec_ctx_none', 10, async (context, next) => {
+      seen = context;
+      const downstream = await next(context.arguments);
+      return { result: downstream.result };
+    });
+    try {
+      await toolCallExecute('plain_ctx_tool', {}, () => ({ result: 1 }));
+    } finally {
+      assert.equal(deregisterToolExecutionIntercept('node_tool_exec_ctx_none'), true);
+    }
+    assert.equal(seen.toolCallId, null);
+  });
+
+  it('legacy and v2 execution intercepts share priority order', async () => {
+    const order = [];
+    registerToolExecutionIntercept('node_exec_legacy_first', 1, async (args, next) => {
+      order.push('legacy');
+      const downstream = await next(args);
+      return { result: downstream.result };
+    });
+    registerToolExecutionInterceptV2('node_exec_ctx_second', 2, async (context, next) => {
+      order.push('context');
+      const downstream = await next(context.arguments);
+      return { result: downstream.result };
+    });
+    try {
+      await toolCallExecute('mixed_tool', { x: 1 }, (args) => ({ result: args.x }));
+    } finally {
+      assert.equal(deregisterToolExecutionIntercept('node_exec_legacy_first'), true);
+      assert.equal(deregisterToolExecutionIntercept('node_exec_ctx_second'), true);
+    }
+    assert.deepEqual(order, ['legacy', 'context']);
   });
 
   it('request intercept with break_chain', () => {

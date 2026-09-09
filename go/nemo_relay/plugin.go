@@ -31,6 +31,7 @@ typedef char* (*NemoRelayLlmExecNextFn)(const char* native_json, void* next_ctx)
 typedef char* (*NemoRelayLlmExecInterceptCb)(void* user_data, const char* native_json, NemoRelayLlmExecNextFn next_fn, void* next_ctx);
 typedef char* (*NemoRelayToolExecNextFn)(const char* args_json, void* next_ctx);
 typedef char* (*NemoRelayToolExecInterceptCb)(void* user_data, const char* args_json, NemoRelayToolExecNextFn next_fn, void* next_ctx);
+typedef char* (*NemoRelayToolExecInterceptContextCb)(void* user_data, const char* context_json, NemoRelayToolExecNextFn next_fn, void* next_ctx);
 
 extern int32_t nemo_relay_plugin_initialize(const char* config_json, const char* additional_plugins_toml, FfiPluginHostActivation** out_activation, char** out_report_json);
 extern int32_t nemo_relay_plugin_host_activation_report_json(FfiPluginHostActivation* activation, char** out_report_json);
@@ -60,6 +61,7 @@ extern int32_t nemo_relay_plugin_context_register_tool_request_intercept(FfiPlug
 extern int32_t nemo_relay_plugin_context_register_llm_execution_intercept(FfiPluginContext* ctx, const char* name, int32_t priority, NemoRelayLlmExecInterceptCb cb, void* user_data, NemoRelayFreeFn free_fn);
 extern int32_t nemo_relay_plugin_context_register_llm_stream_execution_intercept(FfiPluginContext* ctx, const char* name, int32_t priority, NemoRelayLlmExecInterceptCb cb, void* user_data, NemoRelayFreeFn free_fn);
 extern int32_t nemo_relay_plugin_context_register_tool_execution_intercept(FfiPluginContext* ctx, const char* name, int32_t priority, NemoRelayToolExecInterceptCb cb, void* user_data, NemoRelayFreeFn free_fn);
+extern int32_t nemo_relay_plugin_context_register_tool_execution_intercept_v2(FfiPluginContext* ctx, const char* name, int32_t priority, NemoRelayToolExecInterceptContextCb cb, void* user_data, NemoRelayFreeFn free_fn);
 
 extern char* goPluginValidateTrampoline(void*, const char*);
 extern int32_t goPluginRegisterTrampoline(void*, const char*, FfiPluginContext*);
@@ -75,6 +77,7 @@ extern char* goLlmConditionalTrampoline(void*, const void*);
 extern char* goLlmExecInterceptTrampoline(void*, const char*, NemoRelayLlmExecNextFn, void*);
 extern int32_t goLlmRequestInterceptTrampoline(void*, const char*, const void*, const char*, char**);
 extern char* goToolExecInterceptTrampoline(void*, const char*, NemoRelayToolExecNextFn, void*);
+extern char* goToolExecInterceptContextTrampoline(void*, const char*, NemoRelayToolExecNextFn, void*);
 */
 import "C"
 
@@ -878,6 +881,26 @@ func (ctx *PluginContext) RegisterToolExecutionIntercept(name string, priority i
 		cName,
 		C.int32_t(priority),
 		(C.NemoRelayToolExecInterceptCb)(C.goToolExecInterceptTrampoline),
+		userData,
+		(C.NemoRelayFreeFn)(C.goFreeTrampoline),
+	))
+}
+
+// RegisterToolExecutionInterceptV2 registers a tool execution intercept for
+// this component that receives the full ToolExecutionContext, including the
+// managed ToolCallID.
+func (ctx *PluginContext) RegisterToolExecutionInterceptV2(name string, priority int32, fn ToolExecutionInterceptContextFunc) error {
+	if ctx == nil || ctx.ptr == nil {
+		return errors.New(errPluginContextClosed)
+	}
+	cName := C.CString(name)
+	defer C.free(unsafe.Pointer(cName))
+	userData := registerClosure(fn)
+	return checkStatus(C.nemo_relay_plugin_context_register_tool_execution_intercept_v2(
+		ctx.ptr,
+		cName,
+		C.int32_t(priority),
+		(C.NemoRelayToolExecInterceptContextCb)(C.goToolExecInterceptContextTrampoline),
 		userData,
 		(C.NemoRelayFreeFn)(C.goFreeTrampoline),
 	))

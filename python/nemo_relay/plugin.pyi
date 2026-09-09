@@ -19,6 +19,7 @@ from nemo_relay import (
     LlmSanitizeResponseGuardrail,
     LlmStreamExecutionIntercept,
     ToolConditionalExecutionGuardrail,
+    ToolExecutionContextIntercept,
     ToolExecutionIntercept,
     ToolRequestIntercept,
     ToolSanitizeGuardrail,
@@ -134,6 +135,9 @@ class PluginContext(Protocol):
         self, name: str, priority: int, break_chain: bool, callback: ToolRequestIntercept
     ) -> None: ...
     def register_tool_execution_intercept(self, name: str, priority: int, callback: ToolExecutionIntercept) -> None: ...
+    def register_tool_execution_intercept_v2(
+        self, name: str, priority: int, callback: ToolExecutionContextIntercept
+    ) -> None: ...
 
 class Plugin(Protocol):
     def validate(self, plugin_config: JsonObject) -> list[ConfigDiagnostic] | None: ...

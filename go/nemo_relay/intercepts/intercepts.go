@@ -62,6 +62,13 @@ func RegisterToolExecution(name string, priority int32, execFn nemo_relay.ToolEx
 	return nemo_relay.RegisterToolExecutionIntercept(name, priority, execFn)
 }
 
+// RegisterToolExecutionV2 registers a tool execution intercept that receives
+// the full context, including the managed ToolCallID. This is a shorthand for
+// [nemo_relay.RegisterToolExecutionInterceptV2].
+func RegisterToolExecutionV2(name string, priority int32, execFn nemo_relay.ToolExecutionInterceptContextFunc) error {
+	return nemo_relay.RegisterToolExecutionInterceptV2(name, priority, execFn)
+}
+
 // DeregisterToolExecution removes a tool execution intercept by name. This is a
 // shorthand for [nemo_relay.DeregisterToolExecutionIntercept].
 func DeregisterToolExecution(name string) error {
@@ -138,6 +145,13 @@ func ScopeDeregisterToolRequest(scopeUUID, name string) error {
 // [nemo_relay.ScopeRegisterToolExecutionIntercept].
 func ScopeRegisterToolExecution(scopeUUID, name string, priority int32, execFn nemo_relay.ToolExecutionInterceptFunc) error {
 	return nemo_relay.ScopeRegisterToolExecutionIntercept(scopeUUID, name, priority, execFn)
+}
+
+// ScopeRegisterToolExecutionV2 registers a scope-local tool execution intercept
+// that receives the full context, including the managed ToolCallID. This is a
+// shorthand for [nemo_relay.ScopeRegisterToolExecutionInterceptV2].
+func ScopeRegisterToolExecutionV2(scopeUUID, name string, priority int32, execFn nemo_relay.ToolExecutionInterceptContextFunc) error {
+	return nemo_relay.ScopeRegisterToolExecutionInterceptV2(scopeUUID, name, priority, execFn)
 }
 
 // ScopeDeregisterToolExecution removes a scope-local tool execution intercept by

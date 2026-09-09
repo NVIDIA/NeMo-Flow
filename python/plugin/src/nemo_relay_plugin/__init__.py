@@ -42,6 +42,7 @@ Public data types:
     LlmOptimizationTokens: Explicit token evidence by category.
     LlmOptimizationTokenImpact: Baseline, effective, and saved token evidence.
     LlmRequestInterceptOutcome: Canonical LLM request-intercept result.
+    ToolExecutionContext: Per-call context supplied to a tool execution intercept.
     ToolExecutionResult: Canonical application-visible tool result.
     ToolExecutionInterceptOutcome: Canonical tool execution-intercept result.
     DiagnosticLevel: Severity of a configuration diagnostic.
@@ -65,6 +66,7 @@ Public callback aliases:
     ToolConditionalCallback: Tool execution guardrail callback.
     ToolRequestCallback: Tool request intercept callback.
     ToolExecutionCallback: Tool execution intercept callback.
+    ToolExecutionContextCallback: Context-carrying tool execution intercept callback.
     LlmSanitizeRequestCallback: LLM request sanitizer callback.
     LlmSanitizeResponseCallback: LLM response sanitizer callback.
     LlmConditionalCallback: LLM execution guardrail callback.
@@ -134,6 +136,8 @@ from ._api import (
     SubscriberCallback,
     ToolConditionalCallback,
     ToolExecutionCallback,
+    ToolExecutionContext,
+    ToolExecutionContextCallback,
     ToolExecutionInterceptOutcome,
     ToolExecutionResult,
     ToolNext,
@@ -196,6 +200,8 @@ __all__ = [
     "SubscriberCallback",
     "ToolConditionalCallback",
     "ToolExecutionCallback",
+    "ToolExecutionContext",
+    "ToolExecutionContextCallback",
     "ToolExecutionInterceptOutcome",
     "ToolExecutionResult",
     "ToolNext",

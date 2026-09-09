@@ -146,6 +146,17 @@ context.register_tool_execution_intercept(
 </Tab>
 </Tabs>
 
+Each binding also exposes a context-carrying registration —
+`register_tool_execution_intercept_v2`, `registerToolExecutionInterceptV2`, or
+`RegisterToolExecutionInterceptV2` — whose callback receives a
+`ToolExecutionContext` instead of the arguments alone. The context exposes the
+tool name, the arguments entering the intercept, and the managed `tool_call_id`,
+which a plugin needs when it completes execution itself and must still associate
+its result with the originating tool call. Both shapes share one registry and
+one deregistration. See
+[Tool Execution Intercept Outcomes](/reference/tool-execution-intercept-outcomes)
+for the full field list.
+
 The application receives the `ToolExecutionResult`, including its optional annotation,
 from the tool path and provider JSON from the LLM paths. Relay consumes pending marks and
 optimization contributions when it emits events. They are not properties to splice into
