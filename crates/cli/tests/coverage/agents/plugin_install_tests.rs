@@ -53,6 +53,13 @@ const LOCK_HELPER_RELEASE_ENV: &str = "NEMO_RELAY_TEST_LOCK_RELEASE";
 const TEST_GENERATION_TOKEN: &str = "test-generation";
 const DANGLING_CODEX_MARKETPLACE_ERROR: &str = "Error: failed to load configured marketplace snapshot(s):\n\n- `nemo-relay-local` at /tmp/plugins/codex-marketplace: marketplace root does not contain a supported manifest\n";
 
+fn dangling_codex_marketplace_error(marketplace_root: &Path) -> String {
+    format!(
+        "Error: failed to load configured marketplace snapshot(s):\n\n- `nemo-relay-local` at {}: marketplace root does not contain a supported manifest\n",
+        marketplace_root.display()
+    )
+}
+
 fn force_snapshot_with_backups(
     backup_marketplace_root: PathBuf,
     backup_plugin_root: Option<PathBuf>,
@@ -63,13 +70,18 @@ fn force_snapshot_with_backups(
         original_marketplace_root: PathBuf::from("original-marketplace"),
         original_plugin_root: PathBuf::from("separate-original-plugin"),
         original_generation_fence: PathBuf::from("original-generation"),
-        plugin_registered: false,
+        plugin_registered: Some(false),
         marketplace_registered: false,
         backup_marketplace_root,
         backup_plugin_root,
         marketplace_moved: true,
         plugin_moved: true,
         replacement_promoted: false,
+        recoverable_dangling_marketplace: false,
+        cleanup_committed: false,
+        original_marketplace_removed: false,
+        replacement_registration: HostRegistrationProgress::default(),
+        replacement_setup_installed: false,
         generation_retirement: None,
     }
 }
@@ -536,9 +548,26 @@ struct MockRunner {
     failing_suffix: Option<String>,
     failing_suffixes: Vec<String>,
     failing_quiet_suffix: Option<String>,
+    capture_reappearing_root: Option<PathBuf>,
 }
 
 impl MockRunner {
+    fn set_dangling_marketplace_source(&mut self, marketplace_root: &Path) {
+        let error = dangling_codex_marketplace_error(marketplace_root);
+        for output in self.capture_outputs.values_mut() {
+            if output.stderr == DANGLING_CODEX_MARKETPLACE_ERROR {
+                output.stderr.clone_from(&error);
+            }
+        }
+        for outputs in self.capture_output_sequences.get_mut().values_mut() {
+            for output in outputs {
+                if output.stderr == DANGLING_CODEX_MARKETPLACE_ERROR {
+                    output.stderr.clone_from(&error);
+                }
+            }
+        }
+    }
+
     fn with_current_executable(mut self, path: &str) -> Self {
         self.current_executable = Some(PathBuf::from(path));
         self
@@ -728,6 +757,12 @@ impl CommandRunner for MockRunner {
                 .join(" ")
         );
         self.capture_commands.borrow_mut().push(rendered.clone());
+        if rendered.ends_with("codex plugin list")
+            && let Some(path) = self.capture_reappearing_root.as_ref()
+        {
+            std::fs::create_dir(path)
+                .map_err(|error| format!("failed to inject reappearing root: {error}"))?;
+        }
         if let Some(output) = self
             .capture_output_sequences
             .borrow_mut()
@@ -765,6 +800,8 @@ struct MockSetupRunner {
     calls: RefCell<Vec<String>>,
     doctor_roots: RefCell<Vec<PathBuf>>,
     failing_call: Option<String>,
+    snapshot_reappearing_root: Option<PathBuf>,
+    snapshot_replaced_lock: Option<PathBuf>,
 }
 
 struct BlockingRefreshFailure {
@@ -895,6 +932,16 @@ impl MockSetupRunner {
 impl PluginSetupRunner for MockSetupRunner {
     fn snapshot(&self, host_arg: &str) -> Result<Option<PluginSetupSnapshot>, String> {
         self.record(format!("snapshot {host_arg}"))?;
+        if let Some(path) = self.snapshot_reappearing_root.as_ref() {
+            std::fs::create_dir(path)
+                .map_err(|error| format!("failed to inject reappearing root: {error}"))?;
+        }
+        if let Some(path) = self.snapshot_replaced_lock.as_ref() {
+            std::fs::remove_file(path)
+                .map_err(|error| format!("failed to remove generation lock: {error}"))?;
+            std::fs::write(path, format!("{}\n", uuid::Uuid::now_v7()))
+                .map_err(|error| format!("failed to replace generation lock: {error}"))?;
+        }
         Ok(Some(PluginSetupSnapshot::Mock))
     }
 
@@ -1032,6 +1079,36 @@ fn refresh_preflight_retires_multiple_directories_for_one_host() {
 }
 
 #[test]
+fn refresh_preflight_skips_an_unsafe_dangling_codex_target_and_retires_later_targets() {
+    let home = tempdir().unwrap();
+    let _home = HomeScope::enter(home.path());
+    let dangling = tempdir().unwrap();
+    let healthy = tempdir().unwrap();
+    write_installed_state(CodingAgent::Codex, dangling.path());
+    write_installed_state(CodingAgent::ClaudeCode, healthy.path());
+    let dangling_layout = PluginLayout::new(CodingAgent::Codex, dangling.path());
+    let healthy_layout = PluginLayout::new(CodingAgent::ClaudeCode, healthy.path());
+    std::fs::remove_dir_all(&dangling_layout.marketplace_root).unwrap();
+    std::fs::write(&dangling_layout.generation_lock, "not-a-generation-uuid\n").unwrap();
+
+    let _preflight = retire_integrations_for_refresh(&[
+        (CodingAgent::Codex, dangling.path().to_path_buf()),
+        (CodingAgent::ClaudeCode, healthy.path().to_path_buf()),
+    ])
+    .unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(&dangling_layout.generation_lock).unwrap(),
+        "not-a-generation-uuid\n"
+    );
+    assert!(
+        std::fs::read_to_string(&healthy_layout.generation_fence)
+            .unwrap()
+            .starts_with("retired:")
+    );
+}
+
+#[test]
 fn refresh_preflight_restores_earlier_generations_when_a_target_is_invalid() {
     let home = tempdir().unwrap();
     let _home = HomeScope::enter(home.path());
@@ -1122,6 +1199,7 @@ fn write_relocated_codex_install(selected_dir: &Path, relocated_dir: &Path) -> P
             host_plugin_removed: false,
             host_marketplace_removed: false,
             plugin_setup_installed: true,
+            marker_absent_recovery: false,
         },
         selected_dir,
         &options(selected_dir),
@@ -1947,6 +2025,7 @@ fn host_command_helpers_cover_dry_run_missing_failure_and_reporting() {
         HostRegistrationReport {
             host_plugin_registered: Some(false),
             host_marketplace_registered: true,
+            host_marketplace_source: None,
             host_marketplace_unloadable: false,
         }
         .to_json()["host_plugin_registered"],
@@ -2179,6 +2258,10 @@ fn codex_registration_report_identifies_a_dangling_relay_marketplace() {
     assert_eq!(report.host_plugin_registered, None);
     assert!(report.host_marketplace_registered);
     assert!(report.host_marketplace_unloadable);
+    assert_eq!(
+        report.host_marketplace_source,
+        Some(PathBuf::from("/tmp/plugins/codex-marketplace"))
+    );
     assert!(!report.ok());
     assert_eq!(runner.capture_commands(), vec!["/bin/codex plugin list"]);
 }
@@ -3032,6 +3115,7 @@ fn persisted_roots_accept_an_equivalent_symlinked_install_path() {
         host_plugin_removed: false,
         host_marketplace_removed: false,
         plugin_setup_installed: true,
+        marker_absent_recovery: false,
     };
 
     selected_layout.validate_persisted_state(&state).unwrap();
@@ -3117,9 +3201,9 @@ fn force_install_rejects_registered_legacy_plugin_without_generation_fence() {
 }
 
 #[test]
-fn force_install_reports_a_dangling_codex_marketplace_as_an_unsafe_generation() {
+fn force_install_rejects_a_dangling_codex_marketplace_without_a_surviving_lock() {
     let dir = tempdir().unwrap();
-    let runner = MockRunner::default()
+    let mut runner = MockRunner::default()
         .with_executable("nemo-relay", "/bin/nemo-relay")
         .with_executable("codex", "/bin/codex")
         .with_capture_status(
@@ -3134,10 +3218,11 @@ fn force_install_reports_a_dangling_codex_marketplace_as_an_unsafe_generation() 
         ..options(dir.path())
     };
     let layout = PluginLayout::new(CodingAgent::Codex, dir.path());
+    runner.set_dangling_marketplace_source(&layout.marketplace_root);
 
     let error = install_host(CodingAgent::Codex, &options, &runner, &setup_runner).unwrap_err();
 
-    assert_actionable_generation_error(&error, "MCP generation marker is missing");
+    assert_actionable_generation_error(&error, "surviving lock");
     assert!(!layout.marketplace_root.exists());
     assert!(!layout.generation_lock.exists());
     assert!(runner.commands().is_empty());
@@ -3146,9 +3231,9 @@ fn force_install_reports_a_dangling_codex_marketplace_as_an_unsafe_generation() 
 }
 
 #[test]
-fn force_install_preserves_orphaned_state_for_a_dangling_codex_marketplace() {
+fn force_install_recovers_a_dangling_codex_marketplace_with_its_surviving_lock() {
     let dir = tempdir().unwrap();
-    let runner = MockRunner::default()
+    let mut runner = MockRunner::default()
         .with_executable("nemo-relay", "/bin/nemo-relay")
         .with_executable("codex", "/bin/codex")
         .with_capture_status(
@@ -3164,25 +3249,560 @@ fn force_install_preserves_orphaned_state_for_a_dangling_codex_marketplace() {
     };
     write_installed_state(CodingAgent::Codex, dir.path());
     let layout = PluginLayout::new(CodingAgent::Codex, dir.path());
-    let original_state = std::fs::read(&layout.state_path).unwrap();
     std::fs::remove_dir_all(&layout.marketplace_root).unwrap();
+    runner.set_dangling_marketplace_source(&layout.marketplace_root);
     assert!(layout.generation_lock.exists());
+    let original_lock = std::fs::read_to_string(&layout.generation_lock).unwrap();
 
-    let error = install_host(CodingAgent::Codex, &options, &runner, &setup_runner).unwrap_err();
+    install_host(CodingAgent::Codex, &options, &runner, &setup_runner).unwrap();
 
-    assert_actionable_generation_error(&error, "MCP generation marker is missing");
-    assert!(!layout.marketplace_root.exists());
-    assert_eq!(std::fs::read(&layout.state_path).unwrap(), original_state);
+    assert!(layout.marketplace_root.exists());
+    assert!(layout.generation_fence.exists());
+    assert!(layout.state_path.exists());
+    assert!(layout.generation_lock.exists());
+    assert_eq!(
+        std::fs::read_to_string(&layout.generation_lock).unwrap(),
+        original_lock
+    );
+    assert_eq!(
+        runner.commands(),
+        vec![
+            "/bin/codex plugin remove nemo-relay-plugin@nemo-relay-local".to_string(),
+            "/bin/codex plugin marketplace remove nemo-relay-local".to_string(),
+            format!(
+                "/bin/codex plugin marketplace add {}",
+                layout.marketplace_root.display()
+            ),
+            "/bin/codex plugin add nemo-relay-plugin@nemo-relay-local".to_string(),
+        ]
+    );
+    assert_eq!(
+        setup_runner.calls(),
+        vec![
+            "snapshot codex".to_string(),
+            format!("uninstall codex {DEFAULT_GATEWAY_URL}"),
+            "refresh gateway".to_string(),
+            format!("setup codex {DEFAULT_GATEWAY_URL}"),
+        ]
+    );
+    assert_no_install_stage(dir.path());
+}
+
+#[test]
+fn plain_install_recommends_force_for_a_dangling_codex_marketplace() {
+    let dir = tempdir().unwrap();
+    let mut runner = MockRunner::default()
+        .with_executable("nemo-relay", "/bin/nemo-relay")
+        .with_executable("codex", "/bin/codex")
+        .with_capture_status(
+            "/bin/codex plugin list",
+            1,
+            "",
+            DANGLING_CODEX_MARKETPLACE_ERROR,
+        );
+    let setup_runner = MockSetupRunner::default();
+    write_installed_state(CodingAgent::Codex, dir.path());
+    let layout = PluginLayout::new(CodingAgent::Codex, dir.path());
+    std::fs::remove_dir_all(&layout.marketplace_root).unwrap();
+    runner.set_dangling_marketplace_source(&layout.marketplace_root);
+
+    let error = install_host(
+        CodingAgent::Codex,
+        &options(dir.path()),
+        &runner,
+        &setup_runner,
+    )
+    .unwrap_err();
+
+    assert!(
+        error.contains("nemo-relay install codex --force"),
+        "{error}"
+    );
     assert!(layout.generation_lock.exists());
     assert!(runner.commands().is_empty());
     assert!(setup_runner.calls().is_empty());
+}
+
+#[test]
+fn force_install_recovers_when_the_unknown_plugin_was_already_unregistered() {
+    let dir = tempdir().unwrap();
+    let mut runner = MockRunner::default()
+        .with_executable("nemo-relay", "/bin/nemo-relay")
+        .with_executable("codex", "/bin/codex")
+        .with_capture_output("/bin/codex plugin marketplace list", "");
+    runner.capture_output_sequences.get_mut().insert(
+        "/bin/codex plugin list".into(),
+        VecDeque::from([
+            CommandOutput {
+                status: 1,
+                stdout: String::new(),
+                stderr: DANGLING_CODEX_MARKETPLACE_ERROR.into(),
+            },
+            CommandOutput::success(String::new()),
+        ]),
+    );
+    runner.failing_suffix = Some("plugin remove nemo-relay-plugin@nemo-relay-local".into());
+    let setup_runner = MockSetupRunner::default();
+    let options = PluginInstallOptions {
+        force: true,
+        ..options(dir.path())
+    };
+    write_installed_state(CodingAgent::Codex, dir.path());
+    let layout = PluginLayout::new(CodingAgent::Codex, dir.path());
+    std::fs::remove_dir_all(&layout.marketplace_root).unwrap();
+    runner.set_dangling_marketplace_source(&layout.marketplace_root);
+
+    install_host(CodingAgent::Codex, &options, &runner, &setup_runner).unwrap();
+
+    assert!(layout.generation_fence.exists());
+    assert!(
+        runner.commands().iter().any(|command| {
+            command.ends_with("plugin remove nemo-relay-plugin@nemo-relay-local")
+        })
+    );
+    assert!(
+        runner
+            .capture_commands()
+            .iter()
+            .filter(|command| { command.ends_with("codex plugin list") })
+            .count()
+            >= 2
+    );
+}
+
+#[test]
+fn failed_dangling_force_install_leaves_a_fenced_retry_that_can_succeed() {
+    let dir = tempdir().unwrap();
+    let mut first_runner = MockRunner::default()
+        .with_executable("nemo-relay", "/bin/nemo-relay")
+        .with_executable("codex", "/bin/codex")
+        .with_capture_status(
+            "/bin/codex plugin list",
+            1,
+            "",
+            DANGLING_CODEX_MARKETPLACE_ERROR,
+        );
+    let first_setup = MockSetupRunner {
+        failing_call: Some("refresh gateway".into()),
+        ..MockSetupRunner::default()
+    };
+    let force = PluginInstallOptions {
+        force: true,
+        ..options(dir.path())
+    };
+    write_installed_state(CodingAgent::Codex, dir.path());
+    let layout = PluginLayout::new(CodingAgent::Codex, dir.path());
+    std::fs::remove_dir_all(&layout.marketplace_root).unwrap();
+    first_runner.set_dangling_marketplace_source(&layout.marketplace_root);
+    let lock_id = std::fs::read_to_string(&layout.generation_lock).unwrap();
+
+    let error = install_host(CodingAgent::Codex, &force, &first_runner, &first_setup).unwrap_err();
+
+    assert!(error.contains("refresh gateway failed"), "{error}");
+    assert!(!layout.marketplace_root.exists());
+    assert_eq!(
+        std::fs::read_to_string(&layout.generation_lock).unwrap(),
+        lock_id
+    );
+    assert!(
+        read_state(CodingAgent::Codex, dir.path())
+            .unwrap()
+            .marker_absent_recovery
+    );
+
+    let retry_runner = MockRunner::default()
+        .with_executable("nemo-relay", "/bin/nemo-relay")
+        .with_executable("codex", "/bin/codex")
+        .with_codex_registration(false, false);
+    install_host(
+        CodingAgent::Codex,
+        &force,
+        &retry_runner,
+        &MockSetupRunner::default(),
+    )
+    .unwrap();
+
+    assert!(layout.generation_fence.exists());
+    assert_eq!(
+        std::fs::read_to_string(&layout.generation_lock).unwrap(),
+        lock_id
+    );
+    assert!(
+        !read_state(CodingAgent::Codex, dir.path())
+            .unwrap()
+            .marker_absent_recovery
+    );
+}
+
+#[test]
+fn precommit_dangling_cleanup_failure_never_invents_plugin_registration_and_can_retry() {
+    let dir = tempdir().unwrap();
+    let mut first_runner = MockRunner::default()
+        .with_executable("nemo-relay", "/bin/nemo-relay")
+        .with_executable("codex", "/bin/codex")
+        .with_capture_status(
+            "/bin/codex plugin list",
+            1,
+            "",
+            DANGLING_CODEX_MARKETPLACE_ERROR,
+        );
+    first_runner.failing_suffix = Some("plugin marketplace remove nemo-relay-local".into());
+    let force = PluginInstallOptions {
+        force: true,
+        ..options(dir.path())
+    };
+    write_installed_state(CodingAgent::Codex, dir.path());
+    let layout = PluginLayout::new(CodingAgent::Codex, dir.path());
+    std::fs::remove_dir_all(&layout.marketplace_root).unwrap();
+    first_runner.set_dangling_marketplace_source(&layout.marketplace_root);
+
+    let error = install_host(
+        CodingAgent::Codex,
+        &force,
+        &first_runner,
+        &MockSetupRunner::default(),
+    )
+    .unwrap_err();
+
+    assert!(error.contains("plugin marketplace remove"), "{error}");
+    assert!(
+        first_runner
+            .commands()
+            .iter()
+            .all(|command| !command.ends_with("plugin add nemo-relay-plugin@nemo-relay-local"))
+    );
+    assert!(!layout.marketplace_root.exists());
+    assert!(layout.generation_lock.exists());
+
+    let mut retry_runner = MockRunner::default()
+        .with_executable("nemo-relay", "/bin/nemo-relay")
+        .with_executable("codex", "/bin/codex")
+        .with_capture_status(
+            "/bin/codex plugin list",
+            1,
+            "",
+            DANGLING_CODEX_MARKETPLACE_ERROR,
+        );
+    retry_runner.set_dangling_marketplace_source(&layout.marketplace_root);
+    install_host(
+        CodingAgent::Codex,
+        &force,
+        &retry_runner,
+        &MockSetupRunner::default(),
+    )
+    .unwrap();
+    assert!(layout.generation_fence.exists());
+}
+
+#[test]
+fn dangling_recovery_rejects_a_registration_from_another_install_directory() {
+    let dir = tempdir().unwrap();
+    let selected_dir = dir.path().join("selected");
+    let registered_dir = dir.path().join("registered");
+    write_installed_state(CodingAgent::Codex, &selected_dir);
+    write_installed_state(CodingAgent::Codex, &registered_dir);
+    let selected = PluginLayout::new(CodingAgent::Codex, &selected_dir);
+    let registered = PluginLayout::new(CodingAgent::Codex, &registered_dir);
+    std::fs::remove_dir_all(&selected.marketplace_root).unwrap();
+    std::fs::remove_dir_all(&registered.marketplace_root).unwrap();
+    let lock_contents = std::fs::read(&registered.generation_lock).unwrap();
+    let held_registered_lock = GenerationRetirement::acquire_missing_for_plugin(
+        &registered.generation_fence,
+        &registered.generation_lock,
+    )
+    .unwrap();
+    let runner = MockRunner::default()
+        .with_executable("nemo-relay", "/bin/nemo-relay")
+        .with_executable("codex", "/bin/codex")
+        .with_capture_status(
+            "/bin/codex plugin list",
+            1,
+            "",
+            dangling_codex_marketplace_error(&registered.marketplace_root),
+        );
+    let mut force = options(&selected_dir);
+    force.force = true;
+
+    let install_error = install_host(
+        CodingAgent::Codex,
+        &force,
+        &runner,
+        &MockSetupRunner::default(),
+    )
+    .unwrap_err();
+    assert!(install_error.contains("different marketplace source"));
+
+    let uninstall_error = uninstall_host(
+        CodingAgent::Codex,
+        &force,
+        &runner,
+        &MockSetupRunner::default(),
+    )
+    .unwrap_err();
+    assert!(uninstall_error.contains("different marketplace source"));
+    assert!(selected.generation_lock.exists());
+    assert!(runner.commands().is_empty());
+    drop(held_registered_lock);
+    assert_eq!(
+        std::fs::read(&registered.generation_lock).unwrap(),
+        lock_contents
+    );
+}
+
+#[test]
+fn precommit_dangling_probe_failure_keeps_marketplace_removal_progress_for_retry() {
+    let dir = tempdir().unwrap();
+    let mut first_runner = MockRunner::default()
+        .with_executable("nemo-relay", "/bin/nemo-relay")
+        .with_executable("codex", "/bin/codex");
+    first_runner.failing_suffix = Some("plugin remove nemo-relay-plugin@nemo-relay-local".into());
+    first_runner.capture_output_sequences.get_mut().insert(
+        "/bin/codex plugin list".into(),
+        vec![
+            CommandOutput {
+                status: 1,
+                stdout: String::new(),
+                stderr: DANGLING_CODEX_MARKETPLACE_ERROR.into(),
+            },
+            CommandOutput {
+                status: 2,
+                stdout: String::new(),
+                stderr: "post-removal probe failed".into(),
+            },
+        ]
+        .into(),
+    );
+    let force = PluginInstallOptions {
+        force: true,
+        ..options(dir.path())
+    };
+    write_installed_state(CodingAgent::Codex, dir.path());
+    let layout = PluginLayout::new(CodingAgent::Codex, dir.path());
+    std::fs::remove_dir_all(&layout.marketplace_root).unwrap();
+    first_runner.set_dangling_marketplace_source(&layout.marketplace_root);
+
+    let error = install_host(
+        CodingAgent::Codex,
+        &force,
+        &first_runner,
+        &MockSetupRunner::default(),
+    )
+    .unwrap_err();
+
+    assert!(error.contains("post-removal probe failed"), "{error}");
+    assert!(first_runner.commands().iter().all(|command| {
+        !command.ends_with("plugin add nemo-relay-plugin@nemo-relay-local")
+            && !command.ends_with(&format!(
+                "plugin marketplace add {}",
+                layout.marketplace_root.display()
+            ))
+    }));
+    assert!(!layout.marketplace_root.exists());
+    assert!(layout.generation_lock.exists());
+    let retry_state = read_state(CodingAgent::Codex, dir.path()).unwrap();
+    assert!(!retry_state.host_plugin_removed);
+    assert!(retry_state.host_marketplace_removed);
+    assert!(retry_state.marker_absent_recovery);
+
+    let retry_runner = MockRunner::default()
+        .with_executable("nemo-relay", "/bin/nemo-relay")
+        .with_executable("codex", "/bin/codex")
+        .with_codex_registration(true, false);
+    install_host(
+        CodingAgent::Codex,
+        &force,
+        &retry_runner,
+        &MockSetupRunner::default(),
+    )
+    .unwrap();
+    assert!(layout.generation_fence.exists());
+    assert!(
+        retry_runner.commands().iter().any(|command| {
+            command.ends_with("plugin remove nemo-relay-plugin@nemo-relay-local")
+        })
+    );
+}
+
+#[test]
+fn postcommit_marketplace_removal_failure_keeps_a_retired_tree_for_retry() {
+    let dir = tempdir().unwrap();
+    write_installed_state(CodingAgent::Codex, dir.path());
+    let layout = PluginLayout::new(CodingAgent::Codex, dir.path());
+    std::fs::remove_dir_all(&layout.marketplace_root).unwrap();
+    write_state_for_host(
+        CodingAgent::Codex,
+        &PluginState {
+            marketplace_root: layout.marketplace_root.clone(),
+            plugin_root: layout.plugin_root.clone(),
+            host_plugin_removed: true,
+            host_marketplace_removed: true,
+            plugin_setup_installed: false,
+            marker_absent_recovery: true,
+        },
+        dir.path(),
+        &options(dir.path()),
+    )
+    .unwrap();
+    let mut first_runner = MockRunner::default()
+        .with_executable("nemo-relay", "/bin/nemo-relay")
+        .with_executable("codex", "/bin/codex")
+        .with_codex_registration_sequence(&[(false, false), (true, true)]);
+    first_runner.failing_suffix = Some("plugin marketplace remove nemo-relay-local".into());
+    let first_setup = MockSetupRunner {
+        failing_call: Some(format!("setup codex {DEFAULT_GATEWAY_URL}")),
+        ..MockSetupRunner::default()
+    };
+    let force = PluginInstallOptions {
+        force: true,
+        ..options(dir.path())
+    };
+
+    let error = install_host(CodingAgent::Codex, &force, &first_runner, &first_setup).unwrap_err();
+
+    assert!(error.contains("setup codex"), "{error}");
+    assert!(error.contains("plugin marketplace remove"), "{error}");
+    assert!(layout.marketplace_root.exists());
+    assert!(
+        std::fs::read_to_string(&layout.generation_fence)
+            .unwrap()
+            .starts_with("retired:")
+    );
+    assert!(
+        !read_state(CodingAgent::Codex, dir.path())
+            .unwrap()
+            .marker_absent_recovery
+    );
+    assert!(layout.generation_lock.exists());
+
+    let retry_runner = MockRunner::default()
+        .with_executable("nemo-relay", "/bin/nemo-relay")
+        .with_executable("codex", "/bin/codex")
+        .with_codex_registration(true, true);
+    install_host(
+        CodingAgent::Codex,
+        &force,
+        &retry_runner,
+        &MockSetupRunner::default(),
+    )
+    .unwrap();
+    InstallGeneration::capture(layout.generation_fence)
+        .unwrap()
+        .verify_current()
+        .unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn force_install_rejects_a_symlinked_dangling_marketplace_root_without_mutation() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempdir().unwrap();
+    let mut runner = MockRunner::default()
+        .with_executable("nemo-relay", "/bin/nemo-relay")
+        .with_executable("codex", "/bin/codex")
+        .with_capture_status(
+            "/bin/codex plugin list",
+            1,
+            "",
+            DANGLING_CODEX_MARKETPLACE_ERROR,
+        );
+    let force = PluginInstallOptions {
+        force: true,
+        ..options(dir.path())
+    };
+    write_installed_state(CodingAgent::Codex, dir.path());
+    let layout = PluginLayout::new(CodingAgent::Codex, dir.path());
+    std::fs::remove_dir_all(&layout.marketplace_root).unwrap();
+    runner.set_dangling_marketplace_source(&layout.marketplace_root);
+    let target = dir.path().join("unexpected-marketplace");
+    std::fs::create_dir(&target).unwrap();
+    symlink(&target, &layout.marketplace_root).unwrap();
+
+    let error = install_host(
+        CodingAgent::Codex,
+        &force,
+        &runner,
+        &MockSetupRunner::default(),
+    )
+    .unwrap_err();
+
+    assert_actionable_generation_error(&error, "unloadable Codex marketplace");
+    assert!(layout.marketplace_root.is_symlink());
+    assert!(runner.commands().is_empty());
+}
+
+#[test]
+fn force_install_rechecks_a_dangling_root_after_setup_snapshot() {
+    let dir = tempdir().unwrap();
+    let mut runner = MockRunner::default()
+        .with_executable("nemo-relay", "/bin/nemo-relay")
+        .with_executable("codex", "/bin/codex")
+        .with_capture_status(
+            "/bin/codex plugin list",
+            1,
+            "",
+            DANGLING_CODEX_MARKETPLACE_ERROR,
+        );
+    let force = PluginInstallOptions {
+        force: true,
+        ..options(dir.path())
+    };
+    write_installed_state(CodingAgent::Codex, dir.path());
+    let layout = PluginLayout::new(CodingAgent::Codex, dir.path());
+    std::fs::remove_dir_all(&layout.marketplace_root).unwrap();
+    runner.set_dangling_marketplace_source(&layout.marketplace_root);
+    let setup_runner = MockSetupRunner {
+        snapshot_reappearing_root: Some(layout.marketplace_root.clone()),
+        ..MockSetupRunner::default()
+    };
+
+    let error = install_host(CodingAgent::Codex, &force, &runner, &setup_runner).unwrap_err();
+
+    assert!(error.contains("reappeared"), "{error}");
+    assert!(layout.marketplace_root.is_dir());
+    assert!(runner.commands().is_empty());
+    assert_eq!(setup_runner.calls(), vec!["snapshot codex"]);
+    assert_no_install_stage(dir.path());
+}
+
+#[cfg(unix)]
+#[test]
+fn force_install_rechecks_the_dangling_lock_after_setup_snapshot() {
+    let dir = tempdir().unwrap();
+    let mut runner = MockRunner::default()
+        .with_executable("nemo-relay", "/bin/nemo-relay")
+        .with_executable("codex", "/bin/codex")
+        .with_capture_status(
+            "/bin/codex plugin list",
+            1,
+            "",
+            DANGLING_CODEX_MARKETPLACE_ERROR,
+        );
+    let force = PluginInstallOptions {
+        force: true,
+        ..options(dir.path())
+    };
+    write_installed_state(CodingAgent::Codex, dir.path());
+    let layout = PluginLayout::new(CodingAgent::Codex, dir.path());
+    std::fs::remove_dir_all(&layout.marketplace_root).unwrap();
+    runner.set_dangling_marketplace_source(&layout.marketplace_root);
+    let setup_runner = MockSetupRunner {
+        snapshot_replaced_lock: Some(layout.generation_lock.clone()),
+        ..MockSetupRunner::default()
+    };
+
+    let error = install_host(CodingAgent::Codex, &force, &runner, &setup_runner).unwrap_err();
+
+    assert!(error.contains("changed identity"), "{error}");
+    assert!(runner.commands().is_empty());
+    assert_eq!(setup_runner.calls(), vec!["snapshot codex"]);
     assert_no_install_stage(dir.path());
 }
 
 #[test]
 fn force_install_preserves_a_generation_when_plugin_registration_is_unknown() {
     let dir = tempdir().unwrap();
-    let runner = MockRunner::default()
+    let mut runner = MockRunner::default()
         .with_executable("nemo-relay", "/bin/nemo-relay")
         .with_executable("codex", "/bin/codex")
         .with_capture_status(
@@ -3199,6 +3819,7 @@ fn force_install_preserves_a_generation_when_plugin_registration_is_unknown() {
     write_installed_state(CodingAgent::Codex, dir.path());
     let layout = PluginLayout::new(CodingAgent::Codex, dir.path());
     std::fs::remove_file(&layout.marketplace_manifest).unwrap();
+    runner.set_dangling_marketplace_source(&layout.marketplace_root);
     let generation_token = InstallGeneration::capture(layout.generation_fence.clone())
         .unwrap()
         .token()
@@ -3206,10 +3827,7 @@ fn force_install_preserves_a_generation_when_plugin_registration_is_unknown() {
 
     let error = install_host(CodingAgent::Codex, &options, &runner, &setup_runner).unwrap_err();
 
-    assert!(
-        error.contains("registration state could not be determined"),
-        "{error}"
-    );
+    assert_actionable_generation_error(&error, "unloadable Codex marketplace");
     assert!(layout.marketplace_root.exists());
     assert!(layout.state_path.exists());
     assert_eq!(
@@ -3358,6 +3976,7 @@ fn force_install_uses_live_present_registration_instead_of_stale_removed_state()
             host_plugin_removed: true,
             host_marketplace_removed: true,
             plugin_setup_installed: true,
+            marker_absent_recovery: false,
         },
         dir.path(),
         &options,
@@ -3386,7 +4005,7 @@ fn force_install_commit_does_not_fail_when_backup_cleanup_errors() {
     ForceInstallSnapshot {
         state_bytes: None,
         setup_snapshot: None,
-        plugin_registered: false,
+        plugin_registered: Some(false),
         marketplace_registered: false,
         original_marketplace_root: dir.path().join("original-marketplace"),
         original_plugin_root: dir
@@ -3400,6 +4019,11 @@ fn force_install_commit_does_not_fail_when_backup_cleanup_errors() {
         marketplace_moved: true,
         plugin_moved: false,
         replacement_promoted: true,
+        recoverable_dangling_marketplace: false,
+        cleanup_committed: false,
+        original_marketplace_removed: false,
+        replacement_registration: HostRegistrationProgress::default(),
+        replacement_setup_installed: false,
         generation_retirement: None,
     }
     .commit(&dir.path().join("replacement.lock"));
@@ -3557,6 +4181,7 @@ fn replacement_retirement_aggregates_refresh_and_restore_failures_without_rewrit
             &options(&install_dir),
             &setup_runner,
             None,
+            false,
         )
     });
 
@@ -3915,13 +4540,18 @@ fn force_replacement_restoration_aggregates_independent_cleanup_failures() {
         original_marketplace_root: original_marketplace_root.clone(),
         original_plugin_root: original_plugin_root.clone(),
         original_generation_fence: original_plugin_root.join(GENERATION_FILE_NAME),
-        plugin_registered: false,
+        plugin_registered: Some(false),
         marketplace_registered: false,
         backup_marketplace_root: dir.path().join("missing-marketplace-backup"),
         backup_plugin_root: Some(dir.path().join("missing-plugin-backup")),
         marketplace_moved: true,
         plugin_moved: true,
         replacement_promoted: true,
+        recoverable_dangling_marketplace: false,
+        cleanup_committed: false,
+        original_marketplace_removed: false,
+        replacement_registration: HostRegistrationProgress::default(),
+        replacement_setup_installed: false,
         generation_retirement: None,
     };
     let mut runner = MockRunner::default()
@@ -3971,13 +4601,18 @@ fn force_replacement_restoration_reports_failed_host_reregistration() {
         original_marketplace_root: original_marketplace_root.clone(),
         original_plugin_root: original_marketplace_root.join("plugins/nemo-relay-plugin"),
         original_generation_fence: original_marketplace_root.join(GENERATION_FILE_NAME),
-        plugin_registered: true,
+        plugin_registered: Some(true),
         marketplace_registered: true,
         backup_marketplace_root: dir.path().join("unused-marketplace-backup"),
         backup_plugin_root: None,
         marketplace_moved: false,
         plugin_moved: false,
         replacement_promoted: false,
+        recoverable_dangling_marketplace: false,
+        cleanup_committed: false,
+        original_marketplace_removed: false,
+        replacement_registration: HostRegistrationProgress::default(),
+        replacement_setup_installed: false,
         generation_retirement: None,
     };
     let mut runner = MockRunner::default()
@@ -4006,7 +4641,7 @@ fn force_replacement_restoration_reports_failed_host_reregistration() {
 }
 
 #[test]
-fn force_replacement_restoration_reregisters_snapshot_when_plugin_state_is_unknown() {
+fn force_replacement_restoration_does_not_reregister_a_known_present_marketplace() {
     let dir = tempdir().unwrap();
     let layout = PluginLayout::new(CodingAgent::Codex, dir.path());
     let original_marketplace_root = dir.path().join("original-marketplace");
@@ -4016,13 +4651,18 @@ fn force_replacement_restoration_reregisters_snapshot_when_plugin_state_is_unkno
         original_marketplace_root: original_marketplace_root.clone(),
         original_plugin_root: original_marketplace_root.join("plugins/nemo-relay-plugin"),
         original_generation_fence: original_marketplace_root.join(GENERATION_FILE_NAME),
-        plugin_registered: true,
+        plugin_registered: Some(true),
         marketplace_registered: true,
         backup_marketplace_root: dir.path().join("unused-marketplace-backup"),
         backup_plugin_root: None,
         marketplace_moved: false,
         plugin_moved: false,
         replacement_promoted: false,
+        recoverable_dangling_marketplace: false,
+        cleanup_committed: false,
+        original_marketplace_removed: false,
+        replacement_registration: HostRegistrationProgress::default(),
+        replacement_setup_installed: false,
         generation_retirement: None,
     };
     let runner = MockRunner::default()
@@ -4045,8 +4685,8 @@ fn force_replacement_restoration_reregisters_snapshot_when_plugin_state_is_unkno
     .unwrap_err();
 
     assert!(error.contains("could not be determined"), "{error}");
-    assert!(runner.commands().iter().any(|command| {
-        command.ends_with(&format!(
+    assert!(runner.commands().iter().all(|command| {
+        !command.ends_with(&format!(
             "plugin marketplace add {}",
             original_marketplace_root.display()
         ))
@@ -4079,11 +4719,12 @@ fn force_replacement_moves_and_restores_a_separate_plugin_tree() {
         previous_marketplace_root: previous_marketplace_root.clone(),
         previous_plugin_root: previous_plugin_root.clone(),
         previous_generation_fence: previous_plugin_root.join(GENERATION_FILE_NAME),
-        plugin_registered: false,
+        plugin_registered: Some(false),
         marketplace_registered: false,
         previous_setup_installed: false,
         previous_install_exists: true,
         previous_state_exists: false,
+        recoverable_dangling_marketplace: false,
         generation_retirement: None,
     };
     let setup_runner = MockSetupRunner::default();
@@ -4898,9 +5539,9 @@ fn uninstall_rejects_registered_legacy_plugin_without_generation_fence() {
 }
 
 #[test]
-fn uninstall_preserves_orphaned_state_for_a_dangling_codex_marketplace() {
+fn plain_uninstall_recommends_force_for_a_dangling_codex_marketplace() {
     let dir = tempdir().unwrap();
-    let runner = MockRunner::default()
+    let mut runner = MockRunner::default()
         .with_executable("nemo-relay", "/bin/nemo-relay")
         .with_executable("codex", "/bin/codex")
         .with_capture_status(
@@ -4914,6 +5555,7 @@ fn uninstall_preserves_orphaned_state_for_a_dangling_codex_marketplace() {
     let layout = PluginLayout::new(CodingAgent::Codex, dir.path());
     let original_state = std::fs::read(&layout.state_path).unwrap();
     std::fs::remove_dir_all(&layout.marketplace_root).unwrap();
+    runner.set_dangling_marketplace_source(&layout.marketplace_root);
     assert!(layout.generation_lock.exists());
 
     let error = uninstall_host(
@@ -4924,12 +5566,381 @@ fn uninstall_preserves_orphaned_state_for_a_dangling_codex_marketplace() {
     )
     .unwrap_err();
 
-    assert_actionable_generation_error(&error, "MCP generation marker is missing");
+    assert!(
+        error.contains("nemo-relay uninstall codex --force"),
+        "{error}"
+    );
     assert!(!layout.marketplace_root.exists());
     assert_eq!(std::fs::read(&layout.state_path).unwrap(), original_state);
     assert!(layout.generation_lock.exists());
     assert!(runner.commands().is_empty());
     assert!(setup_runner.calls().is_empty());
+}
+
+#[test]
+fn force_uninstall_recovers_a_dangling_codex_marketplace() {
+    let dir = tempdir().unwrap();
+    let mut runner = MockRunner::default()
+        .with_executable("codex", "/bin/codex")
+        .with_capture_status(
+            "/bin/codex plugin list",
+            1,
+            "",
+            DANGLING_CODEX_MARKETPLACE_ERROR,
+        );
+    let setup_runner = MockSetupRunner::default();
+    write_installed_state(CodingAgent::Codex, dir.path());
+    let layout = PluginLayout::new(CodingAgent::Codex, dir.path());
+    std::fs::remove_dir_all(&layout.marketplace_root).unwrap();
+    runner.set_dangling_marketplace_source(&layout.marketplace_root);
+    let mut force = options(dir.path());
+    force.force = true;
+
+    uninstall_host(CodingAgent::Codex, &force, &runner, &setup_runner).unwrap();
+
+    assert!(!layout.marketplace_root.exists());
+    assert!(!layout.state_path.exists());
+    assert!(!layout.generation_lock.exists());
+    assert_eq!(
+        runner.commands(),
+        vec![
+            "/bin/codex plugin remove nemo-relay-plugin@nemo-relay-local".to_string(),
+            "/bin/codex plugin marketplace remove nemo-relay-local".to_string(),
+        ]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn force_uninstall_rejects_a_symlinked_dangling_marketplace_root() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempdir().unwrap();
+    let mut runner = MockRunner::default()
+        .with_executable("codex", "/bin/codex")
+        .with_capture_status(
+            "/bin/codex plugin list",
+            1,
+            "",
+            DANGLING_CODEX_MARKETPLACE_ERROR,
+        );
+    write_installed_state(CodingAgent::Codex, dir.path());
+    let layout = PluginLayout::new(CodingAgent::Codex, dir.path());
+    std::fs::remove_dir_all(&layout.marketplace_root).unwrap();
+    runner.set_dangling_marketplace_source(&layout.marketplace_root);
+    let unexpected_root = dir.path().join("unexpected-marketplace");
+    std::fs::create_dir(&unexpected_root).unwrap();
+    symlink(&unexpected_root, &layout.marketplace_root).unwrap();
+    let lock_contents = std::fs::read(&layout.generation_lock).unwrap();
+    let mut force = options(dir.path());
+    force.force = true;
+
+    let error = uninstall_host(
+        CodingAgent::Codex,
+        &force,
+        &runner,
+        &MockSetupRunner::default(),
+    )
+    .unwrap_err();
+
+    assert!(error.contains("unloadable Codex marketplace"), "{error}");
+    assert!(layout.marketplace_root.is_symlink());
+    assert_eq!(
+        std::fs::read(&layout.generation_lock).unwrap(),
+        lock_contents
+    );
+    assert!(runner.commands().is_empty());
+}
+
+#[test]
+fn force_uninstall_rejects_a_dangling_root_that_reappears_during_classification() {
+    let dir = tempdir().unwrap();
+    let mut runner = MockRunner::default()
+        .with_executable("codex", "/bin/codex")
+        .with_capture_status(
+            "/bin/codex plugin list",
+            1,
+            "",
+            DANGLING_CODEX_MARKETPLACE_ERROR,
+        );
+    write_installed_state(CodingAgent::Codex, dir.path());
+    let layout = PluginLayout::new(CodingAgent::Codex, dir.path());
+    std::fs::remove_dir_all(&layout.marketplace_root).unwrap();
+    runner.set_dangling_marketplace_source(&layout.marketplace_root);
+    runner.capture_reappearing_root = Some(layout.marketplace_root.clone());
+    let mut force = options(dir.path());
+    force.force = true;
+
+    let error = uninstall_host(
+        CodingAgent::Codex,
+        &force,
+        &runner,
+        &MockSetupRunner::default(),
+    )
+    .unwrap_err();
+
+    assert!(error.contains("unloadable Codex marketplace"), "{error}");
+    assert!(layout.marketplace_root.is_dir());
+    assert!(runner.commands().is_empty());
+}
+
+#[test]
+fn marker_absent_retry_does_not_remove_a_newer_codex_registration() {
+    let dir = tempdir().unwrap();
+    let previous_dir = dir.path().join("previous");
+    let replacement_dir = dir.path().join("replacement");
+    write_installed_state(CodingAgent::Codex, &previous_dir);
+    write_installed_state(CodingAgent::Codex, &replacement_dir);
+    let previous_layout = PluginLayout::new(CodingAgent::Codex, &previous_dir);
+    let replacement_layout = PluginLayout::new(CodingAgent::Codex, &replacement_dir);
+    std::fs::remove_dir_all(&previous_layout.marketplace_root).unwrap();
+    let mut retry_state = read_state(CodingAgent::Codex, &previous_dir).unwrap();
+    retry_state.marker_absent_recovery = true;
+    retry_state.host_plugin_removed = true;
+    retry_state.host_marketplace_removed = true;
+    retry_state.plugin_setup_installed = false;
+    write_state_for_host(
+        CodingAgent::Codex,
+        &retry_state,
+        &previous_dir,
+        &options(&previous_dir),
+    )
+    .unwrap();
+    let runner = MockRunner::default()
+        .with_executable("nemo-relay", "/bin/nemo-relay")
+        .with_executable("codex", "/bin/codex")
+        .with_codex_registration(true, true);
+    let mut force = options(&previous_dir);
+    force.force = true;
+
+    let install_error = install_host(
+        CodingAgent::Codex,
+        &force,
+        &runner,
+        &MockSetupRunner::default(),
+    )
+    .unwrap_err();
+    assert!(install_error.contains("conflicts with the current Codex registration"));
+
+    let uninstall_error = uninstall_host(
+        CodingAgent::Codex,
+        &force,
+        &runner,
+        &MockSetupRunner::default(),
+    )
+    .unwrap_err();
+    assert!(uninstall_error.contains("conflicts with the current Codex registration"));
+    assert!(replacement_layout.marketplace_root.exists());
+    assert!(replacement_layout.generation_fence.exists());
+    assert!(runner.commands().is_empty());
+}
+
+#[test]
+fn clean_marker_absent_retry_resumes_for_forced_install_and_uninstall() {
+    let dir = tempdir().unwrap();
+    let install_dir = dir.path().join("install");
+    write_installed_state(CodingAgent::Codex, &install_dir);
+    let install_layout = PluginLayout::new(CodingAgent::Codex, &install_dir);
+    std::fs::remove_dir_all(&install_layout.marketplace_root).unwrap();
+    let retry_state = PluginState {
+        marketplace_root: install_layout.marketplace_root.clone(),
+        plugin_root: install_layout.plugin_root.clone(),
+        host_plugin_removed: false,
+        host_marketplace_removed: false,
+        plugin_setup_installed: false,
+        marker_absent_recovery: true,
+    };
+    write_state_for_host(
+        CodingAgent::Codex,
+        &retry_state,
+        &install_dir,
+        &options(&install_dir),
+    )
+    .unwrap();
+    let install_runner = MockRunner::default()
+        .with_executable("nemo-relay", "/bin/nemo-relay")
+        .with_executable("codex", "/bin/codex")
+        .with_codex_registration(false, false);
+    let mut force_install = options(&install_dir);
+    force_install.force = true;
+
+    install_host(
+        CodingAgent::Codex,
+        &force_install,
+        &install_runner,
+        &MockSetupRunner::default(),
+    )
+    .unwrap();
+    assert!(install_layout.generation_fence.exists());
+    assert!(install_runner.commands().iter().all(|command| {
+        !command.ends_with("plugin remove nemo-relay-plugin@nemo-relay-local")
+            && !command.ends_with("plugin marketplace remove nemo-relay-local")
+    }));
+
+    let uninstall_dir = dir.path().join("uninstall");
+    write_installed_state(CodingAgent::Codex, &uninstall_dir);
+    let uninstall_layout = PluginLayout::new(CodingAgent::Codex, &uninstall_dir);
+    std::fs::remove_dir_all(&uninstall_layout.marketplace_root).unwrap();
+    let retry_state = PluginState {
+        marketplace_root: uninstall_layout.marketplace_root.clone(),
+        plugin_root: uninstall_layout.plugin_root.clone(),
+        host_plugin_removed: false,
+        host_marketplace_removed: false,
+        plugin_setup_installed: false,
+        marker_absent_recovery: true,
+    };
+    write_state_for_host(
+        CodingAgent::Codex,
+        &retry_state,
+        &uninstall_dir,
+        &options(&uninstall_dir),
+    )
+    .unwrap();
+    let uninstall_runner = MockRunner::default()
+        .with_executable("codex", "/bin/codex")
+        .with_codex_registration(false, false);
+    let mut force_uninstall = options(&uninstall_dir);
+    force_uninstall.force = true;
+
+    uninstall_host(
+        CodingAgent::Codex,
+        &force_uninstall,
+        &uninstall_runner,
+        &MockSetupRunner::default(),
+    )
+    .unwrap();
+    assert!(!uninstall_layout.state_path.exists());
+    assert!(!uninstall_layout.generation_lock.exists());
+    assert!(uninstall_runner.commands().is_empty());
+}
+
+#[test]
+fn force_uninstall_reconciles_a_marketplace_removal_error_after_success() {
+    let dir = tempdir().unwrap();
+    let mut runner = MockRunner::default()
+        .with_executable("codex", "/bin/codex")
+        .with_capture_output("/bin/codex plugin marketplace list", "");
+    runner.capture_output_sequences.get_mut().insert(
+        "/bin/codex plugin list".into(),
+        VecDeque::from([
+            CommandOutput {
+                status: 1,
+                stdout: String::new(),
+                stderr: DANGLING_CODEX_MARKETPLACE_ERROR.into(),
+            },
+            CommandOutput::success(String::new()),
+        ]),
+    );
+    runner.failing_suffix = Some("plugin marketplace remove nemo-relay-local".into());
+    let first_setup = MockSetupRunner {
+        failing_call: Some(format!("uninstall codex {DEFAULT_GATEWAY_URL}")),
+        ..MockSetupRunner::default()
+    };
+    write_installed_state(CodingAgent::Codex, dir.path());
+    let layout = PluginLayout::new(CodingAgent::Codex, dir.path());
+    std::fs::remove_dir_all(&layout.marketplace_root).unwrap();
+    runner.set_dangling_marketplace_source(&layout.marketplace_root);
+    let mut force = options(dir.path());
+    force.force = true;
+
+    let error = uninstall_host(CodingAgent::Codex, &force, &runner, &first_setup).unwrap_err();
+    assert!(
+        error.contains("failed to remove Relay host setup"),
+        "{error}"
+    );
+
+    let retry_state = read_state(CodingAgent::Codex, dir.path()).unwrap();
+    assert!(retry_state.host_plugin_removed);
+    assert!(retry_state.host_marketplace_removed);
+    assert_eq!(
+        runner.commands(),
+        vec![
+            "/bin/codex plugin remove nemo-relay-plugin@nemo-relay-local".to_string(),
+            "/bin/codex plugin marketplace remove nemo-relay-local".to_string(),
+        ]
+    );
+
+    let retry_runner = MockRunner::default()
+        .with_executable("codex", "/bin/codex")
+        .with_codex_registration(false, false);
+    uninstall_host(
+        CodingAgent::Codex,
+        &force,
+        &retry_runner,
+        &MockSetupRunner::default(),
+    )
+    .unwrap();
+
+    assert!(retry_runner.commands().is_empty());
+    assert!(!layout.state_path.exists());
+    assert!(!layout.generation_lock.exists());
+}
+
+#[test]
+fn partial_dangling_force_uninstall_retains_a_guarded_retry() {
+    let dir = tempdir().unwrap();
+    let mut first_runner = MockRunner::default()
+        .with_executable("codex", "/bin/codex")
+        .with_capture_status(
+            "/bin/codex plugin list",
+            1,
+            "",
+            DANGLING_CODEX_MARKETPLACE_ERROR,
+        );
+    let first_setup = MockSetupRunner {
+        failing_call: Some(format!("uninstall codex {DEFAULT_GATEWAY_URL}")),
+        ..MockSetupRunner::default()
+    };
+    write_installed_state(CodingAgent::Codex, dir.path());
+    let layout = PluginLayout::new(CodingAgent::Codex, dir.path());
+    std::fs::remove_dir_all(&layout.marketplace_root).unwrap();
+    first_runner.set_dangling_marketplace_source(&layout.marketplace_root);
+    let lock_id = std::fs::read_to_string(&layout.generation_lock).unwrap();
+    let mut force = options(dir.path());
+    force.force = true;
+
+    let error =
+        uninstall_host(CodingAgent::Codex, &force, &first_runner, &first_setup).unwrap_err();
+
+    assert!(
+        error.contains("failed to remove Relay host setup"),
+        "{error}"
+    );
+    let retry_state = read_state(CodingAgent::Codex, dir.path()).unwrap();
+    assert!(retry_state.marker_absent_recovery);
+    assert!(retry_state.host_plugin_removed);
+    assert!(retry_state.host_marketplace_removed);
+    assert!(retry_state.plugin_setup_installed);
+    assert_eq!(
+        std::fs::read_to_string(&layout.generation_lock).unwrap(),
+        lock_id
+    );
+    let plain_error = uninstall_host(
+        CodingAgent::Codex,
+        &options(dir.path()),
+        &MockRunner::default(),
+        &MockSetupRunner::default(),
+    )
+    .unwrap_err();
+    assert!(
+        plain_error.contains("nemo-relay uninstall codex --force"),
+        "{plain_error}"
+    );
+
+    let retry_runner = MockRunner::default()
+        .with_executable("codex", "/bin/codex")
+        .with_codex_registration(false, false);
+    uninstall_host(
+        CodingAgent::Codex,
+        &force,
+        &retry_runner,
+        &MockSetupRunner::default(),
+    )
+    .unwrap();
+
+    assert!(retry_runner.commands().is_empty());
+    assert!(!layout.state_path.exists());
+    assert!(!layout.generation_lock.exists());
 }
 
 #[test]
@@ -5201,6 +6212,7 @@ fn doctor_uses_plugin_root_persisted_in_install_state() {
             host_plugin_removed: false,
             host_marketplace_removed: false,
             plugin_setup_installed: true,
+            marker_absent_recovery: false,
         },
         dir.path(),
         &install_options,
@@ -6045,6 +7057,7 @@ fn uninstall_retry_skips_host_removal_after_prior_success() {
             host_plugin_removed: true,
             host_marketplace_removed: true,
             plugin_setup_installed: true,
+            marker_absent_recovery: false,
         },
         dir.path(),
         &options(dir.path()),
