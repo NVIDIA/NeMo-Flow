@@ -80,10 +80,6 @@ impl TrajectorySanitizer {
         empty_object()
     }
 
-    pub(super) fn sanitize_provider_payload(&self, _value: Json) -> Json {
-        empty_object()
-    }
-
     pub(super) fn sanitize_annotated_request(
         &self,
         request: AnnotatedLlmRequest,
@@ -108,7 +104,7 @@ impl TrajectorySanitizer {
             max_tool_calls,
             top_logprobs,
             stream,
-            api_specific: _,
+            api_specific,
             extra: _,
         } = request;
         Some(AnnotatedLlmRequest {
@@ -140,9 +136,8 @@ impl TrajectorySanitizer {
             max_tool_calls,
             top_logprobs,
             stream,
-            // Provider-specific annotations describe the source payload. The
-            // contract-first projector builds a fresh provider wire shape.
-            api_specific: None,
+            api_specific: api_specific
+                .map(|specific| sanitize_api_specific_request(specific, &self.replacement)),
             extra: Map::new(),
         })
     }
@@ -613,6 +608,123 @@ fn sanitize_tool_choice(choice: ToolChoice, replacement: &str) -> ToolChoice {
             kind: sanitize_native_kind(kind, replacement),
             value: empty_object(),
         }),
+    }
+}
+
+fn sanitize_api_specific_request(
+    request: ApiSpecificRequest,
+    replacement: &str,
+) -> ApiSpecificRequest {
+    match request {
+        ApiSpecificRequest::AnthropicMessages {
+            cache_control,
+            container,
+            inference_geo,
+            output_config,
+            thinking,
+            top_k,
+            user_profile_id,
+        } => ApiSpecificRequest::AnthropicMessages {
+            cache_control: opaque_option(cache_control),
+            container: marked_option(container, replacement),
+            inference_geo: marked_option(inference_geo, replacement),
+            output_config: opaque_option(output_config),
+            thinking: opaque_option(thinking),
+            top_k,
+            user_profile_id: marked_option(user_profile_id, replacement),
+        },
+        ApiSpecificRequest::OpenAIChat {
+            audio,
+            frequency_penalty,
+            function_call,
+            functions,
+            logit_bias,
+            logprobs,
+            modalities,
+            moderation,
+            n,
+            prediction,
+            presence_penalty,
+            prompt_cache_key,
+            prompt_cache_options,
+            prompt_cache_retention,
+            reasoning_effort,
+            response_format,
+            safety_identifier,
+            seed,
+            stream_options,
+            verbosity,
+            web_search_options,
+        } => ApiSpecificRequest::OpenAIChat {
+            audio: opaque_option(audio),
+            frequency_penalty,
+            function_call: opaque_option(function_call),
+            functions: functions.map(|values| values.into_iter().map(|_| empty_object()).collect()),
+            logit_bias: opaque_option(logit_bias),
+            logprobs,
+            modalities: modalities.map(|values| {
+                values
+                    .into_iter()
+                    .map(|value| preserve_known_string(value, &["text", "audio"], replacement))
+                    .collect()
+            }),
+            moderation: opaque_option(moderation),
+            n,
+            prediction: opaque_option(prediction),
+            presence_penalty,
+            prompt_cache_key: marked_option(prompt_cache_key, replacement),
+            prompt_cache_options: opaque_option(prompt_cache_options),
+            prompt_cache_retention: marked_option(prompt_cache_retention, replacement),
+            reasoning_effort: marked_option(reasoning_effort, replacement),
+            response_format: opaque_option(response_format),
+            safety_identifier: marked_option(safety_identifier, replacement),
+            seed,
+            stream_options: opaque_option(stream_options),
+            verbosity: marked_option(verbosity, replacement),
+            web_search_options: opaque_option(web_search_options),
+        },
+        ApiSpecificRequest::OpenAIResponses {
+            background,
+            context_management,
+            conversation,
+            moderation,
+            prompt,
+            prompt_cache_key,
+            prompt_cache_options,
+            prompt_cache_retention,
+            safety_identifier,
+            stream_options,
+            text,
+        } => ApiSpecificRequest::OpenAIResponses {
+            background,
+            context_management: opaque_option(context_management),
+            conversation: opaque_option(conversation),
+            moderation: opaque_option(moderation),
+            prompt: opaque_option(prompt),
+            prompt_cache_key: marked_option(prompt_cache_key, replacement),
+            prompt_cache_options: opaque_option(prompt_cache_options),
+            prompt_cache_retention: marked_option(prompt_cache_retention, replacement),
+            safety_identifier: marked_option(safety_identifier, replacement),
+            stream_options: opaque_option(stream_options),
+            text: opaque_option(text),
+        },
+        ApiSpecificRequest::OCIGenAI {
+            compartment_id,
+            serving_mode,
+            api_format,
+        } => ApiSpecificRequest::OCIGenAI {
+            compartment_id: marked_option(compartment_id, replacement),
+            serving_mode: opaque_option(serving_mode),
+            api_format: api_format
+                .filter(|value| ["GENERIC", "COHERE", "COHEREV2"].contains(&value.as_str())),
+        },
+        ApiSpecificRequest::Custom {
+            api_name: _,
+            data: _,
+        } => ApiSpecificRequest::Custom {
+            api_name: replacement.to_string(),
+            data: empty_object(),
+        },
     }
 }
 

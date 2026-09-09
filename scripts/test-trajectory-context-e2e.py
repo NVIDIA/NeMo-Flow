@@ -125,6 +125,15 @@ def phoenix_spans(phoenix_url: str, project: str) -> list[dict[str, Any]]:
     return []
 
 
+def phoenix_project_id(phoenix_url: str, project: str) -> str:
+    endpoint = f"{phoenix_url.rstrip('/')}/v1/projects/{quote(project, safe='')}"
+    document = get_json(endpoint)
+    data = document.get("data")
+    if not isinstance(data, dict) or not isinstance(data.get("id"), str):
+        raise AssertionError(f"Phoenix did not return an ID for project {project}")
+    return data["id"]
+
+
 def string_headers(headers: dict[str, Json]) -> dict[str, str]:
     if not all(isinstance(value, str) for value in headers.values()):
         raise AssertionError("Relay emitted a non-string HTTP header")
@@ -378,6 +387,7 @@ async def main() -> int:
             if case.output_key not in output or not set(output).issubset(case.output_keys):
                 raise AssertionError(f"{case.name}: Phoenix retained a non-minimal response projection")
 
+    project_id = phoenix_project_id(args.phoenix_url, project)
     print(
         json.dumps(
             {
@@ -385,7 +395,7 @@ async def main() -> int:
                 "project": project,
                 "providers": results,
                 "llm_span_count": len(llm_spans),
-                "phoenix_traces_url": f"{args.phoenix_url.rstrip('/')}/projects/{quote(project, safe='')}/traces",
+                "phoenix_traces_url": f"{args.phoenix_url.rstrip('/')}/projects/{quote(project_id, safe='')}",
                 "oci_genai": "not exposed by the configured Inference Hub OpenAPI document",
             },
             indent=2,

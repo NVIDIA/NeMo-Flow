@@ -18,8 +18,8 @@ use nemo_relay::api::runtime::{
 };
 use nemo_relay::codec::request::AnnotatedLlmRequest;
 use nemo_relay::codec::resolve::{
-    ProviderSurface, detect_request_surface_with_hint, detect_response_surface,
-    request_codec as build_request_codec, response_codec as build_response_codec,
+    ProviderSurface, detect_response_surface, request_codec as build_request_codec,
+    response_codec as build_response_codec,
 };
 use nemo_relay::codec::traits::{LlmCodec, LlmResponseCodec};
 use nemo_relay::plugin::{PluginError, Result as PluginResult};
@@ -31,9 +31,6 @@ use super::component::{
 use super::detectors::BuiltinDetector;
 use super::overlay::BuiltinCodecName;
 use super::trajectory::{CustomMarkPayloadPolicy, TrajectorySanitizer, is_relay_metric_mark};
-use super::trajectory_projection::{
-    render_request as render_trajectory_request, render_response as render_trajectory_response,
-};
 
 #[derive(Clone)]
 pub(super) struct CompiledBuiltinBackend {
@@ -650,26 +647,6 @@ impl CompiledBuiltinBackend {
             })
     }
 
-    fn sanitize_trajectory_request(
-        &self,
-        trajectory: &TrajectorySanitizer,
-        surface: ProviderSurface,
-        request: &LlmRequest,
-    ) -> Option<LlmRequest> {
-        let provider_hint = match surface {
-            ProviderSurface::AnthropicMessages => Some("anthropic.messages"),
-            ProviderSurface::OCIGenAI => Some("oci.genai"),
-            ProviderSurface::OpenAIChat
-            | ProviderSurface::OpenAIResponses
-            | ProviderSurface::GeminiGenerateContent => None,
-        };
-        (detect_request_surface_with_hint(&request.content, provider_hint) == Some(surface))
-            .then_some(())?;
-        let annotated = build_request_codec(surface).decode(request).ok()?;
-        let sanitized = trajectory.sanitize_annotated_request(annotated)?;
-        render_trajectory_request(surface, &sanitized)
-    }
-
     fn sanitize_request_target_paths_incrementally(
         &self,
         codec: &dyn LlmCodec,
@@ -788,20 +765,6 @@ impl CompiledBuiltinBackend {
             &projected,
         )
         .then_some(payload)
-    }
-
-    fn sanitize_trajectory_response(
-        &self,
-        trajectory: &TrajectorySanitizer,
-        surface: ProviderSurface,
-        payload: Json,
-    ) -> Option<Json> {
-        (detect_response_surface(&payload) == Some(surface)).then_some(())?;
-        let annotated = build_response_codec(surface)
-            .decode_response(&payload)
-            .ok()?;
-        let sanitized = trajectory.sanitize_annotated_response(annotated)?;
-        render_trajectory_response(surface, &sanitized)
     }
 
     fn normalized_response_targets_match(
@@ -929,29 +892,6 @@ pub(super) fn llm_sanitize_request_callback(
     Arc::new(move |mut request: LlmRequest, context| {
         let backend = Arc::clone(&backend);
         Box::pin(async move {
-            if let Some(trajectory) = backend.trajectory.as_ref() {
-                request.headers = trajectory
-                    .sanitize_tool_payload(Json::Object(request.headers))
-                    .as_object()
-                    .cloned()
-                    .unwrap_or_default();
-                let sanitized = backend
-                    .selected_surface(context.codec())
-                    .and_then(|surface| {
-                        backend.sanitize_trajectory_request(trajectory, surface, &request)
-                    });
-                if let Some(sanitized) = sanitized {
-                    return Ok(Some(sanitized));
-                }
-                log_llm_payload_omitted(
-                    "request",
-                    context.codec(),
-                    "unsupported surface, codec decode, typed sanitize, or projection failure",
-                );
-                request.headers.clear();
-                request.content = Json::Object(Map::new());
-                return Ok(Some(request));
-            }
             request.headers = backend.sanitize_request_headers(request.headers);
             if backend.target_path_matcher.is_empty() {
                 request.content = backend.sanitize_json_preorder_dfs(request.content);
@@ -989,21 +929,6 @@ pub(super) fn llm_sanitize_response_callback(
     Arc::new(move |payload: Json, context| {
         let backend = Arc::clone(&backend);
         Box::pin(async move {
-            if let Some(trajectory) = backend.trajectory.as_ref() {
-                let Some(surface) = backend.selected_surface(context.codec()) else {
-                    return Ok(Some(Json::Object(Map::new())));
-                };
-                let sanitized = backend.sanitize_trajectory_response(trajectory, surface, payload);
-                if let Some(sanitized) = sanitized {
-                    return Ok(Some(sanitized));
-                }
-                log_llm_payload_omitted(
-                    "response",
-                    context.codec(),
-                    "codec decode, typed sanitize, or projection failure",
-                );
-                return Ok(Some(trajectory.sanitize_provider_payload(Json::Null)));
-            }
             if backend.target_path_matcher.is_empty() {
                 return Ok(Some(backend.sanitize_json_preorder_dfs(payload)));
             }

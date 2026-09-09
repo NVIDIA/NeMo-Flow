@@ -28,7 +28,7 @@ pub(super) fn render_request(
 ) -> Option<LlmRequest> {
     let template = LlmRequest {
         headers: Map::new(),
-        content: request_template(surface),
+        content: request_template(surface, request),
     };
     let mut rendered = request_codec(surface).encode(request, &template).ok()?;
     rendered.headers.clear();
@@ -66,13 +66,26 @@ pub(super) fn render_response(
     Some(rendered)
 }
 
-fn request_template(surface: ProviderSurface) -> Json {
+fn request_template(surface: ProviderSurface, request: &AnnotatedLlmRequest) -> Json {
     match surface {
         ProviderSurface::OpenAIChat | ProviderSurface::AnthropicMessages => {
             json!({"messages": []})
         }
         ProviderSurface::OpenAIResponses => json!({"input": []}),
-        ProviderSurface::OCIGenAI => json!({"apiFormat": "GENERIC", "messages": []}),
+        ProviderSurface::OCIGenAI => {
+            let api_format = match request.api_specific.as_ref() {
+                Some(nemo_relay::codec::request::ApiSpecificRequest::OCIGenAI {
+                    api_format: Some(api_format),
+                    ..
+                }) => api_format.as_str(),
+                _ => "GENERIC",
+            };
+            match api_format {
+                "COHERE" => json!({"apiFormat": "COHERE"}),
+                "COHEREV2" => json!({"apiFormat": "COHEREV2", "messages": []}),
+                _ => json!({"apiFormat": "GENERIC", "messages": []}),
+            }
+        }
         ProviderSurface::GeminiGenerateContent => json!({"contents": []}),
     }
 }
