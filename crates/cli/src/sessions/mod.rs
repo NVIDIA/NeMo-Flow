@@ -1854,13 +1854,30 @@ impl Session {
         let active_tool_arguments = arguments.clone();
         let active_tool_name = event.tool_name.clone();
         let active_tool_owner_subagent_id = owner.subagent_id.clone();
-        let metadata = tool_correlation_metadata(
+        let mut metadata = tool_correlation_metadata(
             self.event_identity_metadata(event.metadata),
             owner.status,
             owner.source.as_deref(),
             owner.subagent_id.as_deref(),
             owner.hint.as_ref(),
         );
+        if self.agent_kind == AgentKind::ClaudeCode {
+            // Claude proposes arguments and the local harness executes the
+            // function (including dispatch to MCP). Do not infer descriptions
+            // from a tool argument such as Bash's per-invocation description.
+            if let Some(metadata) = metadata.as_object_mut() {
+                metadata
+                    .entry("gen_ai.tool.type")
+                    .or_insert(json!("function"));
+                let agent_name = owner.subagent_id.as_ref().map_or_else(
+                    || self.agent_kind.as_str().to_string(),
+                    |id| format!("subagent:{id}"),
+                );
+                metadata
+                    .entry("gen_ai.agent.name")
+                    .or_insert(json!(agent_name));
+            }
+        }
         self.set_last_tool_owner(owner.subagent_id.clone());
         let handle = tool_call(
             ToolCallParams::builder()

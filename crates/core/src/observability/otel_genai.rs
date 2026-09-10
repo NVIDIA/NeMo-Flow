@@ -7,7 +7,9 @@
 
 use crate::api::event::{Event, EventNormalizationExt};
 use crate::api::scope::ScopeType;
-use crate::codec::request::{ApiSpecificRequest, ContentPart, Message, MessageContent};
+use crate::codec::request::{
+    ApiSpecificRequest, ContentPart, Message, MessageContent, ToolDefinition,
+};
 use crate::codec::response::{AnnotatedLlmResponse, FinishReason};
 use crate::json::Json;
 use opentelemetry::KeyValue;
@@ -73,7 +75,15 @@ pub(super) fn span_kind(event: &Event) -> SpanKind {
     }
 }
 
+#[cfg(test)]
 pub(super) fn start_attributes(event: &Event) -> Vec<KeyValue> {
+    start_attributes_with_tool_content(event, false)
+}
+
+pub(super) fn start_attributes_with_tool_content(
+    event: &Event,
+    capture_tool_content: bool,
+) -> Vec<KeyValue> {
     if !has_gen_ai_semantics(event) {
         return Vec::new();
     }
@@ -92,8 +102,16 @@ pub(super) fn start_attributes(event: &Event) -> Vec<KeyValue> {
             push_provider_and_server_attributes(&mut attributes, event);
             push_conversation_attribute(&mut attributes, event);
             push_llm_request_attributes(&mut attributes, event);
+            if capture_tool_content {
+                push_tool_definitions(&mut attributes, event);
+            }
         }
-        Some(ScopeType::Tool) => push_tool_attributes(&mut attributes, event),
+        Some(ScopeType::Tool) => {
+            push_tool_attributes(&mut attributes, event);
+            if capture_tool_content {
+                push_tool_content(&mut attributes, "gen_ai.tool.call.arguments", event.input());
+            }
+        }
         Some(ScopeType::Retriever) => {
             push_provider_and_server_attributes(&mut attributes, event);
             push_retrieval_attributes(&mut attributes, event);
@@ -107,12 +125,28 @@ pub(super) fn start_attributes(event: &Event) -> Vec<KeyValue> {
     attributes
 }
 
+#[cfg(test)]
 pub(super) fn end_attributes(event: &Event) -> Vec<KeyValue> {
+    end_attributes_with_tool_content(event, false)
+}
+
+pub(super) fn end_attributes_with_tool_content(
+    event: &Event,
+    capture_tool_content: bool,
+) -> Vec<KeyValue> {
     let mut attributes = Vec::new();
     push_error_attributes(&mut attributes, event);
     match event.scope_type() {
         Some(ScopeType::Llm) => push_llm_response_attributes(&mut attributes, event),
         Some(ScopeType::Embedder) => push_embedding_response_attributes(&mut attributes, event),
+        Some(ScopeType::Tool) => {
+            // Correlation can become available only at completion. Never replace
+            // the start name with an end-event label.
+            push_tool_metadata(&mut attributes, event);
+            if capture_tool_content && !attributes.iter().any(|a| a.key.as_str() == "error.type") {
+                push_tool_content(&mut attributes, "gen_ai.tool.call.result", event.output());
+            }
+        }
         _ => {}
     }
     attributes
@@ -557,21 +591,94 @@ fn message_content_value(content: &MessageContent) -> Json {
 
 fn push_tool_attributes(attributes: &mut Vec<KeyValue>, event: &Event) {
     attributes.push(KeyValue::new(semconv::GEN_AI_TOOL_NAME, tool_name(event)));
-    if let Some(value) = scalar_string(event, &["gen_ai.tool.type", "tool_type"]) {
+    push_tool_metadata(attributes, event);
+}
+
+fn push_tool_metadata(attributes: &mut Vec<KeyValue>, event: &Event) {
+    if let Some(value) = tool_metadata_string(event, &["gen_ai.tool.type", "tool_type"]) {
         attributes.push(KeyValue::new("gen_ai.tool.type", value));
     }
     if let Some(value) = event
         .tool_call_id()
+        .filter(|value| !value.trim().is_empty())
         .map(ToOwned::to_owned)
-        .or_else(|| scalar_string(event, &["gen_ai.tool.call.id", "tool_call_id"]))
+        .or_else(|| tool_metadata_string(event, &["gen_ai.tool.call.id", "tool_call_id"]))
     {
         attributes.push(KeyValue::new("gen_ai.tool.call.id", value));
     }
-    if let Some(value) = scalar_string(
+    if let Some(value) = tool_metadata_string(
         event,
         &["gen_ai.tool.description", "tool_description", "description"],
     ) {
         attributes.push(KeyValue::new("gen_ai.tool.description", value));
+    }
+    if let Some(value) = tool_metadata_string(event, &["gen_ai.agent.name", "agent_name"]) {
+        attributes.push(KeyValue::new("gen_ai.agent.name", value));
+    }
+}
+
+// Tool data is arbitrary user content: a payload's `description`, `tool_type`,
+// or even a dotted semantic key must not masquerade as instrumentation metadata.
+fn tool_metadata_string(event: &Event, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        [
+            event
+                .category_profile()
+                .and_then(|profile| profile.extra.get(*key)),
+            event.metadata().and_then(|metadata| metadata.get(*key)),
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(Json::as_str)
+        .find(|value| !value.trim().is_empty())
+        .map(ToOwned::to_owned)
+    })
+}
+
+fn push_tool_content(attributes: &mut Vec<KeyValue>, key: &'static str, value: Option<&Json>) {
+    let Some(value) = value else { return };
+    let parsed = value
+        .as_str()
+        .and_then(|text| serde_json::from_str::<Json>(text).ok());
+    let value = parsed.as_ref().unwrap_or(value);
+    // The GenAI schemas require objects. Omit unstructured values rather than
+    // inventing a wrapper that changes the tool's arguments or result.
+    if value.is_object() {
+        attributes.push(KeyValue::new(key, value.to_string()));
+    }
+}
+
+fn push_tool_definitions(attributes: &mut Vec<KeyValue>, event: &Event) {
+    let Some(request) = event.normalized_llm_request() else {
+        return;
+    };
+    let Some(tools) = request.as_ref().tools.as_ref() else {
+        return;
+    };
+    let definitions: Vec<Json> = tools
+        .iter()
+        .filter_map(|tool| match tool {
+            ToolDefinition::Function { function, .. } if !function.name.trim().is_empty() => {
+                Some(serde_json::json!({"type": "function", "name": function.name}))
+            }
+            ToolDefinition::ProviderNative { kind, value, .. } => {
+                let name = value.get("name").and_then(Json::as_str)?;
+                let tool_type = value.get("type").and_then(Json::as_str).unwrap_or(kind);
+                if name.trim().is_empty() || tool_type.trim().is_empty() {
+                    return None;
+                }
+                Some(serde_json::json!({"type": tool_type, "name": name}))
+            }
+            _ => None,
+        })
+        .collect();
+    // Only required schema properties; provider wrappers and optional schemas
+    // can be large and need not accompany every inference.
+    if !definitions.is_empty() {
+        attributes.push(KeyValue::new(
+            "gen_ai.tool.definitions",
+            Json::Array(definitions).to_string(),
+        ));
     }
 }
 
@@ -657,7 +764,8 @@ fn agent_name(event: &Event) -> String {
 }
 
 fn tool_name(event: &Event) -> String {
-    scalar_string(event, &[semconv::GEN_AI_TOOL_NAME]).unwrap_or_else(|| event.name().to_string())
+    tool_metadata_string(event, &[semconv::GEN_AI_TOOL_NAME])
+        .unwrap_or_else(|| event.name().to_string())
 }
 
 fn data_source_id(event: &Event) -> Option<String> {

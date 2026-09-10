@@ -324,6 +324,7 @@ fn build_otel_config(
         config = config.with_resource_attribute(key, value);
     }
     config = config
+        .with_gen_ai_capture_tool_content(options.gen_ai_capture_tool_content.unwrap_or(false))
         .with_mark_projection(parse_mark_projection(options.mark_projection)?)
         .with_mark_exclude_names(
             options
@@ -5208,6 +5209,8 @@ pub struct OpenTelemetryConfig {
     pub promote_metadata_prefixes: Option<Vec<String>>,
     /// Literal root-scope Event metadata prefixes copied to OTLP resource attributes.
     pub promote_resource_metadata_prefixes: Option<Vec<String>>,
+    /// Opt into sanitized GenAI tool content. Defaults to false.
+    pub gen_ai_capture_tool_content: Option<bool>,
 }
 
 /// OpenTelemetry-backed event subscriber.

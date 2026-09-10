@@ -317,6 +317,9 @@ impl Default for OpenTelemetryMetricSectionConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct OpenTelemetryEndpointConfig {
+    /// Opt into sanitized GenAI tool arguments, object results, and minimal definitions.
+    #[serde(default)]
+    pub gen_ai_capture_tool_content: bool,
     /// Semantic projection emitted by this endpoint.
     #[serde(rename = "type")]
     pub otel_type: OpenTelemetryType,
@@ -761,6 +764,12 @@ impl EditorConfig for OpenTelemetryEndpointConfig {
                     false,
                 ),
                 otel_editor_field("endpoint", EditorFieldKind::String, &[], false),
+                otel_editor_field(
+                    "gen_ai_capture_tool_content",
+                    EditorFieldKind::Boolean,
+                    &[],
+                    false,
+                ),
                 otel_editor_field(
                     "mark_projection",
                     EditorFieldKind::Enum,
@@ -3320,6 +3329,7 @@ fn build_otel_config(
     validate_otel_header_env(index, &section)?;
     validate_otel_batch_config(index, &section)?;
     let mut config = CoreOpenTelemetryConfig::new(section.otel_type, section.endpoint)
+        .with_gen_ai_capture_tool_content(section.gen_ai_capture_tool_content)
         .with_transport(transport)
         .with_service_name(section.service_name)
         .with_timeout(Duration::from_millis(section.timeout_millis))
@@ -3703,6 +3713,7 @@ fn validate_opentelemetry_endpoint_fields(
 ) {
     const ALLOWED: &[&str] = &[
         "type",
+        "gen_ai_capture_tool_content",
         "endpoint",
         "mark_projection",
         "mark_exclude_names",

@@ -75,6 +75,7 @@ function openTelemetryEndpoint(config) {
     resource_attributes: {},
     promote_metadata_prefixes: [],
     promote_resource_metadata_prefixes: [],
+    gen_ai_capture_tool_content: false,
     ...config,
   };
 }

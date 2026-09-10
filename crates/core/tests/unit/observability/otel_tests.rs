@@ -1877,6 +1877,7 @@ fn mapped_aliases_are_typed_and_cannot_replace_projected_span_fields() {
         "mapping-scope",
         OpenTelemetrySubscriberOptions {
             mark_projection: MarkProjection::Tool,
+            gen_ai_capture_tool_content: false,
             mark_exclude_names: vec!["custom.mark".to_string()],
             attribute_mappings: vec![
                 crate::observability::OtlpAttributeMapping::new(
@@ -2478,7 +2479,11 @@ fn gen_ai_projection_emits_only_span_specific_attributes() {
         ),
     ];
     for (scope_type, name, expected) in cases {
-        let event = make_start_event(Uuid::now_v7(), None, name, scope_type, Some(common.clone()));
+        let mut event =
+            make_start_event(Uuid::now_v7(), None, name, scope_type, Some(common.clone()));
+        if let Event::Scope(scope) = &mut event {
+            scope.base.metadata = Some(common.clone());
+        }
         let attributes = crate::observability::otel_genai::start_attributes(&event);
         let actual = attributes
             .iter()
@@ -2513,6 +2518,247 @@ fn gen_ai_projection_emits_only_span_specific_attributes() {
         Some(&"7".to_string())
     );
     assert!(!embed_attributes.contains_key("gen_ai.usage.output_tokens"));
+}
+
+#[test]
+fn gen_ai_tool_content_is_opt_in_and_object_shaped() {
+    use crate::observability::otel_genai::{
+        end_attributes_with_tool_content, start_attributes_with_tool_content,
+    };
+    for (payload, expected) in [
+        (
+            json!({"query": "sanitized"}),
+            Some(json!({"query": "sanitized"})),
+        ),
+        (
+            json!("{\"query\":\"sanitized\"}"),
+            Some(json!({"query": "sanitized"})),
+        ),
+        (json!({}), Some(json!({}))),
+        (json!("plain text"), None),
+        (json!("[1,2]"), None),
+        (json!([1, 2]), None),
+        (json!(null), None),
+        (json!(false), None),
+        (json!(42), None),
+    ] {
+        let start = make_start_event(
+            Uuid::now_v7(),
+            None,
+            "search",
+            ScopeType::Tool,
+            Some(payload.clone()),
+        );
+        let mut end = make_end_event(start.uuid(), None, "search", ScopeType::Tool, Some(payload));
+        for enabled in [false, true] {
+            for (attrs, key) in [
+                (
+                    start_attributes_with_tool_content(&start, enabled),
+                    "gen_ai.tool.call.arguments",
+                ),
+                (
+                    end_attributes_with_tool_content(&end, enabled),
+                    "gen_ai.tool.call.result",
+                ),
+            ] {
+                let attrs = attr_map(&attrs);
+                let actual = attrs
+                    .get(key)
+                    .map(|value| serde_json::from_str::<Json>(value).unwrap());
+                assert_eq!(actual, if enabled { expected.clone() } else { None });
+            }
+        }
+        if let Event::Scope(scope) = &mut end {
+            scope.base.metadata = Some(json!({"otel.status_code": "ERROR"}));
+        }
+        let attrs = attr_map(&end_attributes_with_tool_content(&end, true));
+        assert!(attrs.contains_key("error.type"));
+        assert!(!attrs.contains_key("gen_ai.tool.call.result"));
+    }
+}
+
+#[test]
+fn gen_ai_tool_identity_ignores_payload_keys_and_blank_metadata() {
+    let mut event = make_start_event(
+        Uuid::now_v7(),
+        None,
+        "search",
+        ScopeType::Tool,
+        Some(json!({
+            "gen_ai.tool.name": "spoofed", "description": "private argument", "tool_type": "spoofed",
+            "tool_call_id": "spoofed", "gen_ai.agent.name": "spoofed"
+        })),
+    );
+    let attrs = attr_map(&crate::observability::otel_genai::start_attributes(&event));
+    assert_eq!(
+        attrs.get("gen_ai.tool.name").map(String::as_str),
+        Some("search")
+    );
+    assert_eq!(attrs.len(), 2);
+    if let Event::Scope(scope) = &mut event {
+        scope.base.metadata = Some(json!({
+            "gen_ai.tool.name": " ", "gen_ai.tool.call.id": "", "tool_call_id": "call-1",
+            "gen_ai.tool.type": false, "tool_type": "function", "tool_description": "Search docs",
+            "gen_ai.agent.name": "researcher"
+        }));
+    }
+    let attrs = attr_map(&crate::observability::otel_genai::start_attributes(&event));
+    assert_eq!(
+        attrs.get("gen_ai.tool.name").map(String::as_str),
+        Some("search")
+    );
+    assert_eq!(
+        attrs.get("gen_ai.tool.call.id").map(String::as_str),
+        Some("call-1")
+    );
+    assert_eq!(
+        attrs.get("gen_ai.tool.type").map(String::as_str),
+        Some("function")
+    );
+    assert_eq!(
+        attrs.get("gen_ai.tool.description").map(String::as_str),
+        Some("Search docs")
+    );
+    assert_eq!(
+        attrs.get("gen_ai.agent.name").map(String::as_str),
+        Some("researcher")
+    );
+}
+
+#[test]
+fn gen_ai_tool_content_options_reach_the_subscriber() {
+    for enabled in [false, true] {
+        let (provider, exporter) = make_provider();
+        let subscriber = OpenTelemetrySubscriber::from_tracer_provider_with_type_and_options(
+            provider,
+            "tool-content",
+            OpenTelemetryType::GenAi,
+            OpenTelemetrySubscriberOptions {
+                gen_ai_capture_tool_content: enabled,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let id = Uuid::now_v7();
+        let start = make_start_event(
+            id,
+            None,
+            "search",
+            ScopeType::Tool,
+            Some(json!({"q": "docs"})),
+        );
+        let end = make_end_event(
+            id,
+            None,
+            "search",
+            ScopeType::Tool,
+            Some(json!({"hits": []})),
+        );
+        (subscriber.inner.subscriber)(&start);
+        (subscriber.inner.subscriber)(&end);
+        subscriber.force_flush().unwrap();
+        let spans = exporter.get_finished_spans().unwrap();
+        assert_eq!(spans.len(), 1);
+        let attrs = attr_map(&spans[0].attributes);
+        assert_eq!(attrs.contains_key("gen_ai.tool.call.arguments"), enabled);
+        assert_eq!(attrs.contains_key("gen_ai.tool.call.result"), enabled);
+        subscriber.shutdown().unwrap();
+    }
+}
+
+#[test]
+fn gen_ai_tool_definitions_use_minimal_standard_schema() {
+    let request = serde_json::from_value::<AnnotatedLlmRequest>(json!({
+        "messages": [],
+        "tools": [
+            {"type": "function", "function": {
+                "name": "search", "description": "large private description",
+                "parameters": {"type": "object"}
+            }},
+            {"type": "provider_native", "provider": "anthropic", "kind": "web_search",
+             "value": {"type": "web_search_20250305", "name": "web_search", "private": "omitted"}},
+            {"type": "provider_native", "provider": "openai", "kind": "web_search",
+             "value": {"type": "web_search"}},
+            {"type": "function", "function": {"name": " "}}
+        ]
+    }))
+    .unwrap();
+    let event = make_scope_event_with_profile(
+        ScopeCategory::Start,
+        Uuid::now_v7(),
+        None,
+        "chat",
+        ScopeType::Llm,
+        None,
+        Some(
+            CategoryProfile::builder()
+                .annotated_request(Arc::new(request))
+                .build(),
+        ),
+    );
+    let enabled = attr_map(
+        &crate::observability::otel_genai::start_attributes_with_tool_content(&event, true),
+    );
+    let definitions: Json =
+        serde_json::from_str(enabled.get("gen_ai.tool.definitions").unwrap()).unwrap();
+    assert_eq!(
+        definitions,
+        json!([
+            {"type": "function", "name": "search"},
+            {"type": "web_search_20250305", "name": "web_search"}
+        ])
+    );
+    assert!(
+        !attr_map(&crate::observability::otel_genai::start_attributes(&event))
+            .contains_key("gen_ai.tool.definitions")
+    );
+}
+
+#[test]
+fn gen_ai_tool_completion_fills_missing_metadata_without_replacing_start_identity() {
+    for initial_id in [None, Some("typed-id")] {
+        let (provider, exporter) = make_provider();
+        let subscriber = OpenTelemetrySubscriber::from_tracer_provider_with_type(
+            provider,
+            "tool-identity",
+            OpenTelemetryType::GenAi,
+        );
+        let id = Uuid::now_v7();
+        let start = make_scope_event_with_profile(
+            ScopeCategory::Start,
+            id,
+            None,
+            "search",
+            ScopeType::Tool,
+            None,
+            initial_id.map(|id| CategoryProfile::builder().tool_call_id(id).build()),
+        );
+        let mut end = make_end_event(id, None, "end-label", ScopeType::Tool, None);
+        if let Event::Scope(scope) = &mut end {
+            scope.base.metadata = Some(json!({
+                "tool_call_id": "late-id", "tool_description": "Search docs",
+                "gen_ai.tool.name": "late-name"
+            }));
+        }
+        (subscriber.inner.subscriber)(&start);
+        (subscriber.inner.subscriber)(&end);
+        subscriber.force_flush().unwrap();
+        let spans = exporter.get_finished_spans().unwrap();
+        let attrs = attr_map(&spans[0].attributes);
+        assert_eq!(
+            attrs.get("gen_ai.tool.call.id").map(String::as_str),
+            Some(initial_id.unwrap_or("late-id"))
+        );
+        assert_eq!(
+            attrs.get("gen_ai.tool.description").map(String::as_str),
+            Some("Search docs")
+        );
+        assert_eq!(
+            attrs.get("gen_ai.tool.name").map(String::as_str),
+            Some("search")
+        );
+        subscriber.shutdown().unwrap();
+    }
 }
 
 #[test]
@@ -2957,13 +3203,10 @@ fn gen_ai_projection_prefers_standard_names_and_normalized_provider_details() {
         "invoke_agent semantic-agent"
     );
 
-    let tool = make_start_event(
-        Uuid::now_v7(),
-        None,
-        "fallback-tool",
-        ScopeType::Tool,
-        Some(json!({"gen_ai.tool.name": "semantic-tool"})),
-    );
+    let mut tool = make_start_event(Uuid::now_v7(), None, "fallback-tool", ScopeType::Tool, None);
+    if let Event::Scope(scope) = &mut tool {
+        scope.base.metadata = Some(json!({"gen_ai.tool.name": "semantic-tool"}));
+    }
     assert_eq!(
         crate::observability::otel_genai::span_name(&tool),
         "execute_tool semantic-tool"

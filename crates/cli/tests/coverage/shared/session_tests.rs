@@ -1020,6 +1020,80 @@ async fn nests_agent_subagent_and_tool_lifecycle() {
 }
 
 #[tokio::test]
+async fn claude_tool_start_carries_gen_ai_execution_metadata() {
+    let session_id = "claude-gen-ai-tool-metadata";
+    let subscriber_name = "claude-gen-ai-tool-metadata-test";
+    let captured = Arc::new(StdMutex::new(Vec::<Event>::new()));
+    let events = Arc::clone(&captured);
+    register_filtered_session_subscriber(
+        subscriber_name,
+        tracked_sessions(&[session_id]),
+        Arc::new(move |event| events.lock().unwrap().push(event.clone())),
+    );
+    let manager = SessionManager::new(session_test_config());
+    let tool = ToolEvent {
+        session_id: session_id.into(),
+        agent_kind: AgentKind::ClaudeCode,
+        event_name: "PreToolUse".into(),
+        tool_call_id: "gen-ai-call-1".into(),
+        tool_name: "Bash".into(),
+        subagent_id: None,
+        arguments: json!({"command": "pwd", "description": "per-call description"}),
+        result: Value::Null,
+        status: None,
+        payload: json!({}),
+        metadata: json!({}),
+    };
+    manager
+        .apply_events(
+            &HeaderMap::new(),
+            vec![
+                NormalizedEvent::AgentStarted(SessionEvent {
+                    session_id: session_id.into(),
+                    agent_kind: AgentKind::ClaudeCode,
+                    event_name: "SessionStart".into(),
+                    payload: json!({}),
+                    metadata: json!({}),
+                }),
+                NormalizedEvent::ToolStarted(tool.clone()),
+                NormalizedEvent::ToolEnded(ToolEvent {
+                    event_name: "PostToolUse".into(),
+                    result: json!({"stdout": "/tmp"}),
+                    status: Some("success".into()),
+                    ..tool
+                }),
+                NormalizedEvent::AgentEnded(SessionEvent {
+                    session_id: session_id.into(),
+                    agent_kind: AgentKind::ClaudeCode,
+                    event_name: "SessionEnd".into(),
+                    payload: json!({}),
+                    metadata: json!({}),
+                }),
+            ],
+        )
+        .await
+        .unwrap();
+    flush_subscribers().unwrap();
+    let events = captured.lock().unwrap();
+    let start = events
+        .iter()
+        .find(|event| {
+            event.tool_call_id() == Some("gen-ai-call-1")
+                && event.scope_category() == Some(ScopeCategory::Start)
+        })
+        .unwrap();
+    let metadata = start.metadata().unwrap();
+    assert_eq!(metadata["gen_ai.tool.type"], "function");
+    assert_eq!(
+        metadata["gen_ai.agent.name"],
+        AgentKind::ClaudeCode.as_str()
+    );
+    assert!(metadata.get("gen_ai.tool.description").is_none());
+    drop(events);
+    assert!(deregister_subscriber(subscriber_name).unwrap());
+}
+
+#[tokio::test]
 async fn parallel_subagents_are_siblings_under_turn_scope() {
     let manager = SessionManager::new(session_test_config());
     manager

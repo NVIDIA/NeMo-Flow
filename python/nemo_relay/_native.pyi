@@ -1155,6 +1155,7 @@ class OpenTelemetryConfig:
     mark_exclude_names: list[str]
     promote_metadata_prefixes: list[str]
     promote_resource_metadata_prefixes: list[str]
+    gen_ai_capture_tool_content: bool
 
     def __init__(
         self,

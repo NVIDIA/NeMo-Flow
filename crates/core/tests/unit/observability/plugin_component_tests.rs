@@ -833,6 +833,7 @@ fn default_config_and_component_conversion_cover_public_shape() {
     let otel = OpenTelemetrySectionConfig {
         enabled: true,
         endpoints: vec![OpenTelemetryEndpointConfig {
+            gen_ai_capture_tool_content: false,
             otel_type: OpenTelemetryType::Full,
             endpoint: "http://localhost:4318/v1/traces".to_string(),
             transport: default_otlp_transport(),
@@ -1023,6 +1024,7 @@ fn opentelemetry_endpoint_header_env_is_resolved_and_snapshotted() {
     let config = build_otel_config(
         0,
         OpenTelemetryEndpointConfig {
+            gen_ai_capture_tool_content: false,
             otel_type: OpenTelemetryType::GenAi,
             endpoint: "http://localhost:4318/v1/traces".to_string(),
             transport: default_otlp_transport(),
@@ -1051,8 +1053,40 @@ fn opentelemetry_endpoint_header_env_is_resolved_and_snapshotted() {
     unsafe { std::env::remove_var(variable) };
 }
 
+#[test]
+fn gen_ai_tool_content_opt_in_is_validated_and_reaches_exporter_config() {
+    for enabled in [false, true] {
+        let endpoint_json = json!({
+            "type": "gen_ai", "endpoint": "http://localhost:4318/v1/traces",
+            "gen_ai_capture_tool_content": enabled
+        });
+        let config = plugin_config(json!({
+            "version": 4,
+            "opentelemetry": {"enabled": true, "endpoints": [endpoint_json.clone()]}
+        }));
+        assert!(!test_validate_static_plugin_config(&config).has_errors());
+        let endpoint: OpenTelemetryEndpointConfig = serde_json::from_value(endpoint_json).unwrap();
+        assert_eq!(
+            build_otel_config(0, endpoint)
+                .unwrap()
+                .gen_ai_capture_tool_content(),
+            enabled
+        );
+    }
+    let endpoint: OpenTelemetryEndpointConfig = serde_json::from_value(json!({
+        "type": "gen_ai", "endpoint": "http://localhost:4318/v1/traces"
+    }))
+    .unwrap();
+    assert!(
+        !build_otel_config(0, endpoint)
+            .unwrap()
+            .gen_ai_capture_tool_content()
+    );
+}
+
 fn test_opentelemetry_endpoint() -> OpenTelemetryEndpointConfig {
     OpenTelemetryEndpointConfig {
+        gen_ai_capture_tool_content: false,
         otel_type: OpenTelemetryType::Full,
         endpoint: "http://localhost:4318/v1/traces".to_string(),
         transport: default_otlp_transport(),

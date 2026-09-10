@@ -235,6 +235,7 @@ class OpenTelemetryEndpointConfig:
     completed_span_context_ttl_millis: int | None = None
     promote_metadata_prefixes: list[str] = field(default_factory=list)
     promote_resource_metadata_prefixes: list[str] = field(default_factory=list)
+    gen_ai_capture_tool_content: bool = False
 
     def to_dict(self) -> JsonObject:
         """Serialize this endpoint to the canonical plugin shape."""
@@ -247,6 +248,7 @@ class OpenTelemetryEndpointConfig:
                 "attribute_mappings": self.attribute_mappings,
                 "promote_metadata_prefixes": self.promote_metadata_prefixes,
                 "promote_resource_metadata_prefixes": self.promote_resource_metadata_prefixes,
+                "gen_ai_capture_tool_content": self.gen_ai_capture_tool_content,
                 "transport": self.transport,
                 "service_name": self.service_name,
                 "service_namespace": self.service_namespace,

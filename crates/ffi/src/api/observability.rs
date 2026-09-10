@@ -951,6 +951,56 @@ pub unsafe extern "C" fn nemo_relay_otel_subscriber_create_with_projection_optio
     completed_span_context_ttl_millis: u64,
     out: *mut *mut FfiOpenTelemetrySubscriber,
 ) -> NemoRelayStatus {
+    unsafe {
+        nemo_relay_otel_subscriber_create_with_projection_options_v5(
+            otel_type,
+            transport,
+            endpoint,
+            headers_json,
+            header_env_json,
+            resource_attributes_json,
+            service_name,
+            service_namespace,
+            service_version,
+            instrumentation_scope,
+            timeout_millis,
+            mark_projection,
+            mark_exclude_names_json,
+            attribute_mappings_json,
+            promote_metadata_prefixes_json,
+            completed_span_context_ttl_millis,
+            false,
+            out,
+        )
+    }
+}
+
+/// Creates a typed exporter with an explicit opt-in for sanitized GenAI tool content.
+///
+/// # Safety
+/// Any non-null C strings must be valid and `out` must be non-null.
+#[allow(clippy::too_many_arguments)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nemo_relay_otel_subscriber_create_with_projection_options_v5(
+    otel_type: *const c_char,
+    transport: *const c_char,
+    endpoint: *const c_char,
+    headers_json: *const c_char,
+    header_env_json: *const c_char,
+    resource_attributes_json: *const c_char,
+    service_name: *const c_char,
+    service_namespace: *const c_char,
+    service_version: *const c_char,
+    instrumentation_scope: *const c_char,
+    timeout_millis: u64,
+    mark_projection: *const c_char,
+    mark_exclude_names_json: *const c_char,
+    attribute_mappings_json: *const c_char,
+    promote_metadata_prefixes_json: *const c_char,
+    completed_span_context_ttl_millis: u64,
+    gen_ai_capture_tool_content: bool,
+    out: *mut *mut FfiOpenTelemetrySubscriber,
+) -> NemoRelayStatus {
     clear_last_error();
     if let Err(status) = required_out_ptr(out) {
         return status;
@@ -976,6 +1026,7 @@ pub unsafe extern "C" fn nemo_relay_otel_subscriber_create_with_projection_optio
         return NemoRelayStatus::InvalidArg;
     }
     let config = config
+        .with_gen_ai_capture_tool_content(gen_ai_capture_tool_content)
         .with_mark_projection(match parse_mark_projection(mark_projection) {
             Ok(value) => value,
             Err(status) => return status,

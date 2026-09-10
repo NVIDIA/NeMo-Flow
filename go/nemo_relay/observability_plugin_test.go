@@ -78,6 +78,7 @@ func TestObservabilityConfigHelpers(t *testing.T) {
 	}
 	otel.Endpoints[0].HeaderEnv["authorization"] = "OTEL_AUTHORIZATION"
 	otel.Endpoints[0].PromoteMetadataPrefixes = []string{"nv."}
+	otel.Endpoints[0].GenAiCaptureToolContent = true
 	maxQueueSize := uint64(4096)
 	maxExportBatchSize := uint64(256)
 	scheduledDelayMillis := uint64(750)
@@ -161,6 +162,9 @@ func assertWrappedObservabilityConfig(t *testing.T, wrapped PluginComponentSpec)
 	}
 	assertWrappedAtifStorageConfig(t, wrapped.Config["atif"].(map[string]any))
 	otelEndpoints := wrapped.Config["opentelemetry"].(map[string]any)["endpoints"].([]any)
+	if otelEndpoints[0].(map[string]any)["gen_ai_capture_tool_content"] != true {
+		t.Fatal("expected GenAI tool content opt-in to survive serialization")
+	}
 	if otelEndpoints[0].(map[string]any)["type"] != "full" {
 		t.Fatalf("expected typed OpenTelemetry endpoint in serialized config: %#v", wrapped.Config)
 	}

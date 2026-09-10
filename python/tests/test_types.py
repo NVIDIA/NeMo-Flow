@@ -978,18 +978,24 @@ class TestOpenTelemetryTypes:
     def test_gen_ai_subscriber_exports_standardized_agent_span(self):
         with _OtelCollector() as collector:
             config = OpenTelemetryConfig("gen_ai", collector.endpoint)
+            assert config.gen_ai_capture_tool_content is False
+            config.gen_ai_capture_tool_content = True
             subscriber = OpenTelemetrySubscriber(config)
             subscriber_name = f"py_gen_ai_e2e_{uuid4().hex}"
             subscriber.register(subscriber_name)
 
             try:
                 handle = scope.push("research-agent", ScopeType.Agent)
+                tool = scope.push("search", ScopeType.Tool, input={"query": "docs"})
+                scope.pop(tool, output={"hits": []})
                 scope.pop(handle)
 
                 subscriber.force_flush()
                 request = collector.wait_for_request()
                 assert request["path"] == "/v1/traces"
                 assert b"invoke_agent research-agent" in request["body"]
+                assert b"gen_ai.tool.call.arguments" in request["body"]
+                assert b"gen_ai.tool.call.result" in request["body"]
                 assert b"gen_ai.operation.name" in request["body"]
                 assert b"nemo_relay." not in request["body"]
             finally:

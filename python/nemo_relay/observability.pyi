@@ -98,6 +98,7 @@ class OpenTelemetryEndpointConfig:
     completed_span_context_ttl_millis: int | None = ...
     promote_metadata_prefixes: list[str] = field(default_factory=list)
     promote_resource_metadata_prefixes: list[str] = field(default_factory=list)
+    gen_ai_capture_tool_content: bool = False
     def to_dict(self) -> JsonObject: ...
 
 @dataclass(slots=True)

@@ -234,6 +234,7 @@ fn trace_endpoint_log_identity(endpoint: &str) -> String {
 /// Configuration for the OpenTelemetry subscriber.
 #[derive(Debug, Clone)]
 pub struct OpenTelemetryConfig {
+    gen_ai_capture_tool_content: bool,
     otel_type: OpenTelemetryType,
     endpoint: String,
     headers: HashMap<String, String>,
@@ -259,6 +260,7 @@ pub struct OpenTelemetryConfig {
 impl OpenTelemetryConfig {
     fn default_values() -> Self {
         Self {
+            gen_ai_capture_tool_content: false,
             otel_type: OpenTelemetryType::Full,
             endpoint: String::new(),
             headers: HashMap::new(),
@@ -315,6 +317,19 @@ impl OpenTelemetryConfig {
     pub fn with_endpoint(mut self, endpoint: impl Into<String>) -> Self {
         self.endpoint = endpoint.into();
         self
+    }
+
+    /// Opts into sanitized GenAI tool arguments, successful object results,
+    /// and minimal inference tool definitions. Defaults to false; other
+    /// projections are unaffected. Credential removal and sanitizers still apply.
+    pub fn with_gen_ai_capture_tool_content(mut self, enabled: bool) -> Self {
+        self.gen_ai_capture_tool_content = enabled;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn gen_ai_capture_tool_content(&self) -> bool {
+        self.gen_ai_capture_tool_content
     }
 
     /// Selects the OTLP transport.
@@ -499,6 +514,8 @@ pub struct OpenTelemetrySubscriber {
 /// Options for constructing an OpenTelemetry subscriber from an existing tracer provider.
 #[derive(Debug, Clone)]
 pub struct OpenTelemetrySubscriberOptions {
+    /// Opt into sanitized tool content on the GenAI projection only.
+    pub gen_ai_capture_tool_content: bool,
     /// How mark events are projected into the trace.
     pub mark_projection: MarkProjection,
     /// Mark names excluded from tool projection.
@@ -514,6 +531,7 @@ pub struct OpenTelemetrySubscriberOptions {
 impl Default for OpenTelemetrySubscriberOptions {
     fn default() -> Self {
         Self {
+            gen_ai_capture_tool_content: false,
             mark_projection: MarkProjection::default(),
             mark_exclude_names: default_mark_exclude_names(),
             attribute_mappings: Vec::new(),
@@ -602,6 +620,7 @@ impl OpenTelemetrySubscriber {
             config.attribute_mappings,
             config.promote_metadata_prefixes,
             config.completed_span_context_ttl,
+            config.gen_ai_capture_tool_content,
             Some(runtime),
             Some(owned_config),
         ))
@@ -635,6 +654,7 @@ impl OpenTelemetrySubscriber {
             Vec::new(),
             Vec::new(),
             DEFAULT_COMPLETED_SPAN_CONTEXT_TTL,
+            false,
             None,
             None,
         )
@@ -684,6 +704,7 @@ impl OpenTelemetrySubscriber {
             options.attribute_mappings,
             options.promote_metadata_prefixes,
             options.completed_span_context_ttl,
+            options.gen_ai_capture_tool_content,
             None,
             None,
         ))
@@ -714,6 +735,7 @@ impl OpenTelemetrySubscriber {
             options.attribute_mappings,
             options.promote_metadata_prefixes,
             options.completed_span_context_ttl,
+            options.gen_ai_capture_tool_content,
             None,
             None,
         ))
@@ -729,6 +751,7 @@ impl OpenTelemetrySubscriber {
         attribute_mappings: Vec<OtlpAttributeMapping>,
         promote_metadata_prefixes: Vec<String>,
         completed_span_context_ttl: Duration,
+        gen_ai_capture_tool_content: bool,
         runtime: Option<ExporterRuntime>,
         owned_config: Option<OpenTelemetryConfig>,
     ) -> Self {
@@ -737,7 +760,7 @@ impl OpenTelemetrySubscriber {
             .map(|runtime| runtime.runtime_diagnostics.clone())
             .unwrap_or_else(|| SignalRuntimeDiagnostics::new(None));
         let dynamic_pipelines = Arc::new(Mutex::new(HashMap::new()));
-        let processor = Arc::new(Mutex::new(
+        let mut processor =
             OtelEventProcessor::new_with_mark_projection_and_exclusions_and_mappings_and_runtime_diagnostics_with_ttl(
                 provider.clone(),
                 instrumentation_scope,
@@ -750,8 +773,9 @@ impl OpenTelemetrySubscriber {
                 runtime_diagnostics.clone(),
                 owned_config,
                 Arc::clone(&dynamic_pipelines),
-            ),
-        ));
+            );
+        processor.gen_ai_capture_tool_content = gen_ai_capture_tool_content;
+        let processor = Arc::new(Mutex::new(processor));
         let processor_for_callback = Arc::clone(&processor);
         let pipelines_for_callback = Arc::clone(&dynamic_pipelines);
         let subscriber: EventSubscriberFn = Arc::new(move |event: &Event| {
@@ -1334,6 +1358,7 @@ pub(super) struct ActiveSpan {
 }
 
 pub(super) struct OtelEventProcessor {
+    gen_ai_capture_tool_content: bool,
     pub(super) active_spans: HashMap<Uuid, ActiveSpan>,
     pub(super) completed_span_contexts: HashMap<Uuid, CompletedSpanContext>,
     pub(super) completed_span_expiry_index: BTreeMap<DateTime<Utc>, HashSet<Uuid>>,
@@ -1577,6 +1602,7 @@ impl OtelEventProcessor {
             .unwrap_or_default();
         Self {
             active_spans: HashMap::new(),
+            gen_ai_capture_tool_content: false,
             completed_span_contexts: HashMap::new(),
             completed_span_expiry_index: BTreeMap::new(),
             #[cfg(test)]
@@ -1746,7 +1772,10 @@ impl OtelEventProcessor {
         });
         let mut attributes = match self.otel_type {
             OpenTelemetryType::Full => start_attributes(event),
-            OpenTelemetryType::GenAi => super::otel_genai::start_attributes(event),
+            OpenTelemetryType::GenAi => super::otel_genai::start_attributes_with_tool_content(
+                event,
+                self.gen_ai_capture_tool_content,
+            ),
             OpenTelemetryType::OpenInference => super::openinference::start_attributes(event),
         };
         if self.otel_type == OpenTelemetryType::Full && start_model_name.is_some() {
@@ -1815,10 +1844,29 @@ impl OtelEventProcessor {
         super::set_span_status_from_event_metadata(&mut active_span.span, event);
         let mut attributes = match self.otel_type {
             OpenTelemetryType::Full => end_attributes(event),
-            OpenTelemetryType::GenAi => super::otel_genai::end_attributes(event),
+            OpenTelemetryType::GenAi => super::otel_genai::end_attributes_with_tool_content(
+                event,
+                self.gen_ai_capture_tool_content,
+            ),
             OpenTelemetryType::OpenInference => super::openinference::end_attributes(event),
         };
         let is_error = metadata_string(event, "otel.status_code") == Some("ERROR");
+        if self.otel_type == OpenTelemetryType::GenAi && event.scope_type() == Some(ScopeType::Tool)
+        {
+            // Fill metadata discovered at completion, but preserve identity
+            // already selected at start (especially a typed tool-call ID).
+            attributes.retain(|attribute| {
+                !matches!(
+                    attribute.key.as_str(),
+                    "gen_ai.tool.call.id"
+                        | "gen_ai.tool.type"
+                        | "gen_ai.tool.description"
+                        | "gen_ai.agent.name"
+                ) || !active_span
+                    .projection_attribute_keys
+                    .contains(attribute.key.as_str())
+            });
+        }
         let explicit_error_type = metadata_string(event, "error.type");
         let error_type = is_error.then(|| {
             explicit_error_type
