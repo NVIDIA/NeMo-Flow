@@ -778,6 +778,157 @@ fn request_schema_fixture_round_trips_ordered_native_items_and_surgical_edits() 
 }
 
 #[test]
+fn codex_namespaced_function_output_without_call_id_round_trips_losslessly() {
+    let codec = OpenAIResponsesCodec;
+    let native_output = json!({
+        "type": "function_call_output",
+        "namespace": "codex_app",
+        "name": "automation_update",
+        "output": {"status": "created"},
+        "future": {"preserve": true}
+    });
+    let original = make_request(json!({
+        "model": "gpt-5",
+        "client_metadata": {"x-codex-installation-id": "installation-1"},
+        "input": [
+            {"type": "message", "role": "user", "content": "Create an automation."},
+            native_output.clone()
+        ]
+    }));
+
+    let mut annotated = codec.decode(&original).unwrap();
+    assert!(matches!(
+        &annotated.messages[1],
+        Message::ProviderNative { provider, kind, value }
+            if provider == "openai_responses"
+                && kind == "function_call_output"
+                && value == &native_output
+    ));
+    assert_eq!(codec.encode(&annotated, &original).unwrap(), original);
+
+    let mut explicit_null = original.clone();
+    explicit_null.content["input"][1]["call_id"] = Json::Null;
+    let explicit_null_annotated = codec.decode(&explicit_null).unwrap();
+    assert!(matches!(
+        &explicit_null_annotated.messages[1],
+        Message::ProviderNative { value, .. } if value.get("call_id") == Some(&Json::Null)
+    ));
+    assert_eq!(
+        codec
+            .encode(&explicit_null_annotated, &explicit_null)
+            .unwrap(),
+        explicit_null
+    );
+
+    let Message::User {
+        content: MessageContent::Text(text),
+        ..
+    } = &mut annotated.messages[0]
+    else {
+        panic!("expected portable Responses user message");
+    };
+    *text = "Create a daily automation.".into();
+    let encoded = codec.encode(&annotated, &original).unwrap();
+    assert_eq!(encoded.content["input"][1], native_output);
+    assert_eq!(
+        encoded.content["input"][0]["content"],
+        json!("Create a daily automation.")
+    );
+}
+
+#[test]
+fn unpaired_function_outputs_remain_strict_outside_codex_namespaced_items() {
+    let codec = OpenAIResponsesCodec;
+    let codex_metadata = json!({"x-codex-installation-id": "installation-1"});
+    let invalid_items = [
+        (
+            None,
+            json!({
+                "type": "function_call_output",
+                "namespace": "codex_app",
+                "name": "automation_update",
+                "output": "ok"
+            }),
+        ),
+        (
+            Some(json!({"x-codex-installation-id": ""})),
+            json!({
+                "type": "function_call_output",
+                "namespace": "codex_app",
+                "name": "automation_update",
+                "output": "ok"
+            }),
+        ),
+        (
+            Some(codex_metadata.clone()),
+            json!({"type": "function_call_output", "output": "ok"}),
+        ),
+        (
+            Some(codex_metadata.clone()),
+            json!({
+                "type": "function_call_output",
+                "namespace": "codex_app",
+                "name": "",
+                "output": "ok"
+            }),
+        ),
+        (
+            Some(codex_metadata.clone()),
+            json!({
+                "type": "function_call_output",
+                "namespace": "",
+                "name": "automation_update",
+                "output": "ok"
+            }),
+        ),
+        (
+            Some(codex_metadata.clone()),
+            json!({
+                "type": "function_call_output",
+                "namespace": 7,
+                "name": "automation_update",
+                "output": "ok"
+            }),
+        ),
+        (
+            Some(codex_metadata.clone()),
+            json!({
+                "type": "function_call_output",
+                "namespace": "codex_app",
+                "name": false,
+                "output": "ok"
+            }),
+        ),
+        (
+            Some(codex_metadata.clone()),
+            json!({
+                "type": "function_call_output",
+                "namespace": "codex_app",
+                "name": "automation_update",
+                "call_id": 7,
+                "output": "ok"
+            }),
+        ),
+        (
+            Some(codex_metadata),
+            json!({
+                "type": "function_call_output",
+                "namespace": "codex_app",
+                "name": "automation_update"
+            }),
+        ),
+    ];
+
+    for (client_metadata, item) in invalid_items {
+        let mut content = json!({"model": "gpt-5", "input": [item]});
+        if let Some(client_metadata) = client_metadata {
+            content["client_metadata"] = client_metadata;
+        }
+        assert!(codec.decode(&make_request(content)).is_err());
+    }
+}
+
+#[test]
 fn responses_tool_edits_preserve_unknown_fields_and_explicit_nulls() {
     let codec = OpenAIResponsesCodec;
     let original = make_request(json!({
@@ -1189,7 +1340,7 @@ fn assert_responses_decode_component_branches() {
         json!({"type": "function_call_output", "call_id": "call"}),
         json!({"type": "function_call_output", "id": 7, "call_id": "call", "output": "ok"}),
     ] {
-        assert!(decode_responses_input_item(&invalid).is_err());
+        assert!(decode_responses_input_item(&invalid, false).is_err());
     }
     for portable in [
         json!({"type": "message", "role": "user", "content": "u"}),
@@ -1200,7 +1351,7 @@ fn assert_responses_decode_component_branches() {
         json!({"type": "function_call_output", "id": null, "call_id": "call", "output": "ok"}),
     ] {
         assert!(!matches!(
-            decode_responses_input_item(&portable).unwrap(),
+            decode_responses_input_item(&portable, false).unwrap(),
             Message::ProviderNative { .. }
         ));
     }
@@ -1210,7 +1361,7 @@ fn assert_responses_decode_component_branches() {
         json!({"type": "reasoning", "summary": []}),
     ] {
         assert!(matches!(
-            decode_responses_input_item(&native).unwrap(),
+            decode_responses_input_item(&native, false).unwrap(),
             Message::ProviderNative { .. }
         ));
     }

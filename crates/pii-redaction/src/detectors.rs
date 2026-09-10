@@ -283,13 +283,25 @@ fn mask_url(text: &str, mask_char: &str) -> String {
     };
     let prefix_end = scheme_idx + 3;
     let remainder = &text[prefix_end..];
-    let Some(path_idx) = remainder.find('/') else {
-        return text.to_string();
+    let (authority, has_suffix) = remainder
+        .find(['/', '\\', '?', '#'])
+        .map_or((remainder, false), |suffix_idx| {
+            (&remainder[..suffix_idx], true)
+        });
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    if host.is_empty() {
+        return mask_text(text, mask_char, 0, 0);
     };
 
     let mut output = String::with_capacity(text.len());
-    output.push_str(&text[..prefix_end + path_idx + 1]);
-    output.push_str(mask_char);
+    output.push_str(&text[..prefix_end]);
+    output.push_str(host);
+    if has_suffix {
+        output.push('/');
+        output.push_str(mask_char);
+    }
     output
 }
 

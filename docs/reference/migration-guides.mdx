@@ -6,12 +6,46 @@ position: 6
 {/* SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0 */}
 
-Use this page to plan an upgrade to NeMo Relay 0.9. It will collect required
-upgrade actions as they are identified during the 0.9 development cycle.
+Use this page to plan an upgrade to NeMo Relay 0.9.
 
 ## Upgrade to NeMo Relay 0.9
 
-No migration actions have been recorded for NeMo Relay 0.9 yet.
+### Plugin initialization and validation has unified APIs
+
+Plugin-host APIs changed in NeMo Relay 0.9. Earlier global initialization,
+validation, report, clear, and dynamic activation-spec APIs are removed.
+
+Use [Configure and Initialize Plugins](/configure-plugins/initialize-plugins)
+to migrate to `initialize`, `validate`, and exact validation. Runtimes are
+expected to keep the returned activation handle for the full plugin lifetime
+and close it during shutdown.
+
+#### Python-specific Errors
+
+`nemo_relay.plugin.initialize()` and `nemo_relay.plugin.activate()` now raise
+`ValueError` when static plugin configuration is invalid, and
+`FileNotFoundError` when a referenced plugin configuration or resource is
+unavailable. Earlier releases surfaced these failures as `RuntimeError`.
+Update exception handlers accordingly. Use `nemo_relay.plugin.validate()` or
+`nemo_relay.plugin.validate_exact()` to inspect static configuration diagnostics
+without activating plugins.
+
+### Dynamic-plugin attestation is enforced by the core host
+
+NeMo Relay 0.9 evaluates dynamic-plugin attestation in the core host for every
+embedding API, not only through CLI lifecycle commands. When
+`[plugins.policy.defaults]` omits these fields, the effective policy is
+`startup = "required"` and `attestation = "signature_required"`.
+
+An unsigned plugin that activated on 0.8 can therefore be refused during 0.9
+startup. Sign its artifact and configure `trusted_public_keys`, or explicitly
+set `attestation = "integrity_only"` or `"signature_if_present"` under
+`[plugins.policy.defaults]` when that trust posture is appropriate. Validate
+the resolved policy and artifact evidence before deployment with
+`nemo-relay plugins validate <plugin-id>`.
+
+`integrity_only` skips signature verification only. It still requires a valid
+`source.artifact` and matching `integrity.sha256` digest.
 
 ## Related Release Information
 

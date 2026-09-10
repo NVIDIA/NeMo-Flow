@@ -316,7 +316,7 @@ Use the following procedure to prove that validation remains separate from activ
    `list_plugin_kinds`, Python uses `list_kinds`, and Node.js uses `listKinds`. The kind
    should appear even though no component is active.
 2. Construct a component with `enabled = false` and `requests.mode = "invalid"`. Call
-   `validate_plugin_config`, `plugin.validate`, or `plugin.validate`. Confirm the report
+   Rust `validate`, Python `plugin.validate`, or Node.js `plugin.validate`. Confirm the report
    contains `documentation-plugin.unsupported_mode` and that the active report remains
    unchanged.
 3. Correct the mode, give `requests.priority` a string, and confirm the error identifies

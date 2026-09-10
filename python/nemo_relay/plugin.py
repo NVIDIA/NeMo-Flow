@@ -140,6 +140,8 @@ class PluginHostReport(TypedDict):
 
     config: ConfigReport
     dynamic_plugins: list[DynamicPluginValidationReport]
+    config_paths: list[str]
+    resolved_config: JsonObject
 
 
 DynamicPluginKind = Literal["rust_dynamic", "worker"]
@@ -447,17 +449,24 @@ async def initialize(
 ) -> PluginHostActivation:
     """Initialize the core-owned static and dynamic plugin host.
 
-    Programmatic configuration is the lowest-precedence layer. An optional
-    explicit ``plugins.toml`` replaces user-file discovery, and the system
-    file overlays either source. The returned handle owns every activated
-    plugin.
+    An optional explicit ``plugins.toml`` replaces user-file discovery. Relay
+    merges the selected file with the system file, then applies programmatic
+    configuration. The returned handle owns every activated plugin.
 
     Args:
-        config: Lowest-precedence programmatic plugin configuration.
+        config: Programmatic plugin configuration. It overrides file values.
         additional_plugins_toml: Optional explicit configuration layer.
 
     Returns:
         An owned activation whose report includes static and dynamic results.
+
+    Raises:
+        ValueError: If the supplied configuration is malformed or fails plugin
+            validation.
+        FileNotFoundError: If a referenced plugin configuration or resource is
+            unavailable.
+        RuntimeError: If activation cannot acquire the host or a plugin cannot
+            be registered.
     """
     path = os.fspath(additional_plugins_toml) if additional_plugins_toml is not None else None
     return PluginHostActivation(await _initialize(_normalize_object(config), path))
@@ -474,11 +483,19 @@ async def activate(
     beyond one ``async with`` block.
 
     Args:
-        config: Lowest-precedence programmatic plugin configuration.
+        config: Programmatic plugin configuration. It overrides file values.
         additional_plugins_toml: Optional explicit configuration layer.
 
     Returns:
         An async context manager that yields the owned activation.
+
+    Raises:
+        ValueError: If the supplied configuration is malformed or fails plugin
+            validation.
+        FileNotFoundError: If a referenced plugin configuration or resource is
+            unavailable.
+        RuntimeError: If activation cannot acquire the host or a plugin cannot
+            be registered.
     """
     activation = await initialize(config, additional_plugins_toml)
     try:
@@ -497,11 +514,23 @@ def validate(
     loading plugin code or acquiring the process-wide activation lease.
 
     Args:
-        config: Lowest-precedence programmatic plugin configuration.
+        config: Programmatic plugin configuration. It overrides file values.
         additional_plugins_toml: Optional explicit configuration layer.
 
     Returns:
         A static configuration report and selected dynamic validation reports.
+
+    Raises:
+        ValueError: If the supplied configuration or a resolved configuration
+            layer is malformed.
+        FileNotFoundError: If a referenced plugin configuration or resource is
+            unavailable.
+        RuntimeError: If validation encounters an internal host failure.
+
+    Notes:
+        Static plugin validation errors are returned in the report rather than
+        raised. Use :func:`validate_exact` when only the supplied static
+        configuration should be checked.
     """
     path = os.fspath(additional_plugins_toml) if additional_plugins_toml is not None else None
     return cast(PluginHostReport, _validate(_normalize_object(config), path))

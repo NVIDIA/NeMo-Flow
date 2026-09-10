@@ -838,7 +838,7 @@ impl PluginTeardownCompletion {
 }
 
 enum PluginHostCloseStatus {
-    Active(Option<PluginHostActivation>),
+    Active(Box<Option<PluginHostActivation>>),
     Closing,
     Closed,
 }
@@ -853,7 +853,7 @@ impl PluginHostCloseState {
     fn new(activation: PluginHostActivation) -> Self {
         let report = activation.report();
         Self {
-            status: Mutex::new(PluginHostCloseStatus::Active(Some(activation))),
+            status: Mutex::new(PluginHostCloseStatus::Active(Box::new(Some(activation)))),
             report: Mutex::new(report),
             completion: PluginTeardownCompletion::new(),
         }
@@ -866,10 +866,11 @@ impl PluginHostCloseState {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             match &*status {
-                PluginHostCloseStatus::Active(Some(activation)) => Some(activation.report()),
-                PluginHostCloseStatus::Active(None)
-                | PluginHostCloseStatus::Closing
-                | PluginHostCloseStatus::Closed => None,
+                PluginHostCloseStatus::Active(activation) => activation
+                    .as_ref()
+                    .as_ref()
+                    .map(PluginHostActivation::report),
+                PluginHostCloseStatus::Closing | PluginHostCloseStatus::Closed => None,
             }
         };
         let mut report = self
@@ -890,6 +891,7 @@ impl PluginHostCloseState {
         match &*status {
             PluginHostCloseStatus::Active(activation) => activation
                 .as_ref()
+                .as_ref()
                 .is_some_and(PluginHostActivation::is_active),
             PluginHostCloseStatus::Closing | PluginHostCloseStatus::Closed => false,
         }
@@ -903,13 +905,13 @@ impl PluginHostCloseState {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             match &mut *status {
                 PluginHostCloseStatus::Active(activation) => {
-                    if let Some(current) = activation.as_ref() {
+                    if let Some(current) = activation.as_ref().as_ref() {
                         *self
                             .report
                             .lock()
                             .unwrap_or_else(|poisoned| poisoned.into_inner()) = current.report();
                     }
-                    let activation = activation.take();
+                    let activation = activation.as_mut().take();
                     *status = PluginHostCloseStatus::Closing;
                     activation
                 }
@@ -988,7 +990,7 @@ impl PluginHostCloseState {
             .status
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = if retryable {
-            PluginHostCloseStatus::Active(activation)
+            PluginHostCloseStatus::Active(Box::new(activation))
         } else {
             PluginHostCloseStatus::Closed
         };
