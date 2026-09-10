@@ -531,20 +531,21 @@ fn make_openinference_test_subscriber(
     OpenTelemetrySubscriber,
     opentelemetry_sdk::trace::InMemorySpanExporter,
 ) {
-    let exporter = InMemorySpanExporterBuilder::new().build();
-    let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
-        .with_simple_exporter(exporter.clone())
-        .build();
-    let subscriber = OpenTelemetrySubscriber::from_tracer_provider_with_type(
-        provider,
-        scope.to_string(),
-        OpenTelemetryType::OpenInference,
-    );
-    (subscriber, exporter)
+    make_typed_test_subscriber(scope, OpenTelemetryType::OpenInference)
 }
 
 fn make_gen_ai_test_subscriber(
     scope: &str,
+) -> (
+    OpenTelemetrySubscriber,
+    opentelemetry_sdk::trace::InMemorySpanExporter,
+) {
+    make_typed_test_subscriber(scope, OpenTelemetryType::GenAi)
+}
+
+fn make_typed_test_subscriber(
+    scope: &str,
+    otel_type: OpenTelemetryType,
 ) -> (
     OpenTelemetrySubscriber,
     opentelemetry_sdk::trace::InMemorySpanExporter,
@@ -556,7 +557,7 @@ fn make_gen_ai_test_subscriber(
     let subscriber = OpenTelemetrySubscriber::from_tracer_provider_with_type(
         provider,
         scope.to_string(),
-        OpenTelemetryType::GenAi,
+        otel_type,
     );
     (subscriber, exporter)
 }
@@ -2528,12 +2529,25 @@ async fn coding_agent_gen_ai_llm_spans_carry_conversation_identity() {
 }
 
 #[tokio::test]
-async fn managed_gateway_gen_ai_llm_spans_carry_merged_conversation_identity() {
+async fn managed_gateway_typed_projections_carry_merged_conversation_identity() {
     let _guard = PLUGIN_CONFIG_TEST_LOCK.lock().await;
-    let subscriber_name = "cli-managed-gateway-gen-ai-conversation-test";
-    let _ = deregister_subscriber(subscriber_name);
-    let (subscriber, exporter) = make_gen_ai_test_subscriber("managed-gen-ai-test-scope");
-    subscriber.register(subscriber_name).unwrap();
+    let gen_ai_name = "cli-managed-gateway-gen-ai-conversation-test";
+    let full_name = "cli-managed-gateway-full-conversation-test";
+    let openinference_name = "cli-managed-gateway-openinference-conversation-test";
+    for name in [gen_ai_name, full_name, openinference_name] {
+        let _ = deregister_subscriber(name);
+    }
+    let (gen_ai_subscriber, gen_ai_exporter) =
+        make_gen_ai_test_subscriber("managed-gen-ai-test-scope");
+    let (full_subscriber, full_exporter) =
+        make_typed_test_subscriber("managed-full-test-scope", OpenTelemetryType::Full);
+    let (openinference_subscriber, openinference_exporter) =
+        make_openinference_test_subscriber("managed-openinference-test-scope");
+    gen_ai_subscriber.register(gen_ai_name).unwrap();
+    full_subscriber.register(full_name).unwrap();
+    openinference_subscriber
+        .register(openinference_name)
+        .unwrap();
     let manager = SessionManager::new(session_test_config());
 
     let mut claude_start =
@@ -2610,11 +2624,19 @@ async fn managed_gateway_gen_ai_llm_spans_carry_merged_conversation_identity() {
 
     manager.close_all("test_shutdown").await.unwrap();
     flush_subscribers().unwrap();
-    subscriber.force_flush().unwrap();
-    assert!(subscriber.deregister(subscriber_name).unwrap());
+    gen_ai_subscriber.force_flush().unwrap();
+    full_subscriber.force_flush().unwrap();
+    openinference_subscriber.force_flush().unwrap();
+    assert!(gen_ai_subscriber.deregister(gen_ai_name).unwrap());
+    assert!(full_subscriber.deregister(full_name).unwrap());
+    assert!(
+        openinference_subscriber
+            .deregister(openinference_name)
+            .unwrap()
+    );
 
-    let spans = exporter.get_finished_spans().unwrap();
-    let conversations_by_model = spans
+    let gen_ai_spans = gen_ai_exporter.get_finished_spans().unwrap();
+    let conversations_by_model = gen_ai_spans
         .iter()
         .filter_map(|span| {
             let attributes = attr_map(&span.attributes);
@@ -2634,6 +2656,90 @@ async fn managed_gateway_gen_ai_llm_spans_carry_merged_conversation_identity() {
         conversations_by_model.get("gpt-test").map(String::as_str),
         Some("managed-codex-session")
     );
+
+    let full_spans = full_exporter.get_finished_spans().unwrap();
+    let full_by_model = full_spans
+        .iter()
+        .filter_map(|span| {
+            let attributes = attr_map(&span.attributes);
+            Some((attributes.get("nemo_relay.model_name")?.clone(), attributes))
+        })
+        .collect::<HashMap<_, _>>();
+    let full_claude = &full_by_model["claude-test"];
+    assert_eq!(
+        full_claude
+            .get("nemo_relay.start.metadata.conversation_id")
+            .map(String::as_str),
+        Some("managed-claude-conversation")
+    );
+    assert_eq!(
+        full_claude
+            .get("nemo_relay.start.metadata.session_id")
+            .map(String::as_str),
+        Some("managed-claude-session")
+    );
+    assert_eq!(
+        full_claude
+            .get("nemo_relay.start.metadata.agent_kind")
+            .map(String::as_str),
+        Some("claude-code")
+    );
+    let full_codex = &full_by_model["gpt-test"];
+    assert_eq!(
+        full_codex
+            .get("nemo_relay.start.metadata.session_id")
+            .map(String::as_str),
+        Some("managed-codex-session")
+    );
+    assert_eq!(
+        full_codex
+            .get("nemo_relay.start.metadata.agent_kind")
+            .map(String::as_str),
+        Some("codex")
+    );
+    assert!(!full_codex.contains_key("nemo_relay.start.metadata.conversation_id"));
+
+    let openinference_spans = openinference_exporter.get_finished_spans().unwrap();
+    let openinference_by_model = openinference_spans
+        .iter()
+        .filter_map(|span| {
+            let attributes = attr_map(&span.attributes);
+            Some((attributes.get("llm.model_name")?.clone(), attributes))
+        })
+        .collect::<HashMap<_, _>>();
+    let openinference_claude = &openinference_by_model["claude-test"];
+    assert_eq!(
+        openinference_claude
+            .get("openinference.metadata.conversation_id")
+            .map(String::as_str),
+        Some("managed-claude-conversation")
+    );
+    assert_eq!(
+        openinference_claude
+            .get("openinference.metadata.session_id")
+            .map(String::as_str),
+        Some("managed-claude-session")
+    );
+    assert_eq!(
+        openinference_claude
+            .get("openinference.metadata.agent_kind")
+            .map(String::as_str),
+        Some("claude-code")
+    );
+    let openinference_codex = &openinference_by_model["gpt-test"];
+    assert_eq!(
+        openinference_codex
+            .get("openinference.metadata.session_id")
+            .map(String::as_str),
+        Some("managed-codex-session")
+    );
+    assert_eq!(
+        openinference_codex
+            .get("openinference.metadata.agent_kind")
+            .map(String::as_str),
+        Some("codex")
+    );
+    assert!(!openinference_codex.contains_key("openinference.metadata.conversation_id"));
 }
 
 async fn execute_prepared_llm(manager: &SessionManager, prep: GatewayCallPrep, response: Value) {
