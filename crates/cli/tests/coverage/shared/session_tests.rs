@@ -1228,6 +1228,31 @@ fn tool_execution_metadata_preserves_explicit_values_and_subagent_identity() {
     );
 }
 
+#[test]
+fn tool_execution_metadata_respects_aliases_and_ignores_invalid_strings() {
+    for kind in [AgentKind::ClaudeCode, AgentKind::Codex, AgentKind::Pi] {
+        let session = Session::new("alias-policy".into(), kind, SessionConfig::default());
+        for canonical in [Value::Null, json!(""), json!("  "), json!(false)] {
+            let mut metadata = json!({
+                "gen_ai.tool.type": canonical,
+                "gen_ai.agent.name": canonical,
+                "tool_type": "datastore", "agent_name": "researcher"
+            });
+            let expected = metadata.clone();
+            session.apply_tool_execution_metadata(&mut metadata, None);
+            assert_eq!(metadata, expected);
+        }
+        let mut metadata = json!({"tool_type": "extension", "agent_name": "explicit"});
+        let expected = metadata.clone();
+        session.apply_tool_execution_metadata(&mut metadata, None);
+        assert_eq!(metadata, expected);
+        let mut invalid = json!({"gen_ai.tool.type": false, "agent_name": " "});
+        session.apply_tool_execution_metadata(&mut invalid, None);
+        assert_eq!(invalid["gen_ai.tool.type"], "function");
+        assert_eq!(invalid["gen_ai.agent.name"], kind.as_str());
+    }
+}
+
 #[tokio::test]
 async fn parallel_subagents_are_siblings_under_turn_scope() {
     let manager = SessionManager::new(session_test_config());

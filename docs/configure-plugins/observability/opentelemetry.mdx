@@ -697,7 +697,8 @@ Claude Code, Codex, and Pi tool hooks default `gen_ai.tool.type` to `function`
 because these harnesses execute tools locally. They default `gen_ai.agent.name`
 to `claude-code`, `codex`, or `pi`, or `subagent:<id>` when ownership is known.
 These defaults apply to paired hooks and post-only hooks that synthesize a
-start, without replacing explicitly supplied metadata. Generic gateway sessions
+start, without replacing explicitly supplied nonblank string metadata, including
+the `tool_type` and `agent_name` aliases. Generic gateway sessions
 do not infer a tool type or root executing-agent name. Invocation arguments
 are never used to infer tool descriptions.
 

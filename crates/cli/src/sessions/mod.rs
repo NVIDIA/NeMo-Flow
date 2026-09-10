@@ -905,6 +905,24 @@ impl SessionManager {
     }
 }
 
+// Keep defaulting consistent with the exporter's canonical and legacy string aliases.
+fn set_tool_metadata_default(
+    metadata: &mut Map<String, Value>,
+    canonical: &str,
+    alias: &str,
+    default: &str,
+) {
+    if [canonical, alias].iter().any(|key| {
+        metadata
+            .get(*key)
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+    }) {
+        return;
+    }
+    metadata.insert(canonical.to_string(), json!(default));
+}
+
 impl Session {
     // Constructs per-session runtime state without creating a scope yet. The root agent scope is
     // opened lazily on the first event or gateway LLM call so sessions created from hints and pure
@@ -1902,9 +1920,7 @@ impl Session {
         // Execution classification is a harness capability, not an inference
         // from tool arguments or names. Explicit instrumentation takes precedence.
         if let Some(tool_type) = self.agent_kind.tool_execution_type() {
-            metadata
-                .entry("gen_ai.tool.type")
-                .or_insert(json!(tool_type));
+            set_tool_metadata_default(metadata, "gen_ai.tool.type", "tool_type", tool_type);
         }
         // Identity is independent of classification. Gateway alone does not
         // identify an executing agent, but a known subagent still does.
@@ -1912,9 +1928,7 @@ impl Session {
             (self.agent_kind != AgentKind::Gateway).then(|| self.agent_kind.as_str().to_string())
         });
         if let Some(agent_name) = agent_name {
-            metadata
-                .entry("gen_ai.agent.name")
-                .or_insert(json!(agent_name));
+            set_tool_metadata_default(metadata, "gen_ai.agent.name", "agent_name", &agent_name);
         }
     }
 
