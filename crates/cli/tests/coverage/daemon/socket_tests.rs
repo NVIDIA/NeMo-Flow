@@ -398,7 +398,7 @@ async fn unauthenticated_and_legacy_control_requests_are_rejected() {
         .send()
         .await
         .unwrap();
-    assert!(!response.status().is_success());
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
     task.abort();
 }
 #[tokio::test]

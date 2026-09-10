@@ -13,7 +13,7 @@ async fn reconnect_attempts_are_bounded_by_one_monotonic_grace_window() {
     .await;
     assert!(result.is_err());
     assert_eq!(started.elapsed(), GRACE);
-    assert!(attempts.load(std::sync::atomic::Ordering::Relaxed) < 25);
+    assert!((5..25).contains(&attempts.load(std::sync::atomic::Ordering::Relaxed)));
 }
 
 #[tokio::test(start_paused = true)]
@@ -26,11 +26,13 @@ async fn a_hung_reconnect_attempt_does_not_extend_grace() {
 
 #[tokio::test]
 async fn remote_cleartext_is_rejected_before_connecting() {
-    let client = Client::default();
-    assert!(
-        client
-            .connect("http://192.0.2.1:80", ComponentRole::Mcp)
+    for origin in ["http://192.0.2.1:80", "http://daemon.example:80"] {
+        let error = Client::default()
+            .connect(origin, ComponentRole::Mcp)
             .await
-            .is_err()
-    );
+            .unwrap_err();
+        assert!(
+            matches!(error, CliError::Config(ref message) if message == "non-loopback daemon addresses must use https")
+        );
+    }
 }

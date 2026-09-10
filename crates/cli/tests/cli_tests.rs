@@ -5477,7 +5477,12 @@ fn cli_daemon_mcp_launches_worker_and_forwards_pi_hook() {
             );
         }
     };
-    let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+    let response: serde_json::Value = serde_json::from_str(&response).unwrap_or_else(|error| {
+        panic!(
+            "invalid daemon MCP initialization response {response:?}: {error}\n{}",
+            std::fs::read_to_string(&mcp_stderr_path).unwrap_or_default()
+        )
+    });
     assert_eq!(response["result"]["serverInfo"]["name"], "nemo-relay");
 
     let (provider_origin, provider_request) = spawn_single_request_server(
@@ -5627,6 +5632,7 @@ fn cli_pass_through_daemon_serves_managed_hooks_and_pi_provider_routing() {
     );
     wait_for_port_open(address);
 
+    let mcp_stderr_path = temp.path().join("daemon-mcp.stderr");
     let mut mcp = ChildGuard::new(
         Command::new(gateway_bin())
             .current_dir(temp.path())
@@ -5636,7 +5642,9 @@ fn cli_pass_through_daemon_serves_managed_hooks_and_pi_provider_routing() {
             .args(["daemon", "mcp", "--daemon-address", &daemon_origin])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(
+                std::fs::File::create(&mcp_stderr_path).unwrap(),
+            ))
             .spawn()
             .unwrap(),
     );
@@ -5656,7 +5664,12 @@ fn cli_pass_through_daemon_serves_managed_hooks_and_pi_provider_routing() {
         .recv_timeout(Duration::from_secs(20))
         .unwrap()
         .unwrap();
-    let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+    let response: serde_json::Value = serde_json::from_str(&response).unwrap_or_else(|error| {
+        panic!(
+            "invalid daemon MCP initialization response {response:?}: {error}\n{}",
+            std::fs::read_to_string(&mcp_stderr_path).unwrap_or_default()
+        )
+    });
     assert_eq!(response["result"]["serverInfo"]["name"], "nemo-relay");
 
     for (agent, expected) in [

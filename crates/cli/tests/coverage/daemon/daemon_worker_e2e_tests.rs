@@ -2121,6 +2121,18 @@ async fn broker_release_enters_draining_while_admitted_stream_finishes() {
     )
     .expect("MCP release request");
     let release_response = release_mcp(State(harness.state.clone()), Json(release)).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while harness
+            .state
+            .active_worker_generations
+            .matches(harness.fingerprint, &harness.generation_id)
+            .expect("generation state")
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("worker generation revoked before drain");
     worker_handle.begin_drain(now_unix_ms() + DRAIN_LIFETIME_MS);
     assert_eq!(release_response.status(), StatusCode::NO_CONTENT);
     release_response
