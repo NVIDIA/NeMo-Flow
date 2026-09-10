@@ -104,7 +104,7 @@ filename_template = "{metadata.atif_prefix:-unassigned}/trajectory-{session_id}.
 ```
 
 With scope metadata `{"atif_prefix":"tenant-a/session-123"}`, Relay writes
-`logs/tenant-a/session-123/trajectory-<scope-uuid>.json`. The template must
+`logs/tenant-a-session-123/trajectory-<scope-uuid>.json`. The template must
 still contain `{session_id}`.
 
 Use `:-` to provide a literal fallback when metadata can be absent, for example
@@ -112,16 +112,26 @@ Use `:-` to provide a literal fallback when metadata can be absent, for example
 metadata field is absent or `null`. A present non-string value is rejected
 instead of being routed through the fallback.
 
-Each metadata placeholder must resolve to a string containing a non-empty,
-relative path fragment. Slash-separated segments can contain ASCII letters,
-digits, `-`, `_`, `.`, and `~`. Relay rejects empty segments, `.` and `..`
-segments, absolute paths, backslashes, spaces, and other characters. If a
-placeholder is missing without a fallback, is present but non-string, or
-resolves to an unsafe value, Relay skips that trajectory. It records a runtime
-diagnostic and causes `activation.close()` to fail. Literal
-template text must also be a relative, traversal-free path. The rendered
-filename applies to local, S3, and HTTP storage in the same way as a static
-filename.
+Relay sanitizes a present string metadata value into one filename fragment
+before rendering it. ASCII letters, digits, `-`, `_`, `.`, and `~` are kept;
+every consecutive group of other characters, including `/`, is replaced with
+one `-`. Metadata placeholders therefore do not create directory levels. For
+example, `tenant-a/session-123` becomes `tenant-a-session-123`, and
+`../tenant` becomes `-tenant`.
+
+Use a prevalidated identifier when distinct metadata values must produce
+distinct paths: sanitization is lossy, so different input values can produce
+the same fragment. A literal `:-` fallback is not sanitized and must itself be
+a non-empty, safe relative path fragment; it can contain slash-separated
+segments with ASCII letters, digits, `-`, `_`, `.`, and `~`. Relay rejects
+empty segments, `.` and `..` segments, absolute paths, backslashes, spaces,
+and other characters in a fallback.
+
+If a placeholder is missing without a fallback, is present but non-string, or
+sanitizes to an empty value, Relay skips that trajectory. It records a runtime
+diagnostic and causes `activation.close()` to fail. Literal template text must
+also be a relative, traversal-free path. The rendered filename applies to
+local, S3, and HTTP storage in the same way as a static filename.
 
 The CLI gateway parses `x-nemo-relay-session-metadata` as JSON and merges it
 into the top-level scope metadata:
