@@ -77,7 +77,9 @@ try {
             function Read-UninstallConfirmation { throw 'unexpected shutdown prompt' }
             $Force = $true
             $DryRun = $false
-            Assert-True ((Get-ActiveRelayShutdownTargets $destination).ProcessId -eq 10) 'personal MCP did not select its agent'
+            $personalTargets = @(Get-ActiveRelayShutdownTargets $destination)
+            Assert-True ($personalTargets.Count -eq 1) 'personal MCP did not select exactly one target'
+            Assert-True ($personalTargets[0].ProcessId -eq 10) 'personal MCP did not select its agent'
             foreach ($role in @('daemon', 'daemon mcp', 'daemon worker', 'daemon hook')) {
                 $relay.CommandLine = "$destination $role"
                 try {
