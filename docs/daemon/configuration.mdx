@@ -149,7 +149,7 @@ credential in the shared bundle, command-line arguments, service unit, or logs.
 | Platform | Local dispatcher executable | Installed bundle |
 | --- | --- | --- |
 | Linux and macOS | `/opt/nvidia/bin/nemo-relay` | `/opt/nvidia/share/nemo-relay-managed-v1` |
-| Windows | `C:\ProgramData\NVIDIA\NeMoRelay\nemo-relay.exe` | `C:\ProgramData\NVIDIA\NeMoRelay\nemo-relay-managed-v1` |
+| Windows | `C:/ProgramData/NVIDIA/NeMoRelay/nemo-relay.exe` | `C:\ProgramData\NVIDIA\NeMoRelay\nemo-relay-managed-v1` |
 | Remote Linux client | `/opt/nvidia/bin/nemo-relay-dispatch` | `/opt/nvidia/share/nemo-relay-managed-v1` |
 
 The binary itself can be the stable dispatcher. The remote Linux example uses a
@@ -157,6 +157,10 @@ small administrator-owned wrapper to supply worker network settings. Keep the
 chosen path fixed across binary upgrades. Dispatcher paths must contain no spaces
 or shell metacharacters, including on Windows. Bundle generation checks path shape;
 deployment tooling must enforce ownership and permissions.
+
+On Windows, use forward slashes in `--dispatcher-command`. Generated hooks can
+run in Git Bash, which treats backslashes as escape characters. PowerShell file
+paths elsewhere in these examples can use backslashes.
 
 ## Route Authentication
 
@@ -269,7 +273,7 @@ On Windows, use an elevated PowerShell window:
 & 'C:\ProgramData\NVIDIA\NeMoRelay\nemo-relay.exe' daemon managed-bundle `
   --output 'C:\ProgramData\NVIDIA\NeMoRelay\nemo-relay-managed-v1' `
   --daemon-address http://127.0.0.1:47632 `
-  --dispatcher-command 'C:\ProgramData\NVIDIA\NeMoRelay\nemo-relay.exe' `
+  --dispatcher-command 'C:/ProgramData/NVIDIA/NeMoRelay/nemo-relay.exe' `
   --platform windows --agent codex --agent claude --agent pi
 ```
 

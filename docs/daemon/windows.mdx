@@ -23,8 +23,9 @@ Copy-Item (Get-Command nemo-relay.exe).Source 'C:\ProgramData\NVIDIA\NeMoRelay\n
 & 'C:\ProgramData\NVIDIA\NeMoRelay\nemo-relay.exe' daemon --help
 ```
 
-Use that executable as the dispatcher in the Windows managed bundle. Dispatcher
-paths cannot contain spaces, so do not move it under `Program Files`. The ACL
+Use `C:/ProgramData/NVIDIA/NeMoRelay/nemo-relay.exe` as the dispatcher in the Windows
+managed bundle. Forward slashes keep generated hooks compatible with Git Bash.
+Dispatcher paths cannot contain spaces, so do not move it under `Program Files`. The ACL
 above grants ordinary users read and execute access, but no write access. Complete
 [Configuration and Managed Clients](/daemon/configuration), using
 `http://127.0.0.1:47632`. System plugin configuration belongs in
