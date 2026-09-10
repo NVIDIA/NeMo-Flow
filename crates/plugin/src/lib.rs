@@ -2642,6 +2642,9 @@ impl<'a> PluginContext<'a> {
                 self.host,
                 "context-aware tool execution intercepts require Relay native ABI v5",
             );
+            if let Some(free_fn) = free_fn {
+                unsafe { free_fn(user_data) };
+            }
             return NemoRelayStatus::InvalidArg;
         }
         let host_v5 = unsafe { &*(self.host as *const _ as *const NemoRelayNativeHostApiV5) };

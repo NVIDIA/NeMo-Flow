@@ -1061,9 +1061,14 @@ unsafe extern "C" fn pending_async_stream_middleware_cb(
 }
 
 static RAW_ASYNC_REJECTIONS: AtomicUsize = AtomicUsize::new(0);
+static RAW_TOOL_EXECUTION_REJECTION_FREES: AtomicUsize = AtomicUsize::new(0);
 
 unsafe extern "C" fn count_raw_async_rejection(_user_data: *mut c_void) {
     RAW_ASYNC_REJECTIONS.fetch_add(1, Ordering::SeqCst);
+}
+
+unsafe extern "C" fn count_raw_tool_execution_rejection_free(_user_data: *mut c_void) {
+    RAW_TOOL_EXECUTION_REJECTION_FREES.fetch_add(1, Ordering::SeqCst);
 }
 
 unsafe extern "C" fn capture_tool_conditional(
@@ -5563,6 +5568,32 @@ fn raw_async_callback_registrations_use_the_v3_extension_tables() {
         NemoRelayStatus::InvalidArg
     );
     assert_eq!(RAW_ASYNC_REJECTIONS.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn raw_tool_execution_registration_releases_user_data_when_v5_is_unavailable() {
+    let _guard = begin_test();
+    let host = test_host_v4();
+    let mut context = test_context(&host.v3.v1);
+    RAW_TOOL_EXECUTION_REJECTION_FREES.store(0, Ordering::SeqCst);
+
+    assert_eq!(
+        unsafe {
+            context.register_tool_execution_intercept_raw(
+                "legacy-tool-execution",
+                0,
+                passthrough_tool_execution_cb,
+                ptr::null_mut(),
+                Some(count_raw_tool_execution_rejection_free),
+            )
+        },
+        NemoRelayStatus::InvalidArg
+    );
+    assert_eq!(RAW_TOOL_EXECUTION_REJECTION_FREES.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        LAST_ERROR.lock().unwrap().as_deref(),
+        Some("context-aware tool execution intercepts require Relay native ABI v5")
+    );
 }
 
 struct ConstructorPanicPlugin;
