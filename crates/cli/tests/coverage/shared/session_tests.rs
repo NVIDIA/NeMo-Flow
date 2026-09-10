@@ -2620,6 +2620,7 @@ async fn managed_gateway_typed_projections_carry_merged_conversation_identity() 
         llm_start_with_responses_task("managed-codex-session", "Inspect the repository.");
     codex_start.metadata = json!({
         "session_id": "untrusted-codex-session",
+        "conversation_id": "untrusted-codex-conversation",
         "merge_marker": "codex-preserved"
     });
     let codex_prep = manager
