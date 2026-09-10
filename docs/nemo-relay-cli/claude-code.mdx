@@ -29,10 +29,12 @@ nemo-relay claude -- "summarize this repository"
 This shortcut is equivalent to `nemo-relay run -- claude`. The wrapper starts a
 gateway on a dynamic `127.0.0.1` port, creates a temporary Claude plugin
 directory with NeMo Relay hooks, and passes that plugin with `--plugin-dir`.
-Because Claude Code gives its first `--settings` source precedence over the
-process environment, Relay also creates a private settings overlay that
-preserves that source and overrides only `ANTHROPIC_BASE_URL` for the launched
-process. The source settings and installed plugin enablement remain unchanged.
+Because matching Claude Code `settings.env` entries can override inherited
+environment values, Relay also creates a private settings overlay from the
+first explicit `--settings` source. The overlay copies that source, forces
+`ANTHROPIC_BASE_URL`, and reasserts the Agent View gate for the launched
+process; other fields in that source and installed plugin enablement remain
+unchanged.
 If a Relay plugin is already enabled, its MCP process authenticates and borrows
 the dynamic gateway instead of launching the fixed sidecar, then monitors that
 exact gateway while MCP stdio remains open. Its persistent hooks exit without
@@ -40,6 +42,19 @@ forwarding. Only the wrapper-owned temporary hooks deliver lifecycle payloads,
 and those hooks authenticate the wrapper gateway before sending a payload, so
 installed and source-marketplace plugin IDs cannot duplicate the captured
 stream.
+
+Transparent runs require Claude Code 2.1.169 or newer, while persistent installs
+remain supported from 2.1.121. Relay sets
+`CLAUDE_CODE_DISABLE_AGENT_VIEW=1` in both the launch environment and private
+settings overlay, and sets `disableAgentView=true` in that overlay. This disables
+Claude Code Agent View and its background-session entry points, provided a
+configured command wrapper preserves Relay's injected environment and arguments.
+Those sessions are owned by Claude's persistent
+supervisor, so they can remain alive after the wrapper removes its dynamic
+gateway and temporary plugin files, and later work cannot reliably use the
+intended Relay policy or observability. To create or manage background sessions,
+install the persistent plugin and use `claude` directly, or use an
+administrator-managed Relay daemon deployment.
 
 Inspect what would be launched without starting Claude Code:
 
@@ -211,9 +226,10 @@ slash-command expansions as `skill.load.inferred`; Claude Code does not
 identify whether an expansion came from a skill or a legacy custom command.
 The normal `Skill` pre-tool hook emits an observed `skill.load` mark.
 
-The wrapper requires Claude Code 2.1.121 or newer. Earlier versions do not
-support every required hook event, and `nemo-relay doctor` reports the version
-mismatch.
+Persistent integration requires Claude Code 2.1.121 or newer; transparent runs
+require 2.1.169 or newer. Earlier versions do not support every required hook or
+launch control. `nemo-relay doctor` validates the persistent floor; a live
+transparent launch checks its stricter floor before starting the gateway.
 
 Tool hooks preserve canonical fields such as `tool_use_id`, `tool_name`,
 `tool_input`, `error`, `duration_ms`, and `is_interrupt`. Subagent hooks use

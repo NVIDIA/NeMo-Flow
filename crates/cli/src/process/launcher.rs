@@ -330,6 +330,9 @@ async fn validate_agent_version(agent: CodingAgent, probe: &[String]) -> Result<
     let version = agent
         .validate_version_output(&stdout)
         .map_err(CliError::Launch)?;
+    agent
+        .validate_transparent_version(&version)
+        .map_err(CliError::Launch)?;
     // Logged rather than returned: this is not a reason to refuse the launch, and there is no
     // note channel here -- `PreparedAgentLaunch` is already built by the time the probe runs.
     if let Some(unverified) = agent.unverified_version(&version) {
@@ -644,12 +647,6 @@ impl PreparedAgentLaunch {
         }
     }
 }
-
-// Claude Code honors only the first `--settings` source. Preserve that source in the generated
-// overlay so inserting Relay's process-private gateway setting cannot discard user configuration.
-// Session hook definitions and their exact trust state share Codex's process-local CLI layer. This
-// authorizes only the generated Relay command without rewriting the active user profile or using
-// the process-wide hook-trust bypass.
 
 /// Renders a bordered status frame for daemon and transparent-run startup output.
 pub(crate) fn render_status_frame(lines: &[String], color: bool) -> String {
