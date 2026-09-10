@@ -29,7 +29,6 @@ from nemo_relay import (
     LlmExecutionIntercept,
     LlmRequestIntercept,
     LlmStreamExecutionIntercept,
-    ToolExecutionContextIntercept,
     ToolExecutionIntercept,
     ToolRequestIntercept,
 )
@@ -59,9 +58,6 @@ from nemo_relay._native import (
 )
 from nemo_relay._native import (
     register_tool_execution_intercept as _native_register_tool_execution,
-)
-from nemo_relay._native import (
-    register_tool_execution_intercept_v2 as _native_register_tool_execution_v2,
 )
 from nemo_relay._native import (
     register_tool_request_intercept as _native_register_tool_request,
@@ -129,8 +125,9 @@ def register_tool_execution(name: str, priority: int, fn: ToolExecutionIntercept
     Args:
         name: Unique intercept name used for later replacement or removal.
         priority: Execution order for the intercept. Lower values run first.
-        fn: Callable invoked as ``fn(tool_name, args, next_call)``. The
-            callback may await or call ``next_call(args)`` to continue the
+        fn: Callable invoked as ``fn(context, next_call)``. The context exposes
+            ``tool_name``, ``arguments``, and ``tool_call_id``. The callback may
+            await or call ``next_call(context.arguments)`` to continue the
             chain, modify the result, or bypass downstream execution entirely.
             It must return ``ToolExecutionInterceptOutcome``.
 
@@ -144,39 +141,12 @@ def register_tool_execution(name: str, priority: int, fn: ToolExecutionIntercept
         is running. Each call gets an isolated scope-stack branch. Unfinished
         or new calls are rejected after ``fn`` returns or raises.
 
-        This is the legacy callback shape and cannot observe the managed
-        ``tool_call_id``. Use :func:`register_tool_execution_v2` for that.
-    """
-    return _native_register_tool_execution(name, priority, fn)
-
-
-def register_tool_execution_v2(name: str, priority: int, fn: ToolExecutionContextIntercept) -> None:
-    """Register middleware around tool execution with the full call context.
-
-    Args:
-        name: Unique intercept name used for later replacement or removal.
-        priority: Execution order for the intercept. Lower values run first.
-        fn: Callable invoked as ``fn(context, next_call)``. ``context`` is a
-            ``ToolExecutionContext`` exposing ``tool_name``, ``arguments``, and
-            the managed ``tool_call_id``. The callback may await or call
-            ``next_call(context.arguments)`` to continue the chain, modify the
-            result, or bypass downstream execution entirely. It must return
-            ``ToolExecutionInterceptOutcome``.
-
-    Returns:
-        None: This function returns after the intercept is registered.
-
-    Notes:
         ``tool_call_id`` is the provider-issued identifier recorded on the
         managed tool call, letting an intercept that completes execution
         itself associate its result with the originating call. It is ``None``
         when the tool call did not record one.
-
-        Intercepts registered here share one registry with those registered
-        through :func:`register_tool_execution`, so both shapes order together
-        by ``priority`` and :func:`deregister_tool_execution` removes either.
     """
-    return _native_register_tool_execution_v2(name, priority, fn)
+    return _native_register_tool_execution(name, priority, fn)
 
 
 def deregister_tool_execution(name: str) -> bool:
@@ -351,14 +321,12 @@ def deregister_llm_stream_execution(name: str) -> bool:
 __all__ = [
     "ToolRequestIntercept",
     "ToolExecutionIntercept",
-    "ToolExecutionContextIntercept",
     "LlmRequestIntercept",
     "LlmExecutionIntercept",
     "LlmStreamExecutionIntercept",
     "register_tool_request",
     "deregister_tool_request",
     "register_tool_execution",
-    "register_tool_execution_v2",
     "deregister_tool_execution",
     "register_llm_request",
     "deregister_llm_request",

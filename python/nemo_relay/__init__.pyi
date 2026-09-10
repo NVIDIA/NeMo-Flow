@@ -312,25 +312,6 @@ Return:
     JSON payload passed to later request intercepts and tool execution.
 """
 ToolExecutionIntercept: TypeAlias = Callable[
-    [str, Json, Callable[[Json], Awaitable[ToolExecutionResult[Json]]]],
-    ToolExecutionInterceptOutcome | Awaitable[ToolExecutionInterceptOutcome],
-]
-"""Execution intercept callback that wraps tool execution.
-
-Arguments:
-    The tool name, current JSON arguments, and next callable.
-
-Return:
-    A canonical tool execution outcome, either directly or as an awaitable.
-
-Exceptional flow:
-    The callback may short-circuit by not invoking ``next``. Exceptions
-    propagate through the managed tool call.
-
-    This is the legacy callback shape and cannot observe the managed
-    ``tool_call_id``. Use ``ToolExecutionContextIntercept`` for that.
-"""
-ToolExecutionContextIntercept: TypeAlias = Callable[
     [ToolExecutionContext, Callable[[Json], Awaitable[ToolExecutionResult[Json]]]],
     ToolExecutionInterceptOutcome | Awaitable[ToolExecutionInterceptOutcome],
 ]

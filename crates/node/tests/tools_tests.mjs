@@ -27,7 +27,6 @@ const {
   registerToolRequestIntercept,
   deregisterToolRequestIntercept,
   registerToolExecutionIntercept,
-  registerToolExecutionInterceptV2,
   deregisterToolExecutionIntercept,
   clearLastCallbackError,
   getLastCallbackError,
@@ -840,8 +839,8 @@ describe('Tool intercepts', () => {
   });
 
   it('execution intercept register/deregister', () => {
-    registerToolExecutionIntercept('node_tool_exec_int', 10, async (args, next) => {
-      const downstream = await next(args);
+    registerToolExecutionIntercept('node_tool_exec_int', 10, async (context, next) => {
+      const downstream = await next(context.arguments);
       return {
         result: downstream.result,
         ...(downstream.annotation == null ? {} : { annotation: downstream.annotation }),
@@ -850,9 +849,9 @@ describe('Tool intercepts', () => {
     deregisterToolExecutionIntercept('node_tool_exec_int');
   });
 
-  it('v2 execution intercept receives the managed toolCallId', async () => {
+  it('execution intercept receives the managed toolCallId', async () => {
     let seen = null;
-    registerToolExecutionInterceptV2('node_tool_exec_ctx', 10, async (context, next) => {
+    registerToolExecutionIntercept('node_tool_exec_ctx', 10, async (context, next) => {
       seen = context;
       const downstream = await next(context.arguments);
       return { result: downstream.result };
@@ -877,9 +876,9 @@ describe('Tool intercepts', () => {
     assert.deepEqual(seen.arguments, { x: 10 });
   });
 
-  it('v2 execution intercept sees null toolCallId when absent', async () => {
+  it('execution intercept sees null toolCallId when absent', async () => {
     let seen = null;
-    registerToolExecutionInterceptV2('node_tool_exec_ctx_none', 10, async (context, next) => {
+    registerToolExecutionIntercept('node_tool_exec_ctx_none', 10, async (context, next) => {
       seen = context;
       const downstream = await next(context.arguments);
       return { result: downstream.result };
@@ -892,25 +891,56 @@ describe('Tool intercepts', () => {
     assert.equal(seen.toolCallId, null);
   });
 
-  it('legacy and v2 execution intercepts share priority order', async () => {
+  it('terminal execution intercept can correlate a short-circuit result with the toolCallId', async () => {
+    let providerCalls = 0;
+    let seenToolCallId = null;
+    registerToolExecutionIntercept('node_tool_exec_terminal_context', 10, async (context, _next) => {
+      seenToolCallId = context.toolCallId;
+      return { result: { source: 'intercept', arguments: context.arguments } };
+    });
+    try {
+      const result = await toolCallExecute(
+        'terminal_context_tool',
+        { query: 'relay' },
+        () => {
+          providerCalls += 1;
+          return { result: { source: 'provider' } };
+        },
+        null,
+        null,
+        null,
+        null,
+        'node-terminal-call-42',
+      );
+      assert.deepEqual(result, {
+        result: { source: 'intercept', arguments: { query: 'relay' } },
+      });
+    } finally {
+      assert.equal(deregisterToolExecutionIntercept('node_tool_exec_terminal_context'), true);
+    }
+    assert.equal(seenToolCallId, 'node-terminal-call-42');
+    assert.equal(providerCalls, 0);
+  });
+
+  it('execution intercepts share priority order', async () => {
     const order = [];
-    registerToolExecutionIntercept('node_exec_legacy_first', 1, async (args, next) => {
-      order.push('legacy');
-      const downstream = await next(args);
+    registerToolExecutionIntercept('node_exec_context_first', 1, async (context, next) => {
+      order.push('first');
+      const downstream = await next(context.arguments);
       return { result: downstream.result };
     });
-    registerToolExecutionInterceptV2('node_exec_ctx_second', 2, async (context, next) => {
-      order.push('context');
+    registerToolExecutionIntercept('node_exec_context_second', 2, async (context, next) => {
+      order.push('second');
       const downstream = await next(context.arguments);
       return { result: downstream.result };
     });
     try {
       await toolCallExecute('mixed_tool', { x: 1 }, (args) => ({ result: args.x }));
     } finally {
-      assert.equal(deregisterToolExecutionIntercept('node_exec_legacy_first'), true);
-      assert.equal(deregisterToolExecutionIntercept('node_exec_ctx_second'), true);
+      assert.equal(deregisterToolExecutionIntercept('node_exec_context_first'), true);
+      assert.equal(deregisterToolExecutionIntercept('node_exec_context_second'), true);
     }
-    assert.deepEqual(order, ['legacy', 'context']);
+    assert.deepEqual(order, ['first', 'second']);
   });
 
   it('request intercept with break_chain', () => {
@@ -1027,9 +1057,9 @@ describe('Tool intercepts', () => {
   it('execution intercept composes with next', async () => {
     const events = [];
     registerSubscriber('node_tool_exec_mark_sub', (event) => events.push(event));
-    registerToolExecutionIntercept('node_tool_exec_repl', 10, async (args, next) => {
+    registerToolExecutionIntercept('node_tool_exec_repl', 10, async (context, next) => {
       const downstream = await next({
-        ...args,
+        ...context.arguments,
         intercepted: true,
       });
       return {
@@ -1092,8 +1122,8 @@ describe('Tool intercepts', () => {
   it('execution intercept can remove a downstream annotation', async () => {
     const events = [];
     registerSubscriber('node_tool_exec_annotation_removal_sub', (event) => events.push(event));
-    registerToolExecutionIntercept('node_tool_exec_annotation_removal', 10, async (args, next) => {
-      const downstream = await next(args);
+    registerToolExecutionIntercept('node_tool_exec_annotation_removal', 10, async (context, next) => {
+      const downstream = await next(context.arguments);
       return { result: downstream.result };
     });
     try {
@@ -1141,11 +1171,11 @@ describe('Tool intercepts', () => {
     const events = [];
     const observed = [];
     registerSubscriber('node_tool_exec_propagation_parent', (event) => events.push(event));
-    registerToolExecutionIntercept('node_tool_exec_propagation_parent', 10, async (args, next) => {
+    registerToolExecutionIntercept('node_tool_exec_propagation_parent', 10, async (context, next) => {
       observed.push(['intercept-before', lib.capturePropagationContext().parentUuid]);
       await new Promise((resolve) => setImmediate(resolve));
       observed.push(['intercept-after', lib.capturePropagationContext().parentUuid]);
-      const downstream = await next(args);
+      const downstream = await next(context.arguments);
       return {
         result: downstream.result,
         ...(downstream.annotation == null ? {} : { annotation: downstream.annotation }),
@@ -1210,8 +1240,8 @@ describe('Tool intercepts', () => {
     });
     let lateNext;
     let providerCalls = 0;
-    registerToolExecutionIntercept('node_tool_exec_late_next', 10, async (args, next) => {
-      lateNext = lateGate.then(() => next(args));
+    registerToolExecutionIntercept('node_tool_exec_late_next', 10, async (context, next) => {
+      lateNext = lateGate.then(() => next(context.arguments));
       return { result: { source: 'intercept' } };
     });
     try {
@@ -1245,8 +1275,8 @@ describe('Tool intercepts', () => {
     });
     let downstream;
     let providerSideEffects = 0;
-    registerToolExecutionIntercept('node_tool_exec_abort_started_provider', 10, async (args, next) => {
-      downstream = next(args);
+    registerToolExecutionIntercept('node_tool_exec_abort_started_provider', 10, async (context, next) => {
+      downstream = next(context.arguments);
       downstream.catch(() => undefined);
       await started;
       return { result: { source: 'intercept' } };
@@ -1288,7 +1318,7 @@ describe('Tool intercepts', () => {
       releaseBoth = resolve;
     });
     let pushed = 0;
-    registerToolExecutionIntercept('node_tool_exec_concurrent_next_scopes', 10, async (_args, next) => {
+    registerToolExecutionIntercept('node_tool_exec_concurrent_next_scopes', 10, async (_context, next) => {
       const [first, second] = await Promise.all([next({ branch: 'first' }), next({ branch: 'second' })]);
       return { result: [first.result, second.result] };
     });
@@ -1332,21 +1362,21 @@ describe('Tool intercepts', () => {
     });
     let parentScope;
 
-    registerToolExecutionIntercept('node_tool_exec_concurrent_scope_replacements', 10, async (args, next) => {
+    registerToolExecutionIntercept('node_tool_exec_concurrent_scope_replacements', 10, async (context, next) => {
       parentScope = lib.getHandle().uuid;
       const first = lib.withScopeStack(firstStack, async () => {
         firstStackInstalled();
         await secondInstalled;
-        return next({ ...args, branch: 'first' });
+        return next({ ...context.arguments, branch: 'first' });
       });
       const second = lib.withScopeStack(secondStack, async () => {
         await firstInstalled;
         secondStackInstalled();
-        return next({ ...args, branch: 'second' });
+        return next({ ...context.arguments, branch: 'second' });
       });
       const branches = await Promise.all([first, second]);
       assert.equal(lib.getHandle().uuid, parentScope);
-      const parent = await next({ ...args, branch: 'parent' });
+      const parent = await next({ ...context.arguments, branch: 'parent' });
       return { result: [...branches.map((branch) => branch.result), parent.result] };
     });
     try {
@@ -1367,7 +1397,7 @@ describe('Tool intercepts', () => {
   });
 
   it('execution intercept rejects non-JSON next arguments without aborting Node', async () => {
-    registerToolExecutionIntercept('node_tool_exec_bigint_next', 10, async (_args, next) => ({
+    registerToolExecutionIntercept('node_tool_exec_bigint_next', 10, async (_context, next) => ({
       result: await next(1n),
     }));
     try {
@@ -1387,10 +1417,10 @@ describe('Tool intercepts', () => {
     const observed = [];
     let invocationScope;
 
-    const intercept = (label) => async (args, next) => {
+    const intercept = (label) => async (context, next) => {
       observed.push([label, 'before', lib.getHandle().uuid]);
       await new Promise((resolve) => setImmediate(resolve));
-      const result = await next(args);
+      const result = await next(context.arguments);
       observed.push([label, 'after', lib.getHandle().uuid]);
       return {
         result: result.result,
@@ -1431,16 +1461,16 @@ describe('Tool intercepts', () => {
       releaseBlocker = resolve;
     });
 
-    registerToolExecutionIntercept('node_tool_exec_snapshot_target', 100, async (args, next) => ({
+    registerToolExecutionIntercept('node_tool_exec_snapshot_target', 100, async (context, next) => ({
       result: {
-        ...(await next(args)).result,
+        ...(await next(context.arguments)).result,
         snapshotted: true,
       },
     }));
-    registerToolExecutionIntercept('node_tool_exec_snapshot_blocker', -100, async (args, next) => {
+    registerToolExecutionIntercept('node_tool_exec_snapshot_blocker', -100, async (context, next) => {
       blockerEntered();
       await release;
-      const downstream = await next(args);
+      const downstream = await next(context.arguments);
       return {
         result: downstream.result,
         ...(downstream.annotation == null ? {} : { annotation: downstream.annotation }),
@@ -1514,7 +1544,9 @@ describe('Tool intercepts', () => {
   });
 
   it('execution intercept may directly forward the canonical Node result', async () => {
-    registerToolExecutionIntercept('node_tool_exec_forward_result', 10, async (args, next) => next(args));
+    registerToolExecutionIntercept('node_tool_exec_forward_result', 10, async (context, next) =>
+      next(context.arguments),
+    );
     try {
       const result = await toolCallExecute('forward_result_tool', { ok: true }, (args) => toolResult(args));
       assert.deepEqual(result, toolResult({ ok: true }));

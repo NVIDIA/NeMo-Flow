@@ -1932,7 +1932,7 @@ impl WorkerPlugin for CancellationPlugin {
     fn register(&self, ctx: &mut PluginContext, _config: &Json) -> Result<()> {
         let unary_started = self.unary_started.clone();
         let unary_cancelled = self.unary_cancelled.clone();
-        ctx.register_tool_execution_intercept("cancel-unary", 0, move |_, _, _| {
+        ctx.register_tool_execution_intercept("cancel-unary", 0, move |_context, _next| {
             let unary_started = unary_started.clone();
             let unary_cancelled = unary_cancelled.clone();
             async move {
@@ -2108,9 +2108,10 @@ impl WorkerPlugin for SurfacePlugin {
         });
 
         let tool_runtime = runtime.clone();
-        ctx.register_tool_execution_intercept("tool-exec", 1, move |_, value, next: ToolNext| {
+        ctx.register_tool_execution_intercept("tool-exec", 1, move |context, next: ToolNext| {
             let runtime = tool_runtime.clone();
             async move {
+                let value = context.into_arguments();
                 let registrations = runtime
                     .list_runtime_registrations(Some(BTreeSet::from([
                         RuntimeRegistrationKind::Subscriber,
@@ -2224,7 +2225,7 @@ impl WorkerPlugin for SurfacePlugin {
             }
         });
         let scope_runtime = runtime.clone();
-        ctx.register_tool_execution_intercept("tool-scope-types", 1, move |_, _, _| {
+        ctx.register_tool_execution_intercept("tool-scope-types", 1, move |_context, _next| {
             let runtime = scope_runtime.clone();
             async move {
                 for scope_type in [

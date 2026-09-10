@@ -140,36 +140,6 @@ pub type ToolInterceptFn =
 pub type ToolExecutionNextFn = Arc<
     dyn Fn(Json) -> Pin<Box<dyn Future<Output = Result<ToolExecutionResult>> + Send>> + Send + Sync,
 >;
-/// Wrap or replace tool execution.
-///
-/// A tool execution intercept receives the tool name, the current argument
-/// payload, and the continuation representing the rest of the chain.
-///
-/// This is the legacy callback shape. It does not carry the managed
-/// `tool_call_id`; use [`ToolExecutionContextFn`] to receive it.
-///
-/// # Parameters
-/// - First argument: Tool name associated with the execution.
-/// - Second argument: Current JSON argument payload.
-/// - Third argument: Continuation for the remaining execution chain.
-///
-/// # Returns
-/// A future resolving to the canonical tool execution outcome, containing the
-/// tool result and any pending lifecycle marks produced by this intercept.
-///
-/// # Errors
-/// The future resolves to an error when the intercept or remaining execution
-/// chain fails.
-pub type ToolExecutionFn = Arc<
-    dyn Fn(
-            &str,
-            Json,
-            ToolExecutionNextFn,
-        ) -> Pin<Box<dyn Future<Output = Result<ToolExecutionInterceptOutcome>> + Send>>
-        + Send
-        + Sync,
->;
-
 /// Per-call context delivered to a tool execution intercept.
 ///
 /// The context carries the tool name, the argument payload entering this
@@ -247,9 +217,8 @@ impl ToolExecutionContext {
 
 /// Wrap or replace tool execution with access to the full call context.
 ///
-/// This is the canonical tool execution intercept shape. Unlike
-/// [`ToolExecutionFn`], the argument payload is carried on the context rather
-/// than passed separately, and the managed `tool_call_id` is available.
+/// The argument payload is carried on the context rather than passed
+/// separately, and the managed `tool_call_id` is available.
 ///
 /// # Parameters
 /// - First argument: Per-call [`ToolExecutionContext`].
@@ -262,7 +231,7 @@ impl ToolExecutionContext {
 /// # Errors
 /// The future resolves to an error when the intercept or remaining execution
 /// chain fails.
-pub type ToolExecutionContextFn = Arc<
+pub type ToolExecutionFn = Arc<
     dyn Fn(
             ToolExecutionContext,
             ToolExecutionNextFn,
@@ -270,20 +239,6 @@ pub type ToolExecutionContextFn = Arc<
         + Send
         + Sync,
 >;
-
-/// Adapt a legacy [`ToolExecutionFn`] into a [`ToolExecutionContextFn`].
-///
-/// The adapter unpacks the tool name and arguments from the context and drops
-/// the `tool_call_id`, so legacy intercepts observe their original signature.
-#[must_use]
-pub fn tool_execution_fn_with_context(callable: ToolExecutionFn) -> ToolExecutionContextFn {
-    Arc::new(move |context: ToolExecutionContext, next| {
-        let callable = callable.clone();
-        let name = context.tool_name().to_string();
-        let args = context.into_arguments();
-        Box::pin(async move { callable(&name, args, next).await })
-    })
-}
 
 /// Internal continuation carrying both a tool result and accumulated marks.
 pub(crate) type ToolExecutionOutcomeNextFn = Arc<

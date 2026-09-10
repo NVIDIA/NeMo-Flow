@@ -32,7 +32,7 @@ the dynamic-library boundary on the stable C-compatible ABI.
 | `PluginContext` | Installs component-owned subscribers, guardrails, intercepts, continuations, and streams. |
 | `PluginRuntime` | Emits marks and manages Relay-owned scopes and scope stacks through typed host helpers. |
 | `nemo_relay_plugin!` | Exports the one versioned native entry point used by the loader. |
-| Native ABI v4 | Keeps C-compatible host and plugin tables behind the safe Rust interface while the host retains frozen v3 and v2 tables for previously compiled plugins. |
+| Native ABI v5 | Keeps C-compatible host and plugin tables behind the safe Rust interface while the host retains frozen v4, v3, and v2 tables for previously compiled plugins. |
 | Typed async middleware | Drives guardrails, sanitizers, and intercepts on a per-component SDK-owned Tokio executor. Subscribers and raw ABI registrations remain synchronous. |
 | Async continuations and streams | `ToolNext`, `LlmNext`, and `LlmStreamNext` support repeated or concurrent downstream calls. Streaming LLM continuations use a pull-based host handle. |
 | Tool results | `ToolNext` returns `ToolExecutionResult`, which keeps an application result and optional annotation together. |

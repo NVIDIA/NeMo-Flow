@@ -308,7 +308,7 @@ class DocumentationPlugin:
 
         if settings["runtime"]["emit_marks"] or settings["runtime"]["emit_isolated_scope"]:
 
-            async def runtime_events(_name, args, next_call):
+            async def runtime_events(context, next_call):
                 if settings["runtime"]["emit_marks"]:
                     scope.event(
                         "documentation-plugin.request",
@@ -318,7 +318,7 @@ class DocumentationPlugin:
                     with nemo_relay.use_scope_stack(nemo_relay.create_scope_stack()):
                         with scope.scope("documentation-plugin.isolated", nemo_relay.ScopeType.Custom):
                             pass
-                downstream = await next_call(args)
+                downstream = await next_call(context.arguments)
                 return nemo_relay.ToolExecutionInterceptOutcome(
                     downstream.result,
                     annotation=downstream.annotation,
@@ -332,8 +332,8 @@ class DocumentationPlugin:
 
         if execution["enabled"]:
 
-            async def tool_execution(_name, args, next_call):
-                result = await next_call(args)
+            async def tool_execution(context, next_call):
+                result = await next_call(context.arguments)
                 marks = (
                     [nemo_relay.PendingMarkSpec("documentation-plugin.tool-complete")]
                     if execution["emit_pending_marks"]

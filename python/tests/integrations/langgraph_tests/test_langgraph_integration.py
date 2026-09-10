@@ -110,8 +110,8 @@ def test_create_tool_node_routes_standalone_tool_calls_through_relay(
     add_offset.__annotations__["state"] = Annotated[dict[str, Any], InjectedState]
     add_offset_tool = tool(add_offset)
 
-    async def rewrite_tool_args(_name: str, args: nemo_relay.Json, next_call: Any) -> Any:
-        downstream = await next_call({**cast(dict[str, Any], args), "value": 4})
+    async def rewrite_tool_args(context: nemo_relay.ToolExecutionContext, next_call: Any) -> Any:
+        downstream = await next_call({**cast(dict[str, Any], context.arguments), "value": 4})
         return nemo_relay.ToolExecutionInterceptOutcome(
             downstream.result,
             annotation=downstream.annotation,

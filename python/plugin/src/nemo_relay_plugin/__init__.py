@@ -66,7 +66,6 @@ Public callback aliases:
     ToolConditionalCallback: Tool execution guardrail callback.
     ToolRequestCallback: Tool request intercept callback.
     ToolExecutionCallback: Tool execution intercept callback.
-    ToolExecutionContextCallback: Context-carrying tool execution intercept callback.
     LlmSanitizeRequestCallback: LLM request sanitizer callback.
     LlmSanitizeResponseCallback: LLM response sanitizer callback.
     LlmConditionalCallback: LLM execution guardrail callback.
@@ -137,7 +136,6 @@ from ._api import (
     ToolConditionalCallback,
     ToolExecutionCallback,
     ToolExecutionContext,
-    ToolExecutionContextCallback,
     ToolExecutionInterceptOutcome,
     ToolExecutionResult,
     ToolNext,
@@ -201,7 +199,6 @@ __all__ = [
     "ToolConditionalCallback",
     "ToolExecutionCallback",
     "ToolExecutionContext",
-    "ToolExecutionContextCallback",
     "ToolExecutionInterceptOutcome",
     "ToolExecutionResult",
     "ToolNext",

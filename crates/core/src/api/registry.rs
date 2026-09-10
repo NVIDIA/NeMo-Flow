@@ -7,8 +7,7 @@
 use crate::api::runtime::{
     ConditionalMiddlewareGuardrailFn, EventMetadataInjectorFn, EventSanitizeFn, LlmConditionalFn,
     LlmExecutionFn, LlmRequestInterceptFn, LlmSanitizeRequestFn, LlmSanitizeResponseFn,
-    LlmStreamExecutionFn, ToolConditionalFn, ToolExecutionContextFn, ToolExecutionFn,
-    ToolInterceptFn, ToolSanitizeFn, tool_execution_fn_with_context,
+    LlmStreamExecutionFn, ToolConditionalFn, ToolExecutionFn, ToolInterceptFn, ToolSanitizeFn,
 };
 use crate::api::runtime::{current_scope_stack, global_context};
 use crate::api::shared::ensure_runtime_owner;
@@ -822,40 +821,12 @@ global_execution_registry_api!(
     /// callback returns a canonical tool execution outcome, while its
     /// continuation resolves to the downstream
     /// [`ToolExecutionResult`](crate::api::tool::ToolExecutionResult).
-    register_tool_execution_intercept_v2,
-    /// Deregister a global tool execution intercept registered through either
-    /// [`register_tool_execution_intercept`] or
-    /// [`register_tool_execution_intercept_v2`].
+    register_tool_execution_intercept,
+    /// Deregister a global tool execution intercept.
     deregister_tool_execution_intercept,
     tool_execution_intercepts,
-    ToolExecutionContextFn
+    ToolExecutionFn
 );
-
-/// Register a global tool execution intercept using the legacy callback shape.
-///
-/// The callback receives `(tool_name, arguments, next)` and cannot observe the
-/// managed `tool_call_id`; use [`register_tool_execution_intercept_v2`] for
-/// that. Both shapes share one registry, so they order by `priority` together
-/// and a single [`deregister_tool_execution_intercept`] removes either.
-///
-/// # Parameters
-/// - `name`: Unique middleware name in the global registry.
-/// - `priority`: Lower values run earlier in the chain.
-/// - `callable`: Legacy execution intercept callback stored under `name`.
-///
-/// # Returns
-/// A [`Result`] that is `Ok(())` when the intercept was registered.
-///
-/// # Errors
-/// Returns [`FlowError::AlreadyExists`] when the name is already in use or an
-/// internal error if the runtime state cannot be updated.
-pub fn register_tool_execution_intercept(
-    name: &str,
-    priority: i32,
-    callable: ToolExecutionFn,
-) -> Result<()> {
-    register_tool_execution_intercept_v2(name, priority, tool_execution_fn_with_context(callable))
-}
 
 global_guardrail_registry_api!(
     /// Register a global LLM sanitize-request guardrail.
@@ -1019,50 +990,12 @@ scope_execution_registry_api!(
     /// owning scope. Each callback returns a canonical tool execution outcome,
     /// while its continuation resolves to the downstream
     /// [`ToolExecutionResult`](crate::api::tool::ToolExecutionResult).
-    scope_register_tool_execution_intercept_v2,
-    /// Deregister a scope-local tool execution intercept registered through
-    /// either [`scope_register_tool_execution_intercept`] or
-    /// [`scope_register_tool_execution_intercept_v2`].
+    scope_register_tool_execution_intercept,
+    /// Deregister a scope-local tool execution intercept.
     scope_deregister_tool_execution_intercept,
     tool_execution_intercepts,
-    ToolExecutionContextFn
+    ToolExecutionFn
 );
-
-/// Register a scope-local tool execution intercept using the legacy callback
-/// shape.
-///
-/// The callback receives `(tool_name, arguments, next)` and cannot observe the
-/// managed `tool_call_id`; use [`scope_register_tool_execution_intercept_v2`]
-/// for that. Both shapes share one registry, so they order by `priority`
-/// together and a single [`scope_deregister_tool_execution_intercept`] removes
-/// either.
-///
-/// # Parameters
-/// - `scope_uuid`: UUID of the active scope that owns the middleware.
-/// - `name`: Unique middleware name within that scope.
-/// - `priority`: Lower values run earlier in the chain.
-/// - `callable`: Legacy execution intercept callback stored under `name`.
-///
-/// # Returns
-/// A [`Result`] that is `Ok(())` when the intercept was registered.
-///
-/// # Errors
-/// Returns [`FlowError::NotFound`] when the scope is not active,
-/// [`FlowError::AlreadyExists`] when the name is already in use on that scope,
-/// or an internal error if the runtime owner check fails.
-pub fn scope_register_tool_execution_intercept(
-    scope_uuid: &uuid::Uuid,
-    name: &str,
-    priority: i32,
-    callable: ToolExecutionFn,
-) -> Result<()> {
-    scope_register_tool_execution_intercept_v2(
-        scope_uuid,
-        name,
-        priority,
-        tool_execution_fn_with_context(callable),
-    )
-}
 
 scope_guardrail_registry_api!(
     /// Register a scope-local LLM sanitize-request guardrail.

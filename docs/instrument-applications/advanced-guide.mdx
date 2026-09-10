@@ -226,7 +226,6 @@ NeMo Relay exposes the same core middleware families for tools and LLMs:
 | Conditional execution | `register_tool_conditional_execution` | `register_llm_conditional_execution` | Yes, by rejecting |
 | Request intercept | `register_tool_request` | `register_llm_request` | Yes |
 | Execution intercept | `register_tool_execution` | `register_llm_execution` | Yes |
-| Execution intercept with context | `register_tool_execution_v2` | Not applicable | Yes |
 | Stream execution intercept | Not applicable | `register_llm_stream_execution` | Yes |
 
 Sanitize guardrails affect only the payload recorded on emitted events. Tool
@@ -236,14 +235,12 @@ annotation. Request intercepts affect the real request that reaches the tool or
 provider. Execution intercepts wrap the callback itself and are only available
 when the invocation uses managed execution.
 
-A tool execution intercept registered through the `_v2` family receives a
-`ToolExecutionContext` — carrying the tool name, the arguments, and the managed
-`tool_call_id` — in place of the tool name and arguments. Use it when an
-intercept short-circuits execution and must still correlate its result with the
-originating tool call. Both families share one registry, so they order together
-by priority and `deregister_tool_execution` removes either. See
+A tool execution intercept receives a `ToolExecutionContext` carrying the tool
+name, the arguments, and the managed `tool_call_id`. Use it when an intercept
+short-circuits execution and must still correlate its result with the
+originating tool call. See
 [Tool Execution Intercept Outcomes](/reference/tool-execution-intercept-outcomes)
-for the per-binding names.
+for the per-binding contract.
 
 ### Node.js Callback Failures
 

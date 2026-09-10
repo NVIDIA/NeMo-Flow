@@ -202,9 +202,6 @@ type ToolSanitizeFn = Arc<dyn Fn(&str, Json) -> BoxFutureResult<Json> + Send + S
 type ToolConditionalFn = Arc<dyn Fn(String, Json) -> BoxFutureResult<Option<String>> + Send + Sync>;
 type ToolRequestFn = Arc<dyn Fn(String, Json) -> BoxFutureResult<Json> + Send + Sync>;
 type ToolExecutionFn = Arc<
-    dyn Fn(&str, Json, ToolNext) -> BoxFutureResult<ToolExecutionInterceptOutcome> + Send + Sync,
->;
-type ToolExecutionContextFn = Arc<
     dyn Fn(ToolExecutionContext, ToolNext) -> BoxFutureResult<ToolExecutionInterceptOutcome>
         + Send
         + Sync,
@@ -380,7 +377,6 @@ struct WorkerHandlers {
     tool_conditionals: HashMap<String, ToolConditionalFn>,
     tool_requests: HashMap<String, ToolRequestFn>,
     tool_executions: HashMap<String, ToolExecutionFn>,
-    tool_execution_contexts: HashMap<String, ToolExecutionContextFn>,
     llm_sanitize_requests: HashMap<String, LlmSanitizeRequestFn>,
     llm_sanitize_responses: HashMap<String, LlmSanitizeResponseFn>,
     llm_conditionals: HashMap<String, LlmConditionalFn>,
@@ -664,33 +660,6 @@ impl PluginContext {
         priority: i32,
         callback: F,
     ) where
-        F: Fn(&str, Json, ToolNext) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<ToolExecutionInterceptOutcome>> + Send + 'static,
-    {
-        self.push_registration(
-            name,
-            RegistrationSurface::ToolExecutionIntercept,
-            priority,
-            false,
-        );
-        self.handlers.tool_executions.insert(
-            name.into(),
-            Arc::new(move |tool, value, next| Box::pin(callback(tool, value, next))),
-        );
-    }
-
-    /// Registers a tool execution intercept receiving the full call context.
-    ///
-    /// The callback receives a [`ToolExecutionContext`] carrying the tool name,
-    /// the arguments entering this intercept, and the managed `tool_call_id`,
-    /// so an intercept that completes execution without calling
-    /// [`ToolNext::call`] can associate its result with the originating call.
-    pub fn register_tool_execution_intercept_v2<F, Fut>(
-        &mut self,
-        name: &str,
-        priority: i32,
-        callback: F,
-    ) where
         F: Fn(ToolExecutionContext, ToolNext) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<ToolExecutionInterceptOutcome>> + Send + 'static,
     {
@@ -700,7 +669,7 @@ impl PluginContext {
             priority,
             false,
         );
-        self.handlers.tool_execution_contexts.insert(
+        self.handlers.tool_executions.insert(
             name.into(),
             Arc::new(move |context, next| Box::pin(callback(context, next))),
         );
@@ -2442,19 +2411,13 @@ impl WorkerService {
             runtime: self.runtime.clone(),
             continuation_id: request.continuation_id,
         };
-        // A registration name lives in exactly one handler map, so checking the
-        // context map first is unambiguous rather than a precedence rule.
-        if let Some(handler) = self.tool_execution_context(&request.registration_name)? {
-            let context = ToolExecutionContext {
-                tool_name: payload.tool_name,
-                arguments: payload.value,
-                tool_call_id: payload.tool_call_id,
-            };
-            let future = with_thread_scope(scope, || handler(context, next));
-            return tool_execution_response(future.await?);
-        }
         let handler = self.tool_execution(&request.registration_name)?;
-        let future = with_thread_scope(scope, || handler(&payload.tool_name, payload.value, next));
+        let context = ToolExecutionContext {
+            tool_name: payload.tool_name,
+            arguments: payload.value,
+            tool_call_id: payload.tool_call_id,
+        };
+        let future = with_thread_scope(scope, || handler(context, next));
         tool_execution_response(future.await?)
     }
 
@@ -2677,16 +2640,6 @@ impl WorkerService {
             .ok_or_else(|| {
                 WorkerSdkError::InvalidInput(format!("tool execution '{name}' not registered"))
             })
-    }
-
-    fn tool_execution_context(&self, name: &str) -> Result<Option<ToolExecutionContextFn>> {
-        Ok(self
-            .handlers
-            .lock()
-            .map_err(|err| WorkerSdkError::Callback(format!("handler lock poisoned: {err}")))?
-            .tool_execution_contexts
-            .get(name)
-            .cloned())
     }
 
     fn llm_sanitize_request(&self, name: &str) -> Result<LlmSanitizeRequestFn> {

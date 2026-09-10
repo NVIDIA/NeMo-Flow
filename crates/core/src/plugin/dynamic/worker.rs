@@ -104,6 +104,7 @@ use super::{
     DynamicPluginKind, DynamicPluginManifest, DynamicPluginManifestLoad,
     DynamicPluginTeardownOutcome, WorkerRuntime, deregister_tracked_registrations_checked,
     validate_annotated_request_consumer_compatibility, validate_dynamic_plugin_relay_compatibility,
+    validate_tool_execution_context_compatibility,
 };
 
 const JSON_SCHEMA: &str = "nemo.relay.Json@1";
@@ -682,6 +683,12 @@ fn load_one_worker_plugin(
             .is_ok_and(|surface| surface == RegistrationSurface::LlmRequestIntercept)
     }) {
         validate_annotated_request_consumer_compatibility(&relay_compat, &spec.plugin_id)?;
+    }
+    if registrations.iter().any(|registration| {
+        RegistrationSurface::try_from(registration.surface)
+            .is_ok_and(|surface| surface == RegistrationSurface::ToolExecutionIntercept)
+    }) {
+        validate_tool_execution_context_compatibility(&relay_compat, &spec.plugin_id)?;
     }
 
     log::info!(
@@ -1323,29 +1330,28 @@ impl WorkerPluginInstance {
                     })
                 }),
             ),
-            RegistrationSurface::ToolExecutionIntercept => ctx
-                .register_tool_execution_intercept_v2(
-                    name,
-                    priority,
-                    Arc::new(move |context: ToolExecutionContext, next| {
-                        let instance = instance.clone();
-                        let callback_name = callback_name.clone();
-                        let tool_name = context.tool_name().to_owned();
-                        let tool_call_id = context.tool_call_id().map(str::to_owned);
-                        let value = context.into_arguments();
-                        Box::pin(async move {
-                            instance
-                                .invoke_tool_execution(
-                                    &callback_name,
-                                    &tool_name,
-                                    value,
-                                    tool_call_id.as_deref(),
-                                    next,
-                                )
-                                .await
-                        })
-                    }),
-                ),
+            RegistrationSurface::ToolExecutionIntercept => ctx.register_tool_execution_intercept(
+                name,
+                priority,
+                Arc::new(move |context: ToolExecutionContext, next| {
+                    let instance = instance.clone();
+                    let callback_name = callback_name.clone();
+                    let tool_name = context.tool_name().to_owned();
+                    let tool_call_id = context.tool_call_id().map(str::to_owned);
+                    let value = context.into_arguments();
+                    Box::pin(async move {
+                        instance
+                            .invoke_tool_execution(
+                                &callback_name,
+                                &tool_name,
+                                value,
+                                tool_call_id.as_deref(),
+                                next,
+                            )
+                            .await
+                    })
+                }),
+            ),
             _ => Err(PluginError::RegistrationFailed(format!(
                 "worker plugin '{}' cannot install registration surface {} as a tool callback",
                 self.plugin_kind,

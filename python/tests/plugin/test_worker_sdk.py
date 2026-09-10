@@ -605,8 +605,8 @@ class AllSurfacesPlugin(WorkerPlugin):
         async def tool_request(name: str, value: Json) -> Json:
             return _tag(value, f"request_{name}")
 
-        async def tool_execution(name: str, value: Json, next_call: ToolNext) -> ToolExecutionInterceptOutcome:
-            result = await next_call.call(_tag(value, f"execute_{name}"))
+        async def tool_execution(context: ToolExecutionContext, next_call: ToolNext) -> ToolExecutionInterceptOutcome:
+            result = await next_call.call(_tag(context.arguments, f"execute_{context.tool_name}"))
             return ToolExecutionInterceptOutcome(
                 result=_tag(result.result, "tool_execution"),
                 annotation=result.annotation,
@@ -1966,18 +1966,18 @@ async def test_llm_request_intercept_rejects_non_object_typed_results(invalid_pa
     assert "must be a JSON object" in response.error.message
 
 
-async def test_tool_execution_intercept_rejects_legacy_raw_result():
+async def test_tool_execution_intercept_rejects_raw_result():
     class LegacyResultPlugin(WorkerPlugin):
         plugin_id = "tests.legacy_tool_execution_result"
 
         def register(self, ctx: PluginContext, config: Json) -> None:
             del config
 
-            def legacy_result(name: str, value: Json, next_call: ToolNext) -> Any:
-                del name, value, next_call
+            def raw_result(context: ToolExecutionContext, next_call: ToolNext) -> Any:
+                del context, next_call
                 return {"legacy_result": True}
 
-            ctx.register_tool_execution_intercept("legacy", legacy_result)
+            ctx.register_tool_execution_intercept("legacy", raw_result)
 
     service = _service(LegacyResultPlugin(), RecordingHostStub())
     await _register(service)
@@ -2684,8 +2684,10 @@ async def test_cancel_invocation_stops_active_async_callback_and_is_idempotent()
         def register(self, ctx: PluginContext, config: Json) -> None:
             del config
 
-            async def tool_execution(tool_name: str, value: Json, next_call: ToolNext) -> ToolExecutionInterceptOutcome:
-                del tool_name, value, next_call
+            async def tool_execution(
+                context: ToolExecutionContext, next_call: ToolNext
+            ) -> ToolExecutionInterceptOutcome:
+                del context, next_call
                 started.set()
                 try:
                     await asyncio.Event().wait()
@@ -3457,7 +3459,7 @@ def _all_expected_surfaces() -> list[int]:
     ]
 
 
-async def test_tool_execution_intercept_v2_receives_tool_call_id():
+async def test_tool_execution_intercept_receives_tool_call_id():
     seen: dict[str, Json] = {}
 
     class ContextPlugin(WorkerPlugin):
@@ -3473,7 +3475,7 @@ async def test_tool_execution_intercept_v2_receives_tool_call_id():
                 downstream = await next_call.call(context.arguments)
                 return ToolExecutionInterceptOutcome(result=downstream.result)
 
-            ctx.register_tool_execution_intercept_v2("context", tool_execution)
+            ctx.register_tool_execution_intercept("context", tool_execution)
 
     service = _service(ContextPlugin(), RecordingHostStub())
     await _register(service)
@@ -3497,7 +3499,7 @@ async def test_tool_execution_intercept_v2_receives_tool_call_id():
     assert seen["tool_call_id"] == "worker-call-9"
 
 
-async def test_tool_execution_intercept_v2_tool_call_id_is_none_when_absent():
+async def test_tool_execution_intercept_tool_call_id_is_none_when_absent():
     seen: dict[str, Json] = {}
 
     class ContextPlugin(WorkerPlugin):
@@ -3511,7 +3513,7 @@ async def test_tool_execution_intercept_v2_tool_call_id_is_none_when_absent():
                 downstream = await next_call.call(context.arguments)
                 return ToolExecutionInterceptOutcome(result=downstream.result)
 
-            ctx.register_tool_execution_intercept_v2("context_none", tool_execution)
+            ctx.register_tool_execution_intercept("context_none", tool_execution)
 
     service = _service(ContextPlugin(), RecordingHostStub())
     await _register(service)

@@ -7,17 +7,16 @@ use super::{
     NemoRelayFreeFn, NemoRelayLlmConditionalCb, NemoRelayLlmExecInterceptCb,
     NemoRelayLlmRequestInterceptCb, NemoRelayLlmSanitizeRequestCb, NemoRelayLlmSanitizeResponseCb,
     NemoRelayPluginRegisterCb, NemoRelayPluginValidateCb, NemoRelayStatus,
-    NemoRelayToolConditionalCb, NemoRelayToolExecInterceptCb, NemoRelayToolExecInterceptContextCb,
-    NemoRelayToolSanitizeCb, Pin, Plugin, PluginConfig, PluginError, PluginHostActivation,
-    PluginRegistrationContext, c_char, c_str_to_json, c_str_to_string, clear_last_error,
-    deregister_plugin, json_to_c_string, last_error_message, list_plugin_kinds,
-    nemo_relay_string_free, register_adaptive_component, register_plugin, set_last_error,
-    status_from_plugin_error, tokio_runtime, wrap_event_metadata_injector_fn,
-    wrap_event_sanitize_fn, wrap_event_subscriber, wrap_llm_conditional_fn,
-    wrap_llm_exec_intercept_fn, wrap_llm_request_intercept_fn, wrap_llm_sanitize_request_fn,
-    wrap_llm_sanitize_response_fn, wrap_llm_stream_exec_intercept_fn, wrap_tool_conditional_fn,
-    wrap_tool_exec_intercept_context_fn, wrap_tool_exec_intercept_fn,
-    wrap_tool_request_intercept_fn, wrap_tool_sanitize_fn,
+    NemoRelayToolConditionalCb, NemoRelayToolExecInterceptCb, NemoRelayToolSanitizeCb, Pin, Plugin,
+    PluginConfig, PluginError, PluginHostActivation, PluginRegistrationContext, c_char,
+    c_str_to_json, c_str_to_string, clear_last_error, deregister_plugin, json_to_c_string,
+    last_error_message, list_plugin_kinds, nemo_relay_string_free, register_adaptive_component,
+    register_plugin, set_last_error, status_from_plugin_error, tokio_runtime,
+    wrap_event_metadata_injector_fn, wrap_event_sanitize_fn, wrap_event_subscriber,
+    wrap_llm_conditional_fn, wrap_llm_exec_intercept_fn, wrap_llm_request_intercept_fn,
+    wrap_llm_sanitize_request_fn, wrap_llm_sanitize_response_fn, wrap_llm_stream_exec_intercept_fn,
+    wrap_tool_conditional_fn, wrap_tool_exec_intercept_fn, wrap_tool_request_intercept_fn,
+    wrap_tool_sanitize_fn,
 };
 use crate::api::event_registry::Surface;
 use nemo_relay::plugin::dynamic::{initialize, validate, validate_exact};
@@ -1021,42 +1020,6 @@ pub unsafe extern "C" fn nemo_relay_plugin_context_register_tool_execution_inter
     };
     let wrapped = wrap_tool_exec_intercept_fn(cb, user_data, free_fn);
     match unsafe { &mut *((*ctx).0) }.register_tool_execution_intercept(&name, priority, wrapped) {
-        Ok(()) => NemoRelayStatus::Ok,
-        Err(err) => status_from_plugin_error(&err),
-    }
-}
-
-/// Register a tool execution intercept receiving the full call context into the
-/// plugin registration context.
-///
-/// The callback receives `(context_json, next_fn, next_ctx)`, where
-/// `context_json` is a JSON object with `tool_name`, `arguments`, and
-/// `tool_call_id`.
-///
-/// # Safety
-/// `ctx` and `name` must be valid pointers and the callback must remain valid for the duration
-/// of the plugin registration lifetime.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nemo_relay_plugin_context_register_tool_execution_intercept_v2(
-    ctx: *mut FfiPluginContext,
-    name: *const c_char,
-    priority: i32,
-    cb: NemoRelayToolExecInterceptContextCb,
-    user_data: *mut libc::c_void,
-    free_fn: NemoRelayFreeFn,
-) -> NemoRelayStatus {
-    clear_last_error();
-    if ctx.is_null() {
-        set_last_error("plugin context is null");
-        return NemoRelayStatus::NullPointer;
-    }
-    let name = match c_str_to_string(name) {
-        Ok(value) => value,
-        Err(status) => return status,
-    };
-    let wrapped = wrap_tool_exec_intercept_context_fn(cb, user_data, free_fn);
-    match unsafe { &mut *((*ctx).0) }.register_tool_execution_intercept_v2(&name, priority, wrapped)
-    {
         Ok(()) => NemoRelayStatus::Ok,
         Err(err) => status_from_plugin_error(&err),
     }

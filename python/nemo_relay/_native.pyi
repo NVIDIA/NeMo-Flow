@@ -96,10 +96,6 @@ _EventMetadataInjector: TypeAlias = Callable[
 _LlmConditionalExecutionGuardrail: TypeAlias = Callable[["LLMRequest"], Optional[str] | Awaitable[Optional[str]]]
 _ToolRequestIntercept: TypeAlias = Callable[[str, _Json], _Json | Awaitable[_Json]]
 _ToolExecutionIntercept: TypeAlias = Callable[
-    [str, _Json, Callable[[_Json], Awaitable["ToolExecutionResult[_Json]"]]],
-    "ToolExecutionInterceptOutcome | Awaitable[ToolExecutionInterceptOutcome]",
-]
-_ToolExecutionContextIntercept: TypeAlias = Callable[
     ["ToolExecutionContext", Callable[[_Json], Awaitable["ToolExecutionResult[_Json]"]]],
     "ToolExecutionInterceptOutcome | Awaitable[ToolExecutionInterceptOutcome]",
 ]
@@ -2205,27 +2201,9 @@ def register_tool_execution_intercept(name: str, priority: int, callable: _ToolE
     Args:
         name: Unique intercept name.
         priority: Execution order; lower values run first.
-        callable: Middleware callback returning
-            ``ToolExecutionInterceptOutcome``. It may call or short-circuit
-            ``next``; ``next`` resolves to the canonical downstream
-            ``ToolExecutionResult`` while Relay retains downstream pending marks.
-
-    Returns:
-        ``None``.
-    """
-    ...
-
-def register_tool_execution_intercept_v2(name: str, priority: int, callable: _ToolExecutionContextIntercept) -> None:
-    """Register a global tool execution intercept receiving the call context.
-
-    Args:
-        name: Unique intercept name.
-        priority: Execution order; lower values run first.
         callable: Middleware callback invoked as ``callable(context, next)``.
-            ``context`` is a ``ToolExecutionContext`` carrying ``tool_name``,
-            ``arguments``, and the managed ``tool_call_id``. The callback
-            returns ``ToolExecutionInterceptOutcome`` and may call or
-            short-circuit ``next``.
+            The context carries ``tool_name``, ``arguments``, and
+            ``tool_call_id``.
 
     Returns:
         ``None``.
@@ -2472,32 +2450,8 @@ def scope_register_tool_execution_intercept(
         scope_uuid: UUID of the owning scope.
         name: Unique intercept name within that scope.
         priority: Execution order; lower values run first.
-        callable: Middleware callback returning
-            ``ToolExecutionInterceptOutcome`` while the owning scope is active.
-            Its ``next`` continuation resolves to the canonical downstream
-            ``ToolExecutionResult`` while Relay retains downstream pending marks.
-
-    Returns:
-        ``None``.
-    """
-    ...
-
-def scope_register_tool_execution_intercept_v2(
-    scope_uuid: str,
-    name: str,
-    priority: int,
-    callable: _ToolExecutionContextIntercept,
-) -> None:
-    """Register a scope-local tool execution intercept receiving the context.
-
-    Args:
-        scope_uuid: UUID of the owning scope.
-        name: Unique intercept name within that scope.
-        priority: Execution order; lower values run first.
         callable: Middleware callback invoked as ``callable(context, next)``
-            while the owning scope is active. ``context`` is a
-            ``ToolExecutionContext`` carrying ``tool_name``, ``arguments``, and
-            the managed ``tool_call_id``.
+            while the owning scope is active.
 
     Returns:
         ``None``.

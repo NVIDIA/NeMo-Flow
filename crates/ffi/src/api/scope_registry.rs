@@ -5,12 +5,11 @@ use super::{
     NemoRelayEventSubscriberCb, NemoRelayFreeFn, NemoRelayLlmConditionalCb,
     NemoRelayLlmExecInterceptCb, NemoRelayLlmRequestInterceptCb, NemoRelayLlmSanitizeRequestCb,
     NemoRelayLlmSanitizeResponseCb, NemoRelayStatus, NemoRelayToolConditionalCb,
-    NemoRelayToolExecInterceptCb, NemoRelayToolExecInterceptContextCb, NemoRelayToolSanitizeCb,
-    c_char, c_str_to_string, clear_last_error, core_registry_api, core_subscriber_api,
-    set_last_error, status_from_error, wrap_event_subscriber, wrap_llm_conditional_fn,
-    wrap_llm_exec_intercept_fn, wrap_llm_request_intercept_fn, wrap_llm_sanitize_request_fn,
-    wrap_llm_sanitize_response_fn, wrap_llm_stream_exec_intercept_fn, wrap_tool_conditional_fn,
-    wrap_tool_exec_intercept_context_fn, wrap_tool_exec_intercept_fn,
+    NemoRelayToolExecInterceptCb, NemoRelayToolSanitizeCb, c_char, c_str_to_string,
+    clear_last_error, core_registry_api, core_subscriber_api, set_last_error, status_from_error,
+    wrap_event_subscriber, wrap_llm_conditional_fn, wrap_llm_exec_intercept_fn,
+    wrap_llm_request_intercept_fn, wrap_llm_sanitize_request_fn, wrap_llm_sanitize_response_fn,
+    wrap_llm_stream_exec_intercept_fn, wrap_tool_conditional_fn, wrap_tool_exec_intercept_fn,
     wrap_tool_request_intercept_fn, wrap_tool_sanitize_fn,
 };
 
@@ -288,7 +287,7 @@ ffi_scope_intercept_tool_api!(
 /// - `scope_uuid`: UUID of the target scope (null-terminated C string).
 /// - `name`: Unique intercept name.
 /// - `priority`: Execution priority (lower runs first).
-/// - `exec_cb`: Middleware callback receiving args and a next function.
+/// - `exec_cb`: Middleware callback receiving context and a next function.
 /// - `exec_user_data`: Opaque pointer for the execution callback.
 /// - `exec_free`: Optional destructor for `exec_user_data`.
 ///
@@ -319,45 +318,7 @@ pub unsafe extern "C" fn nemo_relay_scope_register_tool_execution_intercept(
     }
 }
 
-/// Register a scope-local tool execution intercept receiving the call context.
-///
-/// The callback receives `(context_json, next_fn, next_ctx)`, where
-/// `context_json` is a JSON object with `tool_name`, `arguments`, and
-/// `tool_call_id`, and applies only while the owning scope is active.
-///
-/// # Safety
-/// `scope_uuid` and `name` must be valid C strings. Callback pointers must be
-/// valid.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nemo_relay_scope_register_tool_execution_intercept_v2(
-    scope_uuid: *const c_char,
-    name: *const c_char,
-    priority: i32,
-    exec_cb: NemoRelayToolExecInterceptContextCb,
-    exec_user_data: *mut libc::c_void,
-    exec_free: NemoRelayFreeFn,
-) -> NemoRelayStatus {
-    clear_last_error();
-    let uuid = match parse_scope_uuid(scope_uuid) {
-        Ok(u) => u,
-        Err(status) => return status,
-    };
-    let name = match c_str_to_string(name) {
-        Ok(s) => s,
-        Err(status) => return status,
-    };
-    let exec = wrap_tool_exec_intercept_context_fn(exec_cb, exec_user_data, exec_free);
-    match core_registry_api::scope_register_tool_execution_intercept_v2(
-        &uuid, &name, priority, exec,
-    ) {
-        Ok(()) => NemoRelayStatus::Ok,
-        Err(e) => status_from_error(&e),
-    }
-}
-
 /// Deregister a scope-local tool execution intercept by name.
-///
-/// Removes an intercept registered through either registration shape.
 ///
 /// # Safety
 /// `scope_uuid` and `name` must be valid C strings.

@@ -150,10 +150,8 @@ extern int32_t nemo_relay_register_tool_request_intercept(const char* name, int3
 extern int32_t nemo_relay_deregister_tool_request_intercept(const char* name);
 // Middleware chain intercept callback types (must be declared before use in externs)
 typedef char* (*NemoRelayToolExecNextFn)(const char* args_json, void* next_ctx);
-typedef char* (*NemoRelayToolExecInterceptCb)(void* user_data, const char* args_json, NemoRelayToolExecNextFn next_fn, void* next_ctx);
-typedef char* (*NemoRelayToolExecInterceptContextCb)(void* user_data, const char* context_json, NemoRelayToolExecNextFn next_fn, void* next_ctx);
+typedef char* (*NemoRelayToolExecInterceptCb)(void* user_data, const char* context_json, NemoRelayToolExecNextFn next_fn, void* next_ctx);
 extern int32_t nemo_relay_register_tool_execution_intercept(const char* name, int32_t priority, NemoRelayToolExecInterceptCb exec_cb, void* exec_user_data, NemoRelayFreeFn exec_free);
-extern int32_t nemo_relay_register_tool_execution_intercept_v2(const char* name, int32_t priority, NemoRelayToolExecInterceptContextCb exec_cb, void* exec_user_data, NemoRelayFreeFn exec_free);
 extern int32_t nemo_relay_deregister_tool_execution_intercept(const char* name);
 
 // LLM guardrails
@@ -217,7 +215,6 @@ extern int32_t nemo_relay_scope_deregister_tool_conditional_execution_guardrail(
 extern int32_t nemo_relay_scope_register_tool_request_intercept(const char* scope_uuid, const char* name, int32_t priority, _Bool break_chain, NemoRelayToolSanitizeFn cb, void* user_data, NemoRelayFreeFn free_fn);
 extern int32_t nemo_relay_scope_deregister_tool_request_intercept(const char* scope_uuid, const char* name);
 extern int32_t nemo_relay_scope_register_tool_execution_intercept(const char* scope_uuid, const char* name, int32_t priority, NemoRelayToolExecInterceptCb exec_cb, void* exec_user_data, NemoRelayFreeFn exec_free);
-extern int32_t nemo_relay_scope_register_tool_execution_intercept_v2(const char* scope_uuid, const char* name, int32_t priority, NemoRelayToolExecInterceptContextCb exec_cb, void* exec_user_data, NemoRelayFreeFn exec_free);
 extern int32_t nemo_relay_scope_deregister_tool_execution_intercept(const char* scope_uuid, const char* name);
 
 // Scope-local LLM guardrails
@@ -1736,7 +1733,7 @@ func DeregisterToolRequestIntercept(name string) error {
 }
 
 // RegisterToolExecutionIntercept registers an execution intercept following
-// the middleware chain pattern. execFn is called with the args and a `next`
+// the middleware chain pattern. execFn receives ToolExecutionContext and a `next`
 // function. Call `next` to invoke the next intercept or original
 // implementation; skip calling `next` to short-circuit the chain.
 func RegisterToolExecutionIntercept(name string, priority int32, execFn ToolExecutionInterceptFunc) error {
@@ -1746,26 +1743,6 @@ func RegisterToolExecutionIntercept(name string, priority int32, execFn ToolExec
 	return checkStatus(C.nemo_relay_register_tool_execution_intercept(
 		cName, C.int32_t(priority),
 		C.NemoRelayToolExecInterceptCb(C.goToolExecInterceptTrampoline),
-		execID,
-		C.NemoRelayFreeFn(C.goFreeTrampoline),
-	))
-}
-
-// RegisterToolExecutionInterceptV2 registers an execution intercept that
-// receives the full ToolExecutionContext, including the managed ToolCallID.
-// Call `next` with the arguments to invoke the next intercept or original
-// implementation; skip calling `next` to short-circuit the chain.
-//
-// Intercepts registered here share one registry with those registered through
-// RegisterToolExecutionIntercept, so both shapes order together by priority
-// and DeregisterToolExecutionIntercept removes either.
-func RegisterToolExecutionInterceptV2(name string, priority int32, execFn ToolExecutionInterceptContextFunc) error {
-	execID := registerClosure(execFn)
-	cName := C.CString(name)
-	defer C.free(unsafe.Pointer(cName))
-	return checkStatus(C.nemo_relay_register_tool_execution_intercept_v2(
-		cName, C.int32_t(priority),
-		C.NemoRelayToolExecInterceptContextCb(C.goToolExecInterceptContextTrampoline),
 		execID,
 		C.NemoRelayFreeFn(C.goFreeTrampoline),
 	))
@@ -3339,23 +3316,6 @@ func ScopeRegisterToolExecutionIntercept(scopeUUID, name string, priority int32,
 	return checkStatus(C.nemo_relay_scope_register_tool_execution_intercept(
 		cScopeUUID, cName, C.int32_t(priority),
 		C.NemoRelayToolExecInterceptCb(C.goToolExecInterceptTrampoline),
-		execID,
-		C.NemoRelayFreeFn(C.goFreeTrampoline),
-	))
-}
-
-// ScopeRegisterToolExecutionInterceptV2 registers a scope-local tool execution
-// intercept that receives the full ToolExecutionContext, including the managed
-// ToolCallID.
-func ScopeRegisterToolExecutionInterceptV2(scopeUUID, name string, priority int32, execFn ToolExecutionInterceptContextFunc) error {
-	execID := registerClosure(execFn)
-	cScopeUUID := C.CString(scopeUUID)
-	defer C.free(unsafe.Pointer(cScopeUUID))
-	cName := C.CString(name)
-	defer C.free(unsafe.Pointer(cName))
-	return checkStatus(C.nemo_relay_scope_register_tool_execution_intercept_v2(
-		cScopeUUID, cName, C.int32_t(priority),
-		C.NemoRelayToolExecInterceptContextCb(C.goToolExecInterceptContextTrampoline),
 		execID,
 		C.NemoRelayFreeFn(C.goFreeTrampoline),
 	))

@@ -257,8 +257,8 @@ class TestTypedToolExecute:
     async def test_annotation_passes_through_json_intercepts_unchanged(self):
         seen_annotations = []
 
-        async def intercept(_name, args, next):
-            downstream = await next(args)
+        async def intercept(context, next_call):
+            downstream = await next_call(context.arguments)
             seen_annotations.append(downstream.annotation)
             return ToolExecutionInterceptOutcome(
                 downstream.result,

@@ -6128,11 +6128,14 @@ async fn native_callback_wrappers_release_error_outputs_and_preserve_reasons() {
         None,
     );
     assert!(
-        tool_execution("tool", json!({}), tool_next(Ok(Json::Null)))
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("tool execution failed")
+        tool_execution(
+            ToolExecutionContext::new("tool", json!({})),
+            tool_next(Ok(Json::Null)),
+        )
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("tool execution failed")
     );
 
     let llm_conditional = wrap_llm_conditional_fn(

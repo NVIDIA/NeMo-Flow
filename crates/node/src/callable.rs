@@ -1576,27 +1576,14 @@ pub fn wrap_js_response_codec(
     })
 }
 
-/// Wrap a JS function `(args, next) => { result, annotation?, pendingMarks? }` for tool execution intercept.
-///
-/// The JS callback receives the tool arguments and a real `next(args)` function
-/// that returns a Promise for the downstream result.
-pub fn wrap_js_tool_exec_intercept_fn(
-    func: Arc<PromiseAwareFn>,
-) -> nemo_relay::api::runtime::ToolExecutionFn {
-    Arc::new(move |_name: &str, args: Json, next: ToolExecutionNextFn| {
-        let func = func.clone();
-        Box::pin(call_js_tool_exec_intercept(func, args, next))
-    })
-}
-
 /// Wrap a JS function `(context, next) => outcome` for tool execution intercepts.
 ///
 /// The JS callback receives a plain object carrying `toolName`, `arguments`,
 /// and `toolCallId`, so it can correlate a result it produces itself with the
 /// originating tool call.
-pub fn wrap_js_tool_exec_intercept_context_fn(
+pub fn wrap_js_tool_exec_intercept_fn(
     func: Arc<PromiseAwareFn>,
-) -> nemo_relay::api::runtime::ToolExecutionContextFn {
+) -> nemo_relay::api::runtime::ToolExecutionFn {
     Arc::new(
         move |context: ToolExecutionContext, next: ToolExecutionNextFn| {
             let func = func.clone();
@@ -1612,9 +1599,7 @@ pub fn wrap_js_tool_exec_intercept_context_fn(
 
 /// Invoke a JS tool execution intercept and decode its outcome.
 ///
-/// `primary` is the callback's first argument: the raw arguments for the
-/// legacy shape, or the serialized context for the context shape. Both shapes
-/// share the continuation packaging and outcome decoding.
+/// `primary` is the serialized tool execution context.
 async fn call_js_tool_exec_intercept(
     func: Arc<PromiseAwareFn>,
     primary: Json,

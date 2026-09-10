@@ -2083,7 +2083,6 @@ describe('LLM intercepts', () => {
       'registerToolConditionalExecutionGuardrail',
       'registerToolRequestIntercept',
       'registerToolExecutionIntercept',
-      'registerToolExecutionInterceptV2',
       'registerLlmSanitizeRequestGuardrail',
       'registerLlmSanitizeResponseGuardrail',
       'registerLlmConditionalExecutionGuardrail',
@@ -2095,7 +2094,6 @@ describe('LLM intercepts', () => {
       'scopeRegisterToolConditionalExecutionGuardrail',
       'scopeRegisterToolRequestIntercept',
       'scopeRegisterToolExecutionIntercept',
-      'scopeRegisterToolExecutionInterceptV2',
       'scopeRegisterLlmSanitizeRequestGuardrail',
       'scopeRegisterLlmSanitizeResponseGuardrail',
       'scopeRegisterLlmConditionalExecutionGuardrail',
@@ -2119,14 +2117,15 @@ describe('LLM intercepts', () => {
     );
     assert.equal(
       declarations.split('next: (args: Json) => ToolExecutionResult | Promise<ToolExecutionResult>').length - 1,
-      4,
-      'global and scope-local tool intercept declarations, in both argument and context shapes, must expose canonical tool results',
+      2,
+      'global and scope-local tool intercept declarations must expose canonical tool results',
     );
     assert.equal(
       declarations.split("context: import('./plugin').ToolExecutionContext").length - 1,
       2,
       'global and scope-local context intercept declarations must expose the tool execution context',
     );
+    assert.doesNotMatch(declarations, /registerToolExecutionInterceptV2|scopeRegisterToolExecutionInterceptV2/);
   });
 
   it('plugin declarations expose Promise middleware and the implemented stream contract', () => {

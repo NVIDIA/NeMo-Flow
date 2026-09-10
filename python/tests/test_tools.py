@@ -475,11 +475,11 @@ class TestToolIntercepts:
         intercepts.register_tool_execution(
             "py_exec_int",
             1,
-            lambda name, args, next: ToolExecutionInterceptOutcome({"intercepted": True}),
+            lambda context, next_call: ToolExecutionInterceptOutcome({"intercepted": True}),
         )
         assert intercepts.deregister_tool_execution("py_exec_int")
 
-    async def test_execution_intercept_v2_receives_tool_call_id(self):
+    async def test_execution_intercept_receives_tool_call_id(self):
         seen = {}
 
         async def context_intercept(context, next_call):
@@ -489,7 +489,7 @@ class TestToolIntercepts:
             downstream = await next_call(context.arguments)
             return ToolExecutionInterceptOutcome(downstream.result)
 
-        intercepts.register_tool_execution_v2("py_exec_ctx", 1, context_intercept)
+        intercepts.register_tool_execution("py_exec_ctx", 1, context_intercept)
         try:
             result = await tools.execute(
                 "ctx_tool",
@@ -505,7 +505,7 @@ class TestToolIntercepts:
         assert seen["tool_call_id"] == "call-abc123"
         assert seen["arguments"] == {"value": 42}
 
-    async def test_execution_intercept_v2_tool_call_id_is_none_when_absent(self):
+    async def test_execution_intercept_tool_call_id_is_none_when_absent(self):
         seen = {}
 
         async def context_intercept(context, next_call):
@@ -513,36 +513,13 @@ class TestToolIntercepts:
             downstream = await next_call(context.arguments)
             return ToolExecutionInterceptOutcome(downstream.result)
 
-        intercepts.register_tool_execution_v2("py_exec_ctx_none", 1, context_intercept)
+        intercepts.register_tool_execution("py_exec_ctx_none", 1, context_intercept)
         try:
             await tools.execute("plain_tool", {}, lambda args: ToolExecutionResult(args))
         finally:
             assert intercepts.deregister_tool_execution("py_exec_ctx_none")
 
         assert seen["tool_call_id"] is None
-
-    async def test_legacy_and_v2_execution_intercepts_share_priority_order(self):
-        order = []
-
-        async def legacy_intercept(name, args, next_call):
-            order.append("legacy")
-            downstream = await next_call(args)
-            return ToolExecutionInterceptOutcome(downstream.result)
-
-        async def context_intercept(context, next_call):
-            order.append("context")
-            downstream = await next_call(context.arguments)
-            return ToolExecutionInterceptOutcome(downstream.result)
-
-        intercepts.register_tool_execution("py_exec_legacy_first", 1, legacy_intercept)
-        intercepts.register_tool_execution_v2("py_exec_ctx_second", 2, context_intercept)
-        try:
-            await tools.execute("mixed_tool", {"value": 1}, lambda args: ToolExecutionResult(args))
-        finally:
-            assert intercepts.deregister_tool_execution("py_exec_legacy_first")
-            assert intercepts.deregister_tool_execution("py_exec_ctx_second")
-
-        assert order == ["legacy", "context"]
 
     def test_duplicate_intercept_raises(self):
         intercepts.register_tool_request("py_dup_int", 1, False, lambda n, a: a)
@@ -673,11 +650,11 @@ class TestToolInterceptsAsync:
         provider_calls: list[dict] = []
         events: list[Event] = []
 
-        async def middleware(_name, args, next):
+        async def middleware(context, next_call):
             started.set()
             try:
                 await release.wait()
-                downstream = await next(args)
+                downstream = await next_call(context.arguments)
                 return ToolExecutionInterceptOutcome(
                     downstream.result,
                     annotation=downstream.annotation,
@@ -732,9 +709,9 @@ class TestToolInterceptsAsync:
             observed.append(("request", request_id.get()))
             return args
 
-        def execution_intercept(_name, args, _next):
+        def execution_intercept(context, _next_call):
             observed.append(("execution", request_id.get()))
-            return ToolExecutionInterceptOutcome(args)
+            return ToolExecutionInterceptOutcome(context.arguments)
 
         guardrails.register_tool_conditional_execution("py_tool_context_conditional", 1, conditional)
         intercepts.register_tool_request("py_tool_context_request", 1, False, request_intercept)
@@ -797,7 +774,7 @@ class TestToolInterceptsAsync:
         intercepts.register_tool_execution(
             "py_exec_replace",
             1,
-            lambda name, args, next: ToolExecutionInterceptOutcome({"from_intercept": True}),
+            lambda context, next_call: ToolExecutionInterceptOutcome({"from_intercept": True}),
         )
 
         def original_func(args):
@@ -812,8 +789,8 @@ class TestToolInterceptsAsync:
     async def test_execution_intercept_can_await_next(self):
         events = []
 
-        async def middleware(name, args, next):
-            downstream = await next({"value": args["value"] + 1})
+        async def middleware(context, next_call):
+            downstream = await next_call({"value": context.arguments["value"] + 1})
             result = dict(downstream.result)
             result["from_intercept"] = True
             return ToolExecutionInterceptOutcome(
@@ -852,12 +829,12 @@ class TestToolInterceptsAsync:
         late_task: asyncio.Task[dict] | None = None
         provider_calls: list[dict] = []
 
-        async def middleware(_name, args, next):
+        async def middleware(context, next_call):
             nonlocal late_task
 
             async def invoke_late():
                 await release_late_next.wait()
-                return await next(args)
+                return await next_call(context.arguments)
 
             late_task = asyncio.create_task(invoke_late())
             return ToolExecutionInterceptOutcome({"source": "intercept"})
@@ -886,10 +863,10 @@ class TestToolInterceptsAsync:
         both_pushed = asyncio.Event()
         pushed = 0
 
-        async def middleware(_name, _args, next):
+        async def middleware(_context, next_call):
             first, second = await asyncio.gather(
-                next({"branch": "first"}),
-                next({"branch": "second"}),
+                next_call({"branch": "first"}),
+                next_call({"branch": "second"}),
             )
             return ToolExecutionInterceptOutcome([first.result, second.result])
 
@@ -925,7 +902,7 @@ class TestToolInterceptsAsync:
         with use_scope_stack(second_stack):
             second_scope = scope.get_handle().uuid
 
-        async def middleware(_name, _args, next):
+        async def middleware(_context, next_call):
             async def invoke(stack, branch):
                 nonlocal entered
                 with use_scope_stack(stack):
@@ -934,7 +911,7 @@ class TestToolInterceptsAsync:
                         both_entered.set()
                     await both_entered.wait()
                     await asyncio.sleep(0)
-                    return await next({"branch": branch})
+                    return await next_call({"branch": branch})
 
             first, second = await asyncio.gather(
                 invoke(first_stack, "first"),
@@ -962,14 +939,14 @@ class TestToolInterceptsAsync:
         both_entered = asyncio.Event()
         entered = 0
 
-        async def middleware(_name, args, next):
+        async def middleware(context, next_call):
             nonlocal entered
             entered += 1
             if entered == 2:
                 both_entered.set()
             await both_entered.wait()
             await asyncio.sleep(0)
-            downstream = await next(args)
+            downstream = await next_call(context.arguments)
             return ToolExecutionInterceptOutcome(
                 downstream.result,
                 annotation=downstream.annotation,
@@ -1004,7 +981,7 @@ class TestToolInterceptsAsync:
         intercepts.register_tool_execution(
             "py_exec_legacy",
             1,
-            lambda name, args, next: {"legacy_result": True},  # type: ignore[arg-type] # ty: ignore[invalid-argument-type]
+            lambda context, next_call: {"legacy_result": True},  # type: ignore[arg-type] # ty: ignore[invalid-argument-type]
         )
         try:
             with pytest.raises(RuntimeError, match="must return ToolExecutionInterceptOutcome") as error:
@@ -1015,8 +992,8 @@ class TestToolInterceptsAsync:
             intercepts.deregister_tool_execution("py_exec_legacy")
 
     async def test_execution_intercept_rejects_downstream_result_without_unwrapping(self):
-        async def leftover(_name, args, next):
-            downstream = await next(args)
+        async def leftover(context, next_call):
+            downstream = await next_call(context.arguments)
             return ToolExecutionInterceptOutcome(downstream)  # type: ignore[arg-type]
 
         intercepts.register_tool_execution("py_exec_leftover", 1, leftover)
@@ -1029,8 +1006,8 @@ class TestToolInterceptsAsync:
             intercepts.deregister_tool_execution("py_exec_leftover")
 
     async def test_execution_intercept_rejects_downstream_result_as_its_outcome(self):
-        async def leftover_return(_name, args, next):
-            return await next(args)  # type: ignore[return-value]
+        async def leftover_return(context, next_call):
+            return await next_call(context.arguments)  # type: ignore[return-value]
 
         intercepts.register_tool_execution("py_exec_leftover_return", 1, leftover_return)
         try:

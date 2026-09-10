@@ -28,7 +28,6 @@ from nemo_relay import (
     LlmSanitizeResponseGuardrail,
     LlmStreamExecutionIntercept,
     ToolConditionalExecutionGuardrail,
-    ToolExecutionContextIntercept,
     ToolExecutionIntercept,
     ToolRequestIntercept,
     ToolSanitizeGuardrail,
@@ -246,12 +245,6 @@ class PluginContext(Protocol):
 
     def register_tool_execution_intercept(self, name: str, priority: int, callback: ToolExecutionIntercept) -> None:
         """Register a tool execution intercept for this component."""
-        ...
-
-    def register_tool_execution_intercept_v2(
-        self, name: str, priority: int, callback: ToolExecutionContextIntercept
-    ) -> None:
-        """Register a tool execution intercept receiving the full call context."""
         ...
 
 

@@ -54,8 +54,7 @@ typedef struct FfiPluginContext FfiPluginContext;
 
 // Middleware chain next function types
 typedef char* (*NemoRelayToolExecNextFn)(const char* args_json, void* next_ctx);
-typedef char* (*NemoRelayToolExecInterceptCb)(void* user_data, const char* args_json, NemoRelayToolExecNextFn next_fn, void* next_ctx);
-typedef char* (*NemoRelayToolExecInterceptContextCb)(void* user_data, const char* context_json, NemoRelayToolExecNextFn next_fn, void* next_ctx);
+typedef char* (*NemoRelayToolExecInterceptCb)(void* user_data, const char* context_json, NemoRelayToolExecNextFn next_fn, void* next_ctx);
 typedef char* (*NemoRelayLlmExecNextFn)(const char* native_json, void* next_ctx);
 typedef char* (*NemoRelayLlmExecInterceptCb)(void* user_data, const char* native_json, NemoRelayLlmExecNextFn next_fn, void* next_ctx);
 
@@ -182,14 +181,12 @@ type ConditionalMiddlewareGuardrailFunc func(kinds []RuntimeRegistrationKind, re
 type ToolExecutionFunc func(args json.RawMessage) (ToolExecutionResult, error)
 
 // ToolExecutionInterceptFunc is a callback for tool execution intercepts
-// following the middleware chain pattern. It receives the tool arguments and
+// following the middleware chain pattern. It receives the full call context and
 // a `next` function. Call `next` to invoke the next intercept in the chain
 // (or the original tool implementation if this is the innermost intercept).
 // Skip calling `next` to short-circuit the chain entirely. The callback returns
 // the canonical outcome containing the tool result, optional annotation, and
 // any pending marks.
-type ToolExecutionInterceptFunc func(args json.RawMessage, next func(json.RawMessage) (ToolExecutionResult, error)) (ToolExecutionInterceptOutcome, error)
-
 // ToolExecutionContext is the per-call context delivered to a tool execution
 // intercept. ToolCallID is the provider-issued correlation identifier recorded
 // on the managed tool call, and is empty when the call did not record one. It
@@ -204,11 +201,11 @@ type ToolExecutionContext struct {
 	ToolCallID string          `json:"tool_call_id,omitempty"`
 }
 
-// ToolExecutionInterceptContextFunc is a callback for tool execution intercepts
+// ToolExecutionInterceptFunc is a callback for tool execution intercepts
 // that receives the full call context instead of only the arguments. Call
 // `next` with the arguments to invoke the next intercept in the chain (or the
 // original tool implementation), or skip calling it to short-circuit.
-type ToolExecutionInterceptContextFunc func(ctx ToolExecutionContext, next func(json.RawMessage) (ToolExecutionResult, error)) (ToolExecutionInterceptOutcome, error)
+type ToolExecutionInterceptFunc func(ctx ToolExecutionContext, next func(json.RawMessage) (ToolExecutionResult, error)) (ToolExecutionInterceptOutcome, error)
 
 // LLMCodecKind identifies the active codec state supplied to a sanitizer.
 type LLMCodecKind string
@@ -884,39 +881,8 @@ func goLlmExecTrampoline(userData unsafe.Pointer, nativeJSON *C.char) *C.char {
 }
 
 //export goToolExecInterceptTrampoline
-func goToolExecInterceptTrampoline(userData unsafe.Pointer, argsJSON *C.char, nextFn C.NemoRelayToolExecNextFn, nextCtx unsafe.Pointer) *C.char {
+func goToolExecInterceptTrampoline(userData unsafe.Pointer, contextJSON *C.char, nextFn C.NemoRelayToolExecNextFn, nextCtx unsafe.Pointer) *C.char {
 	fn := lookupClosure(userData).(ToolExecutionInterceptFunc)
-	goArgs := json.RawMessage(C.GoString(argsJSON))
-	goNext := func(args json.RawMessage) (ToolExecutionResult, error) {
-		cArgs := C.CString(string(args))
-		defer C.free(unsafe.Pointer(cArgs))
-		result := C.callToolExecNext(nextFn, cArgs, nextCtx)
-		if result == nil {
-			return ToolExecutionResult{}, lastError()
-		}
-		defer C.nemo_relay_string_free(result)
-		return decodeToolExecutionResult([]byte(C.GoString(result)))
-	}
-	outcome, err := fn(goArgs, goNext)
-	if err != nil {
-		setLastErrorMessage(err.Error())
-		return nil
-	}
-	if outcome.PendingMarks == nil {
-		outcome.PendingMarks = []PendingMarkSpec{}
-	}
-	outcome.Annotation = normalizeToolExecutionAnnotation(outcome.Annotation)
-	outcomeJSON, err := jsonMarshal(outcome)
-	if err != nil {
-		setLastErrorMessage(err.Error())
-		return nil
-	}
-	return C.CString(string(outcomeJSON))
-}
-
-//export goToolExecInterceptContextTrampoline
-func goToolExecInterceptContextTrampoline(userData unsafe.Pointer, contextJSON *C.char, nextFn C.NemoRelayToolExecNextFn, nextCtx unsafe.Pointer) *C.char {
-	fn := lookupClosure(userData).(ToolExecutionInterceptContextFunc)
 	var goContext ToolExecutionContext
 	if err := json.Unmarshal([]byte(C.GoString(contextJSON)), &goContext); err != nil {
 		setLastErrorMessage(err.Error())

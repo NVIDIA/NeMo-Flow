@@ -1527,45 +1527,6 @@ fn build_plugin_context(
         register_tool_request_intercept,
     )?;
 
-    let tool_regs_v2 = registrations.clone();
-    let tool_exec_namespace_v2 = namespace_prefix.clone();
-    let register_tool_execution_intercept_v2 = env.create_function_from_closure(
-        "__nemo_relay_adaptive_register_tool_execution_intercept_v2",
-        move |ctx| {
-            let name = format!("{}{}", tool_exec_namespace_v2, ctx.get::<String>(0)?);
-            let priority = ctx.get::<i32>(1)?;
-            let callback = ctx.get::<JsFunction>(2)?;
-            core_registry_api::register_tool_execution_intercept_v2(
-                &name,
-                priority,
-                callable::wrap_js_tool_exec_intercept_context_fn(Arc::new(PromiseAwareFn::new(
-                    ctx.env, &callback,
-                )?)),
-            )
-            .map_err(to_napi_err)?;
-
-            let name_clone = name.clone();
-            tool_regs_v2.lock().unwrap().push(PluginRegistration::new(
-                "plugin",
-                name_clone.clone(),
-                Box::new(move || {
-                    core_registry_api::deregister_tool_execution_intercept(&name_clone)
-                        .map(|_| ())
-                        .map_err(|e| {
-                            PluginError::RegistrationFailed(format!(
-                                "tool execution intercept deregistration failed: {e}"
-                            ))
-                        })
-                }),
-            ));
-            ctx.env.get_undefined()
-        },
-    )?;
-    context.set_named_property(
-        "registerToolExecutionInterceptV2",
-        register_tool_execution_intercept_v2,
-    )?;
-
     let tool_regs = registrations.clone();
     let tool_exec_namespace = namespace_prefix;
     let register_tool_execution_intercept = env.create_function_from_closure(
@@ -3944,52 +3905,10 @@ napi_intercept_tool_api!(
 
 /// Register a tool execution intercept following the middleware chain pattern.
 ///
-/// The `callable` receives the args and a `next` function. Call `next(args)` to invoke
-/// the next intercept or original implementation; skip calling `next` to short-circuit
-/// the chain. `next` may be called repeatedly or concurrently while `callable` is
-/// pending; each call receives an isolated scope-stack branch, and unfinished or
-/// later calls reject after `callable` settles.
+/// The `callable` receives a `ToolExecutionContext` and a `next` function.
+/// Call `next(context.arguments)` to invoke the remaining chain.
 #[napi]
 pub fn register_tool_execution_intercept(
-    env: Env,
-    name: String,
-    priority: i32,
-    #[napi(
-        ts_arg_type = "(args: Json, next: (args: Json) => ToolExecutionResult | Promise<ToolExecutionResult>) => { result: Json; annotation?: Json; pendingMarks?: Array<import('./plugin').PendingMarkSpec> } | Promise<{ result: Json; annotation?: Json; pendingMarks?: Array<import('./plugin').PendingMarkSpec> }>"
-    )]
-    callable: JsFunction,
-) -> Result<()> {
-    let pa_fn = std::sync::Arc::new(
-        crate::promise_call::PromiseAwareFn::new(&env, &callable).map_err(|e| {
-            napi::Error::from_reason(format!("failed to create PromiseAwareFn: {e}"))
-        })?,
-    );
-    core_registry_api::register_tool_execution_intercept(
-        &name,
-        priority,
-        callable::wrap_js_tool_exec_intercept_fn(pa_fn.clone()),
-    )
-    .map_err(to_napi_err)?;
-    Ok(())
-}
-
-/// Register a tool execution intercept that receives the full call context.
-///
-/// The `callable` receives a `ToolExecutionContext` carrying `toolName`,
-/// `arguments`, and the managed `toolCallId`, plus a `next` function. Call
-/// `next(context.arguments)` to invoke the next intercept or original
-/// implementation; skip calling `next` to short-circuit the chain.
-///
-/// `toolCallId` is the provider-issued identifier recorded on the managed tool
-/// call, so an intercept that completes execution itself can associate its
-/// result with the originating call. It is `undefined` when the tool call did
-/// not record one.
-///
-/// Intercepts registered here share one registry with those registered through
-/// `registerToolExecutionIntercept`, so both shapes order together by priority
-/// and `deregisterToolExecutionIntercept` removes either.
-#[napi]
-pub fn register_tool_execution_intercept_v2(
     env: Env,
     name: String,
     priority: i32,
@@ -4003,10 +3922,10 @@ pub fn register_tool_execution_intercept_v2(
             napi::Error::from_reason(format!("failed to create PromiseAwareFn: {e}"))
         })?,
     );
-    core_registry_api::register_tool_execution_intercept_v2(
+    core_registry_api::register_tool_execution_intercept(
         &name,
         priority,
-        callable::wrap_js_tool_exec_intercept_context_fn(pa_fn.clone()),
+        callable::wrap_js_tool_exec_intercept_fn(pa_fn.clone()),
     )
     .map_err(to_napi_err)?;
     Ok(())
@@ -4593,46 +4512,9 @@ napi_scope_intercept_tool_api!(
 
 /// Register a scope-local tool execution intercept following the middleware chain pattern.
 ///
-/// The `callable` receives the args and a `next` function. Call `next(args)` to invoke
-/// the next intercept or original implementation; skip calling `next` to short-circuit
-/// the chain. `next` may be called repeatedly or concurrently while `callable` is
-/// pending; each call receives an isolated scope-stack branch, and unfinished or
-/// later calls reject after `callable` settles.
+/// The `callable` receives a `ToolExecutionContext` and a `next` function.
 #[napi]
 pub fn scope_register_tool_execution_intercept(
-    env: Env,
-    scope_uuid: String,
-    name: String,
-    priority: i32,
-    #[napi(
-        ts_arg_type = "(args: Json, next: (args: Json) => ToolExecutionResult | Promise<ToolExecutionResult>) => { result: Json; annotation?: Json; pendingMarks?: Array<import('./plugin').PendingMarkSpec> } | Promise<{ result: Json; annotation?: Json; pendingMarks?: Array<import('./plugin').PendingMarkSpec> }>"
-    )]
-    callable: JsFunction,
-) -> Result<()> {
-    let uuid = uuid::Uuid::parse_str(&scope_uuid)
-        .map_err(|e| napi::Error::from_reason(format!("invalid UUID: {e}")))?;
-    let pa_fn = std::sync::Arc::new(
-        crate::promise_call::PromiseAwareFn::new(&env, &callable).map_err(|e| {
-            napi::Error::from_reason(format!("failed to create PromiseAwareFn: {e}"))
-        })?,
-    );
-    core_registry_api::scope_register_tool_execution_intercept(
-        &uuid,
-        &name,
-        priority,
-        callable::wrap_js_tool_exec_intercept_fn(pa_fn.clone()),
-    )
-    .map_err(to_napi_err)?;
-    Ok(())
-}
-
-/// Register a scope-local tool execution intercept receiving the call context.
-///
-/// The `callable` receives a `ToolExecutionContext` carrying `toolName`,
-/// `arguments`, and the managed `toolCallId`, plus a `next` function, and
-/// applies only while the owning scope is active.
-#[napi]
-pub fn scope_register_tool_execution_intercept_v2(
     env: Env,
     scope_uuid: String,
     name: String,
@@ -4649,11 +4531,11 @@ pub fn scope_register_tool_execution_intercept_v2(
             napi::Error::from_reason(format!("failed to create PromiseAwareFn: {e}"))
         })?,
     );
-    core_registry_api::scope_register_tool_execution_intercept_v2(
+    core_registry_api::scope_register_tool_execution_intercept(
         &uuid,
         &name,
         priority,
-        callable::wrap_js_tool_exec_intercept_context_fn(pa_fn.clone()),
+        callable::wrap_js_tool_exec_intercept_fn(pa_fn.clone()),
     )
     .map_err(to_napi_err)?;
     Ok(())

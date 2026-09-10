@@ -20,15 +20,13 @@ use crate::callable::{
     NemoRelayLlmConditionalCb, NemoRelayLlmExecCb, NemoRelayLlmExecInterceptCb,
     NemoRelayLlmRequestInterceptCb, NemoRelayLlmSanitizeRequestCb, NemoRelayLlmSanitizeResponseCb,
     NemoRelayPluginRegisterCb, NemoRelayPluginValidateCb, NemoRelayToolConditionalCb,
-    NemoRelayToolExecCb, NemoRelayToolExecInterceptCb, NemoRelayToolExecInterceptContextCb,
-    NemoRelayToolSanitizeCb, wrap_codec_fn, wrap_collector_fn,
-    wrap_conditional_middleware_guardrail_fn, wrap_event_metadata_injector_fn,
+    NemoRelayToolExecCb, NemoRelayToolExecInterceptCb, NemoRelayToolSanitizeCb, wrap_codec_fn,
+    wrap_collector_fn, wrap_conditional_middleware_guardrail_fn, wrap_event_metadata_injector_fn,
     wrap_event_sanitize_fn, wrap_event_subscriber, wrap_finalizer_fn, wrap_llm_conditional_fn,
     wrap_llm_exec_fn, wrap_llm_exec_intercept_fn, wrap_llm_request_intercept_fn,
     wrap_llm_sanitize_request_fn, wrap_llm_sanitize_response_fn, wrap_llm_stream_exec_fn,
     wrap_llm_stream_exec_intercept_fn, wrap_tool_conditional_fn, wrap_tool_exec_fn,
-    wrap_tool_exec_intercept_context_fn, wrap_tool_exec_intercept_fn,
-    wrap_tool_request_intercept_fn, wrap_tool_sanitize_fn,
+    wrap_tool_exec_intercept_fn, wrap_tool_request_intercept_fn, wrap_tool_sanitize_fn,
 };
 use crate::convert::{
     c_str_to_json, c_str_to_opt_json, c_str_to_string, json_to_c_string, nemo_relay_string_free,

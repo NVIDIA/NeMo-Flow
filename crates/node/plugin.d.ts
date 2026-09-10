@@ -232,14 +232,14 @@ export interface ToolExecutionInterceptOutcome {
  * Per-call context delivered to a tool execution intercept.
  *
  * `toolCallId` is the provider-issued correlation identifier recorded on the
- * managed tool call, or `undefined` when the call did not record one. It lets
+ * managed tool call, or `null` when the call did not record one. It lets
  * an intercept that completes execution without invoking the remaining chain
  * associate its result with the originating tool call.
  */
 export interface ToolExecutionContext {
   toolName: string;
   arguments: Json;
-  toolCallId?: string;
+  toolCallId: string | null;
 }
 
 /** Scalar value accepted in event metadata additions. */
@@ -371,18 +371,6 @@ export interface PluginContext {
    * The `next` callback resolves to the canonical downstream result.
    */
   registerToolExecutionIntercept(
-    name: string,
-    priority: number,
-    callback: (
-      args: Json,
-      next: (args: Json) => ToolExecutionResult | Promise<ToolExecutionResult>,
-    ) => ToolExecutionInterceptOutcome | Promise<ToolExecutionInterceptOutcome>,
-  ): void;
-  /**
-   * Register tool execution middleware that receives the full call context,
-   * including the managed `toolCallId`.
-   */
-  registerToolExecutionInterceptV2(
     name: string,
     priority: number,
     callback: (

@@ -1557,8 +1557,8 @@ py_intercept_tool_api!(
 
 /// Register a tool execution intercept that can replace the tool function.
 ///
-/// ``callable``: ``async (args: Any, next) -> Any`` — middleware intercept function.
-/// Call ``await next(args)`` to invoke the next intercept or original
+/// ``callable``: ``async (context: ToolExecutionContext, next) -> Any``.
+/// Call ``await next(context.arguments)`` to invoke the next intercept or original
 /// implementation; skip calling ``next`` to short-circuit.
 #[pyfunction]
 fn register_tool_execution_intercept(
@@ -1574,29 +1574,7 @@ fn register_tool_execution_intercept(
     .map_err(to_py_err)
 }
 
-/// Register a tool execution intercept that receives the full call context.
-///
-/// ``callable``: ``async (context: ToolExecutionContext, next) -> Any`` —
-/// middleware intercept function. The context carries ``tool_name``,
-/// ``arguments``, and the managed ``tool_call_id``. Call
-/// ``await next(context.arguments)`` to invoke the next intercept or original
-/// implementation; skip calling ``next`` to short-circuit.
-#[pyfunction]
-fn register_tool_execution_intercept_v2(
-    name: &str,
-    priority: i32,
-    callable: Py<PyAny>,
-) -> PyResult<()> {
-    core_registry_api::register_tool_execution_intercept_v2(
-        name,
-        priority,
-        py_callable::wrap_py_tool_exec_intercept_context_fn(callable),
-    )
-    .map_err(to_py_err)
-}
-
-/// Remove a previously registered tool execution intercept, registered through
-/// either registration shape.
+/// Remove a previously registered tool execution intercept.
 #[pyfunction]
 fn deregister_tool_execution_intercept(name: &str) -> PyResult<bool> {
     core_registry_api::deregister_tool_execution_intercept(name).map_err(to_py_err)
@@ -2116,27 +2094,7 @@ fn scope_register_tool_execution_intercept(
     .map_err(to_py_err)
 }
 
-/// Register a scope-local tool execution intercept that receives the full call
-/// context, including the managed ``tool_call_id``.
-#[pyfunction]
-fn scope_register_tool_execution_intercept_v2(
-    scope_uuid: &str,
-    name: &str,
-    priority: i32,
-    callable: Py<PyAny>,
-) -> PyResult<()> {
-    let uuid = parse_uuid(scope_uuid)?;
-    core_registry_api::scope_register_tool_execution_intercept_v2(
-        &uuid,
-        name,
-        priority,
-        py_callable::wrap_py_tool_exec_intercept_context_fn(callable),
-    )
-    .map_err(to_py_err)
-}
-
-/// Remove a previously registered scope-local tool execution intercept,
-/// registered through either registration shape.
+/// Remove a previously registered scope-local tool execution intercept.
 #[pyfunction]
 fn scope_deregister_tool_execution_intercept(scope_uuid: &str, name: &str) -> PyResult<bool> {
     let uuid = parse_uuid(scope_uuid)?;
@@ -2435,7 +2393,6 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(register_tool_request_intercept, m)?)?;
     m.add_function(wrap_pyfunction!(deregister_tool_request_intercept, m)?)?;
     m.add_function(wrap_pyfunction!(register_tool_execution_intercept, m)?)?;
-    m.add_function(wrap_pyfunction!(register_tool_execution_intercept_v2, m)?)?;
     m.add_function(wrap_pyfunction!(deregister_tool_execution_intercept, m)?)?;
 
     // LLM guardrails
@@ -2549,10 +2506,6 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(
         scope_register_tool_execution_intercept,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
-        scope_register_tool_execution_intercept_v2,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(

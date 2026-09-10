@@ -34,8 +34,8 @@ use nemo_relay_plugin::{
     NemoRelayNativeAsyncStreamMiddlewareCb, NemoRelayNativeConditionalMiddlewareCb,
     NemoRelayNativeEventSanitizeCb, NemoRelayNativeEventSubscriberCb, NemoRelayNativeFreeFn,
     NemoRelayNativeHostApiV1, NemoRelayNativeHostApiV3, NemoRelayNativeHostApiV4,
-    NemoRelayNativeLlmAsyncStream, NemoRelayNativeLlmCodecKind, NemoRelayNativeLlmConditionalCb,
-    NemoRelayNativeLlmExecutionCb, NemoRelayNativeLlmRequestCodec,
+    NemoRelayNativeHostApiV5, NemoRelayNativeLlmAsyncStream, NemoRelayNativeLlmCodecKind,
+    NemoRelayNativeLlmConditionalCb, NemoRelayNativeLlmExecutionCb, NemoRelayNativeLlmRequestCodec,
     NemoRelayNativeLlmRequestInterceptCb, NemoRelayNativeLlmResponseCodec,
     NemoRelayNativeLlmSanitizeRequestCb, NemoRelayNativeLlmSanitizeRequestContext,
     NemoRelayNativeLlmSanitizeResponseCb, NemoRelayNativeLlmSanitizeResponseContext,
@@ -43,9 +43,9 @@ use nemo_relay_plugin::{
     NemoRelayNativePluginRuntime, NemoRelayNativePluginV1, NemoRelayNativeScopeHandle,
     NemoRelayNativeScopeStack, NemoRelayNativeScopeStackBinding, NemoRelayNativeScopeType,
     NemoRelayNativeString, NemoRelayNativeToolConditionalCb, NemoRelayNativeToolExecutionCb,
-    NemoRelayNativeToolJsonCb, NemoRelayNativeWithScopeStackCb, NemoRelayStatus, PendingMarkSpec,
-    PluginContext, PluginRuntime, ScopeType, ToolExecutionInterceptOutcome, ToolExecutionResult,
-    ToolNext,
+    NemoRelayNativeToolExecutionContextCb, NemoRelayNativeToolJsonCb,
+    NemoRelayNativeWithScopeStackCb, NemoRelayStatus, PendingMarkSpec, PluginContext,
+    PluginRuntime, ScopeType, ToolExecutionInterceptOutcome, ToolExecutionResult, ToolNext,
 };
 use serde_json::{Map, json};
 
@@ -202,6 +202,22 @@ struct RegisteredToolExecution {
     cb: NemoRelayNativeToolExecutionCb,
     user_data: usize,
     free_fn: NemoRelayNativeFreeFn,
+}
+
+struct RegisteredToolExecutionContext {
+    name: String,
+    priority: i32,
+    cb: NemoRelayNativeToolExecutionContextCb,
+    user_data: usize,
+    free_fn: NemoRelayNativeFreeFn,
+}
+
+impl RegisteredToolExecutionContext {
+    unsafe fn free(self) {
+        if let Some(free_fn) = self.free_fn {
+            unsafe { free_fn(self.user_data as *mut c_void) };
+        }
+    }
 }
 
 impl RegisteredToolExecution {
@@ -365,6 +381,7 @@ impl_captured_registration!(
     RegisteredToolJson,
     RegisteredToolConditional,
     RegisteredToolExecution,
+    RegisteredToolExecutionContext,
     RegisteredLlmRequest,
     RegisteredLlmJson,
     RegisteredLlmConditional,
@@ -425,6 +442,8 @@ static EVENT_SANITIZE_REGISTRATION: Mutex<Option<RegisteredEventSanitize>> = Mut
 static TOOL_JSON_REGISTRATION: Mutex<Option<RegisteredToolJson>> = Mutex::new(None);
 static TOOL_CONDITIONAL_REGISTRATION: Mutex<Option<RegisteredToolConditional>> = Mutex::new(None);
 static TOOL_EXECUTION_REGISTRATION: Mutex<Option<RegisteredToolExecution>> = Mutex::new(None);
+static TOOL_EXECUTION_CONTEXT_REGISTRATION: Mutex<Option<RegisteredToolExecutionContext>> =
+    Mutex::new(None);
 static LLM_REQUEST_REGISTRATION: Mutex<Option<RegisteredLlmRequest>> = Mutex::new(None);
 static LLM_JSON_REGISTRATION: Mutex<Option<RegisteredLlmJson>> = Mutex::new(None);
 static LLM_CONDITIONAL_REGISTRATION: Mutex<Option<RegisteredLlmConditional>> = Mutex::new(None);
@@ -445,7 +464,7 @@ static UNAVAILABLE_CONTEXT_GATE_CALLS: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
 fn native_abi_struct_sizes_are_self_describing() {
-    assert_eq!(NEMO_RELAY_NATIVE_ABI_VERSION, 4);
+    assert_eq!(NEMO_RELAY_NATIVE_ABI_VERSION, 5);
     assert_eq!(
         size_of::<NemoRelayNativeHostApiV1>(),
         test_host().struct_size
@@ -508,6 +527,15 @@ fn assert_native_abi_platform_layout() {
         ),
         592
     );
+    assert_type_layout::<NemoRelayNativeHostApiV5>(8, 608);
+    assert_eq!(offset_of!(NemoRelayNativeHostApiV5, v4), 0);
+    assert_eq!(
+        offset_of!(
+            NemoRelayNativeHostApiV5,
+            plugin_context_register_tool_execution_intercept
+        ),
+        600
+    );
     assert_type_layout::<NemoRelayNativePluginV1>(8, 56);
     assert_eq!(plugin_offsets(), [0, 8, 16, 24, 32, 40, 48]);
     assert_type_layout::<NemoRelayNativeLlmStreamV1>(8, 40);
@@ -559,6 +587,15 @@ fn assert_native_abi_platform_layout() {
         ),
         292
     );
+    assert_type_layout::<NemoRelayNativeHostApiV5>(4, 300);
+    assert_eq!(offset_of!(NemoRelayNativeHostApiV5, v4), 0);
+    assert_eq!(
+        offset_of!(
+            NemoRelayNativeHostApiV5,
+            plugin_context_register_tool_execution_intercept
+        ),
+        296
+    );
     assert_type_layout::<NemoRelayNativePluginV1>(4, 28);
     assert_eq!(plugin_offsets(), [0, 4, 8, 12, 16, 20, 24]);
     assert_type_layout::<NemoRelayNativeLlmStreamV1>(4, 20);
@@ -589,6 +626,37 @@ fn native_abi_v4_extension_is_append_only() {
         assert_eq!(
             host_api_v4_offsets(),
             [0, 252, 256, 260, 264, 268, 272, 276, 280, 284, 288, 292]
+        );
+    }
+}
+
+#[test]
+fn native_abi_v5_extension_is_append_only() {
+    #[cfg(target_pointer_width = "64")]
+    {
+        assert_eq!(align_of::<NemoRelayNativeHostApiV5>(), 8);
+        assert_eq!(size_of::<NemoRelayNativeHostApiV5>(), 608);
+        assert_eq!(offset_of!(NemoRelayNativeHostApiV5, v4), 0);
+        assert_eq!(
+            offset_of!(
+                NemoRelayNativeHostApiV5,
+                plugin_context_register_tool_execution_intercept
+            ),
+            size_of::<NemoRelayNativeHostApiV4>()
+        );
+    }
+
+    #[cfg(target_pointer_width = "32")]
+    {
+        assert_eq!(align_of::<NemoRelayNativeHostApiV5>(), 4);
+        assert_eq!(size_of::<NemoRelayNativeHostApiV5>(), 300);
+        assert_eq!(offset_of!(NemoRelayNativeHostApiV5, v4), 0);
+        assert_eq!(
+            offset_of!(
+                NemoRelayNativeHostApiV5,
+                plugin_context_register_tool_execution_intercept
+            ),
+            size_of::<NemoRelayNativeHostApiV4>()
         );
     }
 }
@@ -908,8 +976,7 @@ unsafe extern "C" fn passthrough_tool_conditional_cb(
 
 unsafe extern "C" fn passthrough_tool_execution_cb(
     _user_data: *mut c_void,
-    _name: *const NemoRelayNativeString,
-    _args_json: *const NemoRelayNativeString,
+    _context_json: *const NemoRelayNativeString,
     _next_fn: nemo_relay_plugin::NemoRelayNativeToolNextFn,
     _next_ctx: *mut c_void,
     _out_outcome_json: *mut *mut NemoRelayNativeString,
@@ -1077,6 +1144,35 @@ unsafe extern "C" fn capture_tool_execution(
         replace_registration(
             &TOOL_EXECUTION_REGISTRATION,
             RegisteredToolExecution {
+                name,
+                priority,
+                cb,
+                user_data: user_data as usize,
+                free_fn,
+            },
+        );
+    }
+    status
+}
+
+unsafe extern "C" fn capture_tool_execution_context(
+    _ctx: *mut NemoRelayNativePluginContext,
+    name: *const NemoRelayNativeString,
+    priority: i32,
+    cb: NemoRelayNativeToolExecutionContextCb,
+    user_data: *mut c_void,
+    free_fn: NemoRelayNativeFreeFn,
+) -> NemoRelayStatus {
+    let status = *REGISTRATION_STATUS.lock().unwrap();
+    if status == NemoRelayStatus::Ok {
+        let host = test_host();
+        let name = match required_host_string(&host, name) {
+            Ok(name) => name,
+            Err(status) => return status,
+        };
+        replace_registration(
+            &TOOL_EXECUTION_CONTEXT_REGISTRATION,
+            RegisteredToolExecutionContext {
                 name,
                 priority,
                 cb,
@@ -2682,6 +2778,16 @@ fn test_host_v4() -> NemoRelayNativeHostApiV4 {
     }
 }
 
+fn test_host_v5() -> NemoRelayNativeHostApiV5 {
+    let mut v4 = test_host_v4();
+    v4.v3.v1.abi_version = 5;
+    v4.v3.v1.struct_size = size_of::<NemoRelayNativeHostApiV5>();
+    NemoRelayNativeHostApiV5 {
+        v4,
+        plugin_context_register_tool_execution_intercept: capture_tool_execution_context,
+    }
+}
+
 fn test_llm_request() -> LlmRequest {
     LlmRequest {
         headers: Map::new(),
@@ -2753,6 +2859,7 @@ fn reset_state() {
     clear_registration(&TOOL_JSON_REGISTRATION);
     clear_registration(&TOOL_CONDITIONAL_REGISTRATION);
     clear_registration(&TOOL_EXECUTION_REGISTRATION);
+    clear_registration(&TOOL_EXECUTION_CONTEXT_REGISTRATION);
     clear_registration(&LLM_REQUEST_REGISTRATION);
     clear_registration(&LLM_JSON_REGISTRATION);
     clear_registration(&LLM_CONDITIONAL_REGISTRATION);
@@ -2981,6 +3088,14 @@ fn take_tool_execution_registration() -> RegisteredToolExecution {
         .unwrap()
         .take()
         .expect("tool execution callback should be registered")
+}
+
+fn take_tool_execution_context_registration() -> RegisteredToolExecutionContext {
+    TOOL_EXECUTION_CONTEXT_REGISTRATION
+        .lock()
+        .unwrap()
+        .take()
+        .expect("context-aware tool execution callback should be registered")
 }
 
 fn take_llm_request_registration() -> RegisteredLlmRequest {
@@ -3990,14 +4105,12 @@ fn typed_async_middleware_registers_and_round_trips_every_surface() {
         },
     )
     .unwrap();
-    ctx.register_tool_execution_intercept(
-        "tool-execution-async",
-        8,
-        |_name, value, next| async move {
-            let result = next.call(value).await?;
-            Ok(ToolExecutionInterceptOutcome::from(result))
-        },
-    )
+    ctx.register_tool_execution_intercept("tool-execution-async", 8, |context, next| async move {
+        assert_eq!(context.tool_name, "calculator");
+        assert_eq!(context.tool_call_id.as_deref(), Some("call-calculator"));
+        let result = next.call(context.arguments).await?;
+        Ok(ToolExecutionInterceptOutcome::from(result))
+    })
     .unwrap();
     ctx.register_llm_sanitize_request_guardrail(
         "llm-request-async",
@@ -4192,7 +4305,11 @@ fn typed_async_middleware_registers_and_round_trips_every_surface() {
     let outcome = invoke_async_registration(
         &host,
         &registration,
-        json!({ "name": "calculator", "value": { "answer": 42 } }),
+        json!({
+            "name": "calculator",
+            "value": { "answer": 42 },
+            "tool_call_id": "call-calculator"
+        }),
         Some(&next),
     );
     let outcome = outcome.unwrap();
@@ -4546,7 +4663,9 @@ fn typed_async_continuations_are_concurrent_and_executor_owned() {
     let _guard = begin_test();
     let host = test_host_v4();
     let mut ctx = test_context(&host.v3.v1);
-    ctx.register_tool_execution_intercept("concurrent", 0, |_name, _value, next| async move {
+    ctx.register_tool_execution_intercept("concurrent", 0, |context, next| async move {
+        assert_eq!(context.tool_name, "tool");
+        assert_eq!(context.tool_call_id, None);
         tokio::time::sleep(Duration::from_millis(1)).await;
         let thread = std::thread::current()
             .name()
@@ -4641,7 +4760,7 @@ fn typed_async_cancellation_drops_future_and_releases_owned_handles() {
     let future_drops = Arc::new(AtomicUsize::new(0));
     ctx.register_tool_execution_intercept("cancel", 0, {
         let future_drops = future_drops.clone();
-        move |_name, _value, _next| {
+        move |_context, _next| {
             let probe = CountDrop(future_drops.clone());
             async move {
                 let _probe = probe;
@@ -5231,8 +5350,8 @@ fn raw_event_sanitize_registrations_cover_every_surface() {
 #[test]
 fn raw_callback_registrations_preserve_every_middleware_shape() {
     let _guard = begin_test();
-    let host = test_host();
-    let mut ctx = test_context(&host);
+    let host = test_host_v5();
+    let mut ctx = test_context(&host.v4.v3.v1);
 
     unsafe {
         assert_eq!(
@@ -5292,7 +5411,12 @@ fn raw_callback_registrations_preserve_every_middleware_shape() {
             ),
             NemoRelayStatus::Ok
         );
-        take_tool_execution_registration().free();
+        let tool_execution = take_tool_execution_context_registration();
+        assert_eq!(
+            (tool_execution.name.as_str(), tool_execution.priority),
+            ("raw-tool-execution", 5)
+        );
+        tool_execution.free();
 
         assert_eq!(
             ctx.register_llm_sanitize_request_guardrail_raw(

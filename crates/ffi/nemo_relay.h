@@ -453,13 +453,6 @@ typedef char *(*NemoRelayToolExecNextFn)(const char *args_json, void *next_ctx);
  * or an equivalent allocation compatible with `nemo_relay_string_free`.
  * Ownership transfers to Relay when the callback returns; the callback must
  * not free or reuse the string afterward, and Relay frees it exactly once.
- */
-typedef char *(*NemoRelayToolExecInterceptCb)(void *user_data,
-                                              const char *args_json,
-                                              NemoRelayToolExecNextFn next_fn,
-                                              void *next_ctx);
-
-/**
  * Tool execution intercept callback receiving the full call context.
  *
  * `context_json` is a JSON object with `tool_name`, `arguments`, and
@@ -467,14 +460,13 @@ typedef char *(*NemoRelayToolExecInterceptCb)(void *user_data,
  * did not record one. New context fields may be added to this object without
  * another ABI change, so callbacks must ignore unknown fields.
  *
- * Return value ownership matches [`NemoRelayToolExecInterceptCb`]: the
- * returned JSON must contain a `result` field and may contain `annotation`
- * and `pending_marks`, and ownership transfers to Relay on return.
+ * The returned JSON must contain a `result` field and may contain `annotation`
+ * and `pending_marks`; ownership transfers to Relay on return.
  */
-typedef char *(*NemoRelayToolExecInterceptContextCb)(void *user_data,
-                                                     const char *context_json,
-                                                     NemoRelayToolExecNextFn next_fn,
-                                                     void *next_ctx);
+typedef char *(*NemoRelayToolExecInterceptCb)(void *user_data,
+                                              const char *context_json,
+                                              NemoRelayToolExecNextFn next_fn,
+                                              void *next_ctx);
 
 /**
  * Callback for a conditional middleware guardrail. `kinds_json` is a JSON
@@ -2438,25 +2430,6 @@ NemoRelayStatus nemo_relay_plugin_context_register_tool_execution_intercept(stru
                                                                             NemoRelayFreeFn free_fn);
 
 /**
- * Register a tool execution intercept receiving the full call context into the
- * plugin registration context.
- *
- * The callback receives `(context_json, next_fn, next_ctx)`, where
- * `context_json` is a JSON object with `tool_name`, `arguments`, and
- * `tool_call_id`.
- *
- * # Safety
- * `ctx` and `name` must be valid pointers and the callback must remain valid for the duration
- * of the plugin registration lifetime.
- */
-NemoRelayStatus nemo_relay_plugin_context_register_tool_execution_intercept_v2(struct FfiPluginContext *ctx,
-                                                                               const char *name,
-                                                                               int32_t priority,
-                                                                               NemoRelayToolExecInterceptContextCb cb,
-                                                                               void *user_data,
-                                                                               NemoRelayFreeFn free_fn);
-
-/**
  * Register a global conditional middleware guardrail.
  *
  * # Safety
@@ -2717,7 +2690,7 @@ NemoRelayStatus nemo_relay_scope_deregister_tool_conditional_execution_guardrail
  * - `scope_uuid`: UUID of the target scope (null-terminated C string).
  * - `name`: Unique intercept name.
  * - `priority`: Execution priority (lower runs first).
- * - `exec_cb`: Middleware callback receiving args and a next function.
+ * - `exec_cb`: Middleware callback receiving context and a next function.
  * - `exec_user_data`: Opaque pointer for the execution callback.
  * - `exec_free`: Optional destructor for `exec_user_data`.
  *
@@ -2732,27 +2705,7 @@ NemoRelayStatus nemo_relay_scope_register_tool_execution_intercept(const char *s
                                                                    NemoRelayFreeFn exec_free);
 
 /**
- * Register a scope-local tool execution intercept receiving the call context.
- *
- * The callback receives `(context_json, next_fn, next_ctx)`, where
- * `context_json` is a JSON object with `tool_name`, `arguments`, and
- * `tool_call_id`, and applies only while the owning scope is active.
- *
- * # Safety
- * `scope_uuid` and `name` must be valid C strings. Callback pointers must be
- * valid.
- */
-NemoRelayStatus nemo_relay_scope_register_tool_execution_intercept_v2(const char *scope_uuid,
-                                                                      const char *name,
-                                                                      int32_t priority,
-                                                                      NemoRelayToolExecInterceptContextCb exec_cb,
-                                                                      void *exec_user_data,
-                                                                      NemoRelayFreeFn exec_free);
-
-/**
  * Deregister a scope-local tool execution intercept by name.
- *
- * Removes an intercept registered through either registration shape.
  *
  * # Safety
  * `scope_uuid` and `name` must be valid C strings.
@@ -3317,14 +3270,13 @@ NemoRelayStatus nemo_relay_deregister_tool_conditional_execution_guardrail(const
 
 /**
  * Register a tool execution intercept following the middleware chain pattern.
- * The callback receives `(args, next_fn, next_ctx)` — call
- * `next_fn(args, next_ctx)` to invoke the next intercept or the original
- * tool function, or skip calling it to short-circuit.
+ * The callback receives `(context_json, next_fn, next_ctx)`, where
+ * `context_json` contains `tool_name`, `arguments`, and `tool_call_id`.
  *
  * # Parameters
  * - `name`: Unique intercept name.
  * - `priority`: Execution priority (lower runs first).
- * - `exec_cb`: Middleware callback receiving args and a next function.
+ * - `exec_cb`: Middleware callback receiving context and a next function.
  * - `exec_user_data`: Opaque pointer for the execution callback.
  * - `exec_free`: Optional destructor for `exec_user_data`.
  *
@@ -3338,43 +3290,7 @@ NemoRelayStatus nemo_relay_register_tool_execution_intercept(const char *name,
                                                              NemoRelayFreeFn exec_free);
 
 /**
- * Register a tool execution intercept that receives the full call context.
- *
- * The callback receives `(context_json, next_fn, next_ctx)`, where
- * `context_json` is a JSON object with `tool_name`, `arguments`, and
- * `tool_call_id`. Call `next_fn(args, next_ctx)` to invoke the next intercept
- * or the original tool function, or skip calling it to short-circuit.
- *
- * `tool_call_id` is the provider-issued identifier recorded on the managed
- * tool call and is `null` when the call did not record one. It lets an
- * intercept that short-circuits associate its result with the originating
- * call.
- *
- * Intercepts registered here share one registry with those registered through
- * `nemo_relay_register_tool_execution_intercept`, so both shapes order
- * together by priority and
- * `nemo_relay_deregister_tool_execution_intercept` removes either.
- *
- * # Parameters
- * - `name`: Unique intercept name.
- * - `priority`: Execution priority (lower runs first).
- * - `exec_cb`: Middleware callback receiving the context and a next function.
- * - `exec_user_data`: Opaque pointer for the execution callback.
- * - `exec_free`: Optional destructor for `exec_user_data`.
- *
- * # Safety
- * `name` must be a valid C string. Callback pointers must be valid.
- */
-NemoRelayStatus nemo_relay_register_tool_execution_intercept_v2(const char *name,
-                                                                int32_t priority,
-                                                                NemoRelayToolExecInterceptContextCb exec_cb,
-                                                                void *exec_user_data,
-                                                                NemoRelayFreeFn exec_free);
-
-/**
  * Deregister a tool execution intercept by name.
- *
- * Removes an intercept registered through either registration shape.
  *
  * # Safety
  * `name` must be a valid C string.

@@ -211,10 +211,11 @@ schema-tagged envelope.
 
 `ToolInvocation.tool_call_id` is set only for tool execution intercepts, and only
 when the managed tool call recorded a provider-issued identifier. The field is
-additive: workers built before it existed ignore it, and hosts that predate it
-never set it, so no `grpc-v1` version change is required. Worker SDKs surface it
-through their context-carrying registration
-(`register_tool_execution_intercept_v2`).
+unchanged, so the `grpc-v1` identifier and `nemo.relay.worker.v1` protobuf
+package do not change. Beginning with Relay 0.9, worker SDKs surface it through
+the existing `register_tool_execution_intercept` callback. A worker plugin that
+registers this surface must declare a `compat.relay` range that excludes Relay
+0.8, such as `>=0.9,<1.0`.
 
 ```proto
 message JsonValue {

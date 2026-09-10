@@ -43,7 +43,6 @@ const {
   scopeRegisterToolRequestIntercept,
   scopeDeregisterToolRequestIntercept,
   scopeRegisterToolExecutionIntercept,
-  scopeRegisterToolExecutionInterceptV2,
   scopeDeregisterToolExecutionIntercept,
   scopeRegisterLlmSanitizeRequestGuardrail,
   scopeDeregisterLlmSanitizeRequestGuardrail,
@@ -504,10 +503,10 @@ describe('Scope-local auto-cleanup on scope pop', () => {
     assert.equal(result.sawIntercept, false);
   });
 
-  it('scope-local v2 execution intercept receives the managed toolCallId', async () => {
+  it('scope-local execution intercept receives the managed toolCallId', async () => {
     const scope = pushScope('sl_ctx_tool_exec', ScopeType.Agent, null, null);
     let seen = null;
-    scopeRegisterToolExecutionInterceptV2(scope.uuid, 'sl_ctx_tool_exec_int', 10, async (context, next) => {
+    scopeRegisterToolExecutionIntercept(scope.uuid, 'sl_ctx_tool_exec_int', 10, async (context, next) => {
       seen = context;
       const downstream = await next(context.arguments);
       return { result: downstream.result };
@@ -535,9 +534,9 @@ describe('Scope-local auto-cleanup on scope pop', () => {
 
   it('scope-local tool execution intercept is cleaned up when scope is popped', async () => {
     const scope = pushScope('sl_cleanup_tool_exec', ScopeType.Agent, null, null);
-    scopeRegisterToolExecutionIntercept(scope.uuid, 'sl_cleanup_tool_exec_int', 10, async (args, next) => {
+    scopeRegisterToolExecutionIntercept(scope.uuid, 'sl_cleanup_tool_exec_int', 10, async (context, next) => {
       const downstream = await next({
-        ...args,
+        ...context.arguments,
         fromPoppedScope: true,
       });
       return {
@@ -768,9 +767,9 @@ describe('Priority merge of global and scope-local middleware', () => {
   });
 
   it('scope-local execution intercept and global intercept merge', async () => {
-    lib.registerToolExecutionIntercept('sl_merge_global_exec', 5, async (args, next) => {
+    lib.registerToolExecutionIntercept('sl_merge_global_exec', 5, async (context, next) => {
       const downstream = await next({
-        ...args,
+        ...context.arguments,
         from_global: true,
       });
       return {
@@ -783,9 +782,9 @@ describe('Priority merge of global and scope-local middleware', () => {
     });
 
     const scope = pushScope('sl_merge_exec_scope', ScopeType.Agent, null, null);
-    scopeRegisterToolExecutionIntercept(scope.uuid, 'sl_merge_local_exec', 15, async (args, next) => {
+    scopeRegisterToolExecutionIntercept(scope.uuid, 'sl_merge_local_exec', 15, async (context, next) => {
       const downstream = await next({
-        ...args,
+        ...context.arguments,
         from_scope: true,
       });
       return {
@@ -834,8 +833,8 @@ describe('Priority merge of global and scope-local middleware', () => {
       releaseBlocker = resolve;
     });
 
-    scopeRegisterToolExecutionIntercept(scope.uuid, 'sl_snapshot_exec_target', 100, async (args, next) => {
-      const downstream = await next(args);
+    scopeRegisterToolExecutionIntercept(scope.uuid, 'sl_snapshot_exec_target', 100, async (context, next) => {
+      const downstream = await next(context.arguments);
       return {
         result: {
           ...downstream.result,
@@ -844,10 +843,10 @@ describe('Priority merge of global and scope-local middleware', () => {
         ...(downstream.annotation == null ? {} : { annotation: downstream.annotation }),
       };
     });
-    scopeRegisterToolExecutionIntercept(scope.uuid, 'sl_snapshot_exec_blocker', -100, async (args, next) => {
+    scopeRegisterToolExecutionIntercept(scope.uuid, 'sl_snapshot_exec_blocker', -100, async (context, next) => {
       blockerEntered();
       await release;
-      return await next(args);
+      return await next(context.arguments);
     });
 
     try {
@@ -1386,8 +1385,8 @@ describe('Scope-local subscriber receives events', () => {
       () => scopeRegisterToolRequestIntercept('not-a-uuid', 'bad_tool_int', 10, false, (_name, args) => args),
       () => scopeDeregisterToolRequestIntercept('not-a-uuid', 'bad_tool_int'),
       () =>
-        scopeRegisterToolExecutionIntercept('not-a-uuid', 'bad_tool_exec', 10, async (args, next) => ({
-          result: await next(args),
+        scopeRegisterToolExecutionIntercept('not-a-uuid', 'bad_tool_exec', 10, async (context, next) => ({
+          result: await next(context.arguments),
         })),
       () => scopeDeregisterToolExecutionIntercept('not-a-uuid', 'bad_tool_exec'),
       () => scopeRegisterLlmSanitizeRequestGuardrail('not-a-uuid', 'bad_llm_req', 10, (request) => request),

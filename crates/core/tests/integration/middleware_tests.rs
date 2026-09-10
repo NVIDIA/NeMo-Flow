@@ -48,13 +48,12 @@ use nemo_relay::api::registry::{
     register_llm_stream_execution_intercept, register_mark_sanitize_guardrail,
     register_scope_sanitize_end_guardrail, register_scope_sanitize_start_guardrail,
     register_tool_conditional_execution_guardrail, register_tool_execution_intercept,
-    register_tool_execution_intercept_v2, register_tool_request_intercept,
-    register_tool_sanitize_request_guardrail, register_tool_sanitize_response_guardrail,
-    scope_deregister_tool_request_intercept, scope_register_llm_conditional_execution_guardrail,
-    scope_register_llm_execution_intercept, scope_register_llm_request_intercept,
-    scope_register_llm_sanitize_request_guardrail, scope_register_llm_sanitize_response_guardrail,
-    scope_register_llm_stream_execution_intercept, scope_register_mark_sanitize_guardrail,
-    scope_register_scope_sanitize_end_guardrail,
+    register_tool_request_intercept, register_tool_sanitize_request_guardrail,
+    register_tool_sanitize_response_guardrail, scope_deregister_tool_request_intercept,
+    scope_register_llm_conditional_execution_guardrail, scope_register_llm_execution_intercept,
+    scope_register_llm_request_intercept, scope_register_llm_sanitize_request_guardrail,
+    scope_register_llm_sanitize_response_guardrail, scope_register_llm_stream_execution_intercept,
+    scope_register_mark_sanitize_guardrail, scope_register_scope_sanitize_end_guardrail,
     scope_register_tool_conditional_execution_guardrail, scope_register_tool_execution_intercept,
     scope_register_tool_request_intercept, scope_register_tool_sanitize_request_guardrail,
     scope_register_tool_sanitize_response_guardrail,
@@ -642,7 +641,8 @@ async fn test_execution_intercept_calls_next() {
     register_tool_execution_intercept(
         "passthrough",
         1,
-        Arc::new(|_name, args, next| {
+        Arc::new(|context, next| {
+            let args = context.into_arguments();
             Box::pin(async move {
                 // Call next — this should reach the original callable
                 next(args).await.map(Into::into)
@@ -677,9 +677,8 @@ async fn test_execution_intercept_calls_next() {
     deregister_tool_execution_intercept("passthrough").unwrap();
 }
 
-/// A context execution intercept observes the managed tool_call_id, tool name,
-/// and the arguments entering it, and legacy and context intercepts compose in
-/// priority order through the same registry.
+/// Execution intercepts observe the managed tool_call_id, tool name, and
+/// arguments, and compose in priority order through the existing registry.
 #[tokio::test]
 async fn test_execution_intercept_context_exposes_tool_call_id() {
     let _lock = TEST_MUTEX.lock().unwrap();
@@ -689,15 +688,15 @@ async fn test_execution_intercept_context_exposes_tool_call_id() {
     let observed = Arc::new(Mutex::new(Vec::<String>::new()));
     let seen_context = Arc::new(Mutex::new(None::<(String, Option<String>, Json)>));
 
-    let legacy_observed = observed.clone();
+    let first_observed = observed.clone();
     register_tool_execution_intercept(
-        "legacy-first",
+        "context-first",
         1,
-        Arc::new(move |_name, args, next| {
-            let legacy_observed = legacy_observed.clone();
+        Arc::new(move |context, next| {
+            let first_observed = first_observed.clone();
             Box::pin(async move {
-                legacy_observed.lock().unwrap().push("legacy".to_string());
-                next(args).await.map(Into::into)
+                first_observed.lock().unwrap().push("first".to_string());
+                next(context.into_arguments()).await.map(Into::into)
             })
         }),
     )
@@ -705,7 +704,7 @@ async fn test_execution_intercept_context_exposes_tool_call_id() {
 
     let context_observed = observed.clone();
     let context_seen = seen_context.clone();
-    register_tool_execution_intercept_v2(
+    register_tool_execution_intercept(
         "context-second",
         2,
         Arc::new(move |context: ToolExecutionContext, next| {
@@ -740,8 +739,8 @@ async fn test_execution_intercept_context_exposes_tool_call_id() {
     assert_eq!(result.result["value"], 7);
     assert_eq!(
         observed.lock().unwrap().as_slice(),
-        ["legacy", "context"],
-        "legacy and context intercepts share one registry and order by priority"
+        ["first", "context"],
+        "context intercepts share one registry and order by priority"
     );
 
     let (tool_name, tool_call_id, arguments) = seen_context.lock().unwrap().clone().unwrap();
@@ -749,7 +748,7 @@ async fn test_execution_intercept_context_exposes_tool_call_id() {
     assert_eq!(tool_call_id.as_deref(), Some("call-abc123"));
     assert_eq!(arguments, json!({"value": 7}));
 
-    deregister_tool_execution_intercept("legacy-first").unwrap();
+    deregister_tool_execution_intercept("context-first").unwrap();
     deregister_tool_execution_intercept("context-second").unwrap();
 }
 
@@ -763,7 +762,7 @@ async fn test_execution_intercept_context_without_tool_call_id() {
 
     let seen = Arc::new(Mutex::new(None::<Option<String>>));
     let seen_intercept = seen.clone();
-    register_tool_execution_intercept_v2(
+    register_tool_execution_intercept(
         "context-no-id",
         1,
         Arc::new(move |context: ToolExecutionContext, next| {
@@ -802,12 +801,15 @@ async fn test_execution_intercept_skips_next() {
     setup_isolated_thread();
 
     let original_called = Arc::new(AtomicBool::new(false));
+    let seen_tool_call_id = Arc::new(Mutex::new(None::<String>));
+    let captured_tool_call_id = Arc::clone(&seen_tool_call_id);
 
     // Register an execution intercept that short-circuits (does not call next)
     register_tool_execution_intercept(
         "short_circuit",
         1,
-        Arc::new(|_name, _args, _next| {
+        Arc::new(move |context, _next| {
+            *captured_tool_call_id.lock().unwrap() = context.tool_call_id().map(str::to_string);
             Box::pin(async move {
                 // Return a custom result without calling next
                 Ok(json!({"intercepted": true}).into())
@@ -826,6 +828,7 @@ async fn test_execution_intercept_skips_next() {
         nemo_relay::api::tool::ToolCallExecuteParams::builder()
             .name("tool")
             .args(json!({"value": 42}))
+            .tool_call_id("call-short-circuit")
             .func(func)
             .build(),
     )
@@ -837,6 +840,10 @@ async fn test_execution_intercept_skips_next() {
         "Original callable should NOT be invoked"
     );
     assert_eq!(result.result["intercepted"], true);
+    assert_eq!(
+        seen_tool_call_id.lock().unwrap().as_deref(),
+        Some("call-short-circuit")
+    );
 
     // Cleanup
     deregister_tool_execution_intercept("short_circuit").unwrap();
@@ -851,7 +858,8 @@ async fn tool_execution_result_annotation_is_explicit_through_the_chain() {
     register_tool_execution_intercept(
         "annotation",
         1,
-        Arc::new(|_name, args, next| {
+        Arc::new(|context, next| {
+            let args = context.into_arguments();
             Box::pin(async move {
                 let mut execution_result = next(args).await?;
                 assert_eq!(
@@ -897,7 +905,9 @@ async fn tool_execution_intercepts_can_preserve_remove_and_short_circuit_annotat
     register_tool_execution_intercept(
         "annotation-preserve",
         1,
-        Arc::new(|_name, args, next| Box::pin(async move { next(args).await.map(Into::into) })),
+        Arc::new(|context, next| {
+            Box::pin(async move { next(context.into_arguments()).await.map(Into::into) })
+        }),
     )
     .unwrap();
     let preserved = tool_call_execute(
@@ -922,7 +932,8 @@ async fn tool_execution_intercepts_can_preserve_remove_and_short_circuit_annotat
     register_tool_execution_intercept(
         "annotation-remove",
         1,
-        Arc::new(|_name, args, next| {
+        Arc::new(|context, next| {
+            let args = context.into_arguments();
             Box::pin(async move {
                 let result = next(args).await?.without_annotation();
                 Ok(result.into())
@@ -954,7 +965,7 @@ async fn tool_execution_intercepts_can_preserve_remove_and_short_circuit_annotat
     register_tool_execution_intercept(
         "annotation-short-circuit",
         1,
-        Arc::new(|_name, _args, _next| {
+        Arc::new(|_context, _next| {
             Box::pin(async {
                 Ok(ToolExecutionInterceptOutcome::annotated(
                     json!({"result": "short-circuit"}),
@@ -1182,7 +1193,8 @@ async fn test_execution_intercept_chain_ordering() {
     register_tool_execution_intercept(
         "exec_p1",
         1,
-        Arc::new(move |_name, args, next| {
+        Arc::new(move |context, next| {
+            let args = context.into_arguments();
             let o = o1.clone();
             Box::pin(async move {
                 o.lock().unwrap().push("intercept_1_before".into());
@@ -1199,7 +1211,8 @@ async fn test_execution_intercept_chain_ordering() {
     register_tool_execution_intercept(
         "exec_p2",
         2,
-        Arc::new(move |_name, args, next| {
+        Arc::new(move |context, next| {
+            let args = context.into_arguments();
             let o = o2.clone();
             Box::pin(async move {
                 o.lock().unwrap().push("intercept_2_before".into());
@@ -1256,7 +1269,8 @@ async fn test_execution_intercept_modifies_args() {
     register_tool_execution_intercept(
         "arg_modifier",
         1,
-        Arc::new(|_name, mut args, next| {
+        Arc::new(|context, next| {
+            let mut args = context.into_arguments();
             Box::pin(async move {
                 args.as_object_mut()
                     .unwrap()
@@ -1315,7 +1329,8 @@ async fn test_tool_execution_outcome_marks_follow_end_with_tool_parentage() {
         .register_tool_execution_intercept(
             "outcome_outer",
             1,
-            Arc::new(|_name, args, next| {
+            Arc::new(|context, next| {
+                let args = context.into_arguments();
                 Box::pin(async move {
                     let result = next(args).await?;
                     Ok(
@@ -1333,14 +1348,17 @@ async fn test_tool_execution_outcome_marks_follow_end_with_tool_parentage() {
     register_tool_execution_intercept(
         "passthrough_between_outcomes",
         2,
-        Arc::new(|_name, args, next| Box::pin(async move { next(args).await.map(Into::into) })),
+        Arc::new(|context, next| {
+            Box::pin(async move { next(context.into_arguments()).await.map(Into::into) })
+        }),
     )
     .unwrap();
     plugin_ctx
         .register_tool_execution_intercept(
             "outcome_inner",
             3,
-            Arc::new(|_name, args, next| {
+            Arc::new(|context, next| {
+                let args = context.into_arguments();
                 Box::pin(async move {
                     let mut result = next(args).await?;
                     result.result["compressed"] = json!(true);
@@ -1631,7 +1649,8 @@ async fn test_managed_tool_pending_marks_project_through_trace_exporters_only() 
     register_tool_execution_intercept(
         "managed_tool_projection_intercept",
         1,
-        Arc::new(|_name, args, next| {
+        Arc::new(|context, next| {
+            let args = context.into_arguments();
             Box::pin(async move {
                 let result = next(args).await?;
                 Ok(
@@ -1811,7 +1830,8 @@ async fn test_tool_execution_error_discards_downstream_pending_marks() {
     register_tool_execution_intercept(
         "error_after_outcome",
         1,
-        Arc::new(|_name, args, next| {
+        Arc::new(|context, next| {
+            let args = context.into_arguments();
             Box::pin(async move {
                 let _ = next(args).await?;
                 Err(FlowError::Internal("outer failure".into()))
@@ -1824,7 +1844,8 @@ async fn test_tool_execution_error_discards_downstream_pending_marks() {
         .register_tool_execution_intercept(
             "outcome_before_error",
             2,
-            Arc::new(|_name, args, next| {
+            Arc::new(|context, next| {
+                let args = context.into_arguments();
                 Box::pin(async move {
                     let result = next(args).await?;
                     Ok(
@@ -1899,7 +1920,8 @@ async fn test_managed_tool_reuses_start_subscriber_snapshot_for_end_and_marks() 
         .register_tool_execution_intercept(
             "mutate_tool_subscribers",
             1,
-            Arc::new(move |_name, args, next| {
+            Arc::new(move |context, next| {
+                let args = context.into_arguments();
                 let captured_replacement = captured_replacement.clone();
                 Box::pin(async move {
                     assert!(deregister_subscriber("tool_lifecycle_original").unwrap());
@@ -1975,7 +1997,7 @@ async fn test_managed_tool_reuses_start_subscriber_snapshot_for_error_end() {
     register_tool_execution_intercept(
         "mutate_tool_error_subscribers",
         1,
-        Arc::new(move |_name, _args, _next| {
+        Arc::new(move |_context, _next| {
             let captured_replacement = captured_replacement.clone();
             Box::pin(async move {
                 assert!(deregister_subscriber("tool_error_original").unwrap());
@@ -2037,7 +2059,7 @@ async fn test_repeated_next_marks_follow_invocation_order_not_completion_order()
     register_tool_execution_intercept(
         "concurrent_next",
         1,
-        Arc::new(|_name, _args, next| {
+        Arc::new(|_context, next| {
             Box::pin(async move {
                 let first = next(json!({"branch": "first", "delay_ms": 40}));
                 let second = next(json!({"branch": "second", "delay_ms": 1}));
@@ -2065,7 +2087,8 @@ async fn test_repeated_next_marks_follow_invocation_order_not_completion_order()
         .register_tool_execution_intercept(
             "delayed_outcomes",
             2,
-            Arc::new(move |_name, args, next| {
+            Arc::new(move |context, next| {
+                let args = context.into_arguments();
                 let captured_completion_order = captured_completion_order.clone();
                 Box::pin(async move {
                     let branch = args["branch"].as_str().unwrap().to_string();
@@ -2165,7 +2188,7 @@ async fn execution_next_is_revoked_after_each_interceptor_settles() {
     register_tool_execution_intercept(
         "late_tool_next",
         1,
-        Arc::new(move |_name, _args, next| {
+        Arc::new(move |_context, next| {
             *captured_tool_next.lock().unwrap() = Some(next);
             Box::pin(async {
                 Ok(ToolExecutionInterceptOutcome::new(
@@ -2413,7 +2436,8 @@ async fn spawned_rust_next_preserves_the_full_managed_context() {
     register_tool_execution_intercept(
         "spawned_rust_next",
         1,
-        Arc::new(|_name, args, next| {
+        Arc::new(|context, next| {
+            let args = context.into_arguments();
             Box::pin(async move {
                 tokio::spawn(async move { next(args).await })
                     .await
@@ -2700,7 +2724,7 @@ async fn dropping_pending_tool_execution_closes_the_managed_lifecycle() {
     register_tool_execution_intercept(
         "pending_tool_execution",
         1,
-        Arc::new(move |_name, _args, _next| {
+        Arc::new(move |_context, _next| {
             if let Some(sender) = entered_tx.lock().unwrap().take() {
                 let _ = sender.send(());
             }
@@ -2794,7 +2818,7 @@ async fn cancelled_tool_end_uses_the_originating_scope_sanitizer() {
     register_tool_execution_intercept(
         "pending_tool_cross_scope",
         1,
-        Arc::new(move |_name, _args, _next| {
+        Arc::new(move |_context, _next| {
             if let Some(sender) = entered_tx.lock().unwrap().take() {
                 let _ = sender.send(());
             }
@@ -3408,7 +3432,8 @@ async fn test_scope_local_execution_intercept_cleanup() {
         &handle.uuid,
         "scoped_exec",
         1,
-        Arc::new(move |_name, args, next| {
+        Arc::new(move |context, next| {
+            let args = context.into_arguments();
             ic.fetch_add(1, Ordering::SeqCst);
             Box::pin(async move { next(args).await.map(Into::into) })
         }),
@@ -3563,7 +3588,8 @@ async fn test_scope_local_and_global_execution_intercept_merge() {
     register_tool_execution_intercept(
         "global_exec",
         10,
-        Arc::new(move |_name, args, next| {
+        Arc::new(move |context, next| {
+            let args = context.into_arguments();
             let o = og.clone();
             Box::pin(async move {
                 o.lock().unwrap().push("global_before".into());
@@ -3581,7 +3607,8 @@ async fn test_scope_local_and_global_execution_intercept_merge() {
         &handle.uuid,
         "local_exec",
         5,
-        Arc::new(move |_name, args, next| {
+        Arc::new(move |context, next| {
+            let args = context.into_arguments();
             let o = ol.clone();
             Box::pin(async move {
                 o.lock().unwrap().push("local_before".into());
@@ -3708,7 +3735,8 @@ async fn test_conditional_rejection_prevents_execution() {
     register_tool_execution_intercept(
         "should_not_execute",
         1,
-        Arc::new(move |_name, args, next| {
+        Arc::new(move |context, next| {
+            let args = context.into_arguments();
             ec.store(true, Ordering::SeqCst);
             Box::pin(async move { next(args).await.map(Into::into) })
         }),
@@ -4251,7 +4279,8 @@ async fn test_tool_middleware_callbacks_run_without_registry_or_scope_locks() {
     register_tool_execution_intercept(
         "lock_global_tool_execution",
         1,
-        Arc::new(move |_, args, next| {
+        Arc::new(move |context, next| {
+            let args = context.into_arguments();
             record_middleware_callback(&tracked, "tool_execution_global");
             assert_middleware_callback_locks_are_free();
             Box::pin(async move { next(args).await.map(Into::into) })
@@ -4263,7 +4292,8 @@ async fn test_tool_middleware_callbacks_run_without_registry_or_scope_locks() {
         &scope.uuid,
         "lock_scope_tool_execution",
         2,
-        Arc::new(move |_, args, next| {
+        Arc::new(move |context, next| {
+            let args = context.into_arguments();
             record_middleware_callback(&tracked, "tool_execution_scope");
             assert_middleware_callback_locks_are_free();
             Box::pin(async move { next(args).await.map(Into::into) })
@@ -4696,7 +4726,8 @@ async fn test_full_pipeline_integration() {
     register_tool_execution_intercept(
         "exec_intercept",
         1,
-        Arc::new(move |_name, args, next| {
+        Arc::new(move |context, next| {
+            let args = context.into_arguments();
             let o = o4.clone();
             Box::pin(async move {
                 o.lock().unwrap().push("execution_intercept".into());

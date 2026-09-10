@@ -259,11 +259,11 @@ whether the wrapper succeeds. The second call is intentional demonstration code:
 still consume provider capacity, incur cost, and cause provider-side effects even though
 Relay does not expose its result to the application. Its failure is deliberately ignored.
 
-A worker can register a tool execution intercept through
-`register_tool_execution_intercept_v2` instead, whose callback receives
+A worker registers a tool execution intercept through
+`register_tool_execution_intercept`, whose callback receives
 `(context, next_call)`. The `ToolExecutionContext` carries `tool_name`,
 `arguments`, and the managed `tool_call_id`, which the host sends in the
-additive `ToolInvocation.tool_call_id` protobuf field. Use it when a worker
+existing `ToolInvocation.tool_call_id` protobuf field. Use it when a worker
 completes execution itself and must still correlate its result with the
 originating tool call.
 

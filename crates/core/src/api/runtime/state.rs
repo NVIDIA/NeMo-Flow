@@ -36,7 +36,7 @@ use crate::api::runtime::callbacks::{
     LlmJsonStream, LlmRequestInterceptFn, LlmSanitizeRequestContext, LlmSanitizeRequestFn,
     LlmSanitizeResponseContext, LlmSanitizeResponseFn, LlmStreamExecutionFn,
     LlmStreamExecutionNextFn, LlmStreamExecutionRegistryRefs, LlmStreamInner, ToolConditionalFn,
-    ToolExecutionContext, ToolExecutionContextFn, ToolExecutionNextFn, ToolExecutionOutcomeNextFn,
+    ToolExecutionContext, ToolExecutionFn, ToolExecutionNextFn, ToolExecutionOutcomeNextFn,
     ToolInterceptFn, ToolSanitizeFn,
 };
 use crate::api::runtime::continuation_context::{
@@ -233,8 +233,7 @@ pub struct NemoRelayContextState {
     /// Global tool request intercepts that can rewrite arguments before execution.
     pub(crate) tool_request_intercepts: SortedRegistry<Intercept<ToolInterceptFn>>,
     /// Global tool execution intercepts that wrap or replace callback execution.
-    pub(crate) tool_execution_intercepts:
-        SortedRegistry<ExecutionIntercept<ToolExecutionContextFn>>,
+    pub(crate) tool_execution_intercepts: SortedRegistry<ExecutionIntercept<ToolExecutionFn>>,
     /// Global LLM request sanitizers applied to emitted LLM-start payloads.
     pub(crate) llm_sanitize_request_guardrails: SortedRegistry<Guardrail<LlmSanitizeRequestFn>>,
     /// Global LLM response sanitizers applied to emitted LLM-end payloads.
@@ -1348,7 +1347,7 @@ impl NemoRelayContextState {
         &self,
         context: &ToolExecutionContext,
         default_fn: ToolExecutionNextFn,
-        scope_locals: &[&SortedRegistry<ExecutionIntercept<ToolExecutionContextFn>>],
+        scope_locals: &[&SortedRegistry<ExecutionIntercept<ToolExecutionFn>>],
     ) -> ToolExecutionOutcomeNextFn {
         let matching = merge_execution_intercept_callables(
             &self.tool_execution_intercepts,

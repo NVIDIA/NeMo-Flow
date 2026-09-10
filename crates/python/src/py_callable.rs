@@ -40,7 +40,7 @@ use nemo_relay::api::runtime::{
 use nemo_relay::error::{FlowError, Result as FlowResult};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyString, PyTuple};
+use pyo3::types::{PyDict, PyTuple};
 use pyo3_async_runtimes::TaskLocals;
 use serde_json::Value as Json;
 use tokio_stream::Stream;
@@ -1236,41 +1236,14 @@ where
     })
 }
 
-/// Wrap a Python callable `(name, args, next) -> ToolExecutionInterceptOutcome`
-/// for tool execution intercepts, using the legacy callback shape.
-///
-/// The `next` parameter is a `PyToolNextFn` that the Python code can `await`.
-pub fn wrap_py_tool_exec_intercept_fn(
-    py_fn: Py<PyAny>,
-) -> nemo_relay::api::runtime::ToolExecutionFn {
-    let py_fn = Arc::new(py_fn);
-    let task_locals = capture_python_task_locals();
-    Arc::new(move |name: &str, args: Json, next: ToolExecutionNextFn| {
-        let py_fn = py_fn.clone();
-        let name = name.to_string();
-        let task_locals = task_locals_with_running_loop(task_locals.as_ref());
-        Box::pin(call_py_tool_exec_intercept(
-            py_fn,
-            task_locals,
-            next,
-            move |py| {
-                let py_name = PyString::new(py, &name).into_any();
-                let py_args =
-                    json_to_py(py, &args).map_err(|e: PyErr| FlowError::Internal(e.to_string()))?;
-                Ok(vec![py_name, py_args.into_bound(py)])
-            },
-        ))
-    })
-}
-
 /// Wrap a Python callable `(context, next) -> ToolExecutionInterceptOutcome`
 /// for tool execution intercepts.
 ///
 /// The callback receives a `ToolExecutionContext` carrying the tool name, the
 /// arguments entering this intercept, and the managed `tool_call_id`.
-pub fn wrap_py_tool_exec_intercept_context_fn(
+pub fn wrap_py_tool_exec_intercept_fn(
     py_fn: Py<PyAny>,
-) -> nemo_relay::api::runtime::ToolExecutionContextFn {
+) -> nemo_relay::api::runtime::ToolExecutionFn {
     let py_fn = Arc::new(py_fn);
     let task_locals = capture_python_task_locals();
     Arc::new(
