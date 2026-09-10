@@ -159,6 +159,13 @@ repos:
         types: [rust]
         pass_filenames: false
 
+      - id: daemon-transport-benchmark-rust
+        name: daemon transport benchmark fmt and clippy
+        entry: just check-daemon-transport-benchmark
+        language: system
+        files: '^scripts/latency_benchmark/daemon_transport/.*\.(rs|toml)$'
+        pass_filenames: false
+
       - id: cargo-deny
         name: cargo deny
         entry: cargo deny check

@@ -202,7 +202,7 @@ pub(crate) struct GenerationRetirement {
     lock: Option<File>,
     lock_id: String,
     path: PathBuf,
-    original: GenerationMarker,
+    original: GenerationRetirementOriginal,
     changed: bool,
     committed: bool,
     lock_released_for_tree_mutation: bool,
@@ -222,6 +222,36 @@ impl Drop for GenerationRetirement {
 enum GenerationMarker {
     Active { token: String, lock_path: PathBuf },
     Retired { token: String, lock_path: PathBuf },
+}
+
+/// The filesystem state protected by a generation retirement transaction.
+///
+/// Marker-absent recovery needs to remember that absence so rollback does not recreate a marker
+/// for a generation that no longer exists.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum GenerationRetirementOriginal {
+    MarkerPresent(GenerationMarker),
+    MarkerAbsent { lock_path: PathBuf },
+}
+
+impl GenerationRetirementOriginal {
+    fn lock_path(&self) -> &Path {
+        match self {
+            Self::MarkerPresent(marker) => marker.lock_path(),
+            Self::MarkerAbsent { lock_path } => lock_path,
+        }
+    }
+
+    fn marker(&self) -> Option<&GenerationMarker> {
+        match self {
+            Self::MarkerPresent(marker) => Some(marker),
+            Self::MarkerAbsent { .. } => None,
+        }
+    }
+
+    fn marker_was_absent(&self) -> bool {
+        matches!(self, Self::MarkerAbsent { .. })
+    }
 }
 
 impl GenerationMarker {
@@ -308,7 +338,10 @@ impl GenerationRetirement {
             ));
         }
         let visible = read_generation_marker_path(path)?;
-        if visible != self.original {
+        if self.original.marker() != Some(&visible)
+            || visible.is_retired()
+            || !self.uses_lock_path(visible.lock_path())?
+        {
             return Err(format!(
                 "failed to adopt promoted MCP install generation {} because its marker changed",
                 path.display()
@@ -340,13 +373,22 @@ impl GenerationRetirement {
         if self.lock_released_for_tree_mutation {
             return Ok(());
         }
+        if self.original.marker_was_absent() {
+            // The external layout lock fences marker-absent recovery through cleanup and
+            // replacement.
+            return Ok(());
+        }
         if !self.uses_lock_path(&generation_lock_path(&self.path))? {
             return Ok(());
         }
-        if !self.original.is_retired() && !self.changed {
+        let original = self
+            .original
+            .marker()
+            .expect("marker-present generation retirement has an original marker");
+        if !original.is_retired() && !self.changed {
             return Err(format!(
                 "cannot release active MCP install generation lock {}",
-                self.original.lock_path().display()
+                original.lock_path().display()
             ));
         }
         let Some(file) = self.lock.take() else {
@@ -359,7 +401,7 @@ impl GenerationRetirement {
             self.lock = Some(file);
             return Err(format!(
                 "failed to release MCP install generation lock {} before moving its plugin tree: {error}",
-                self.original.lock_path().display()
+                original.lock_path().display()
             ));
         }
         self.lock_released_for_tree_mutation = true;
@@ -378,12 +420,76 @@ impl GenerationRetirement {
         Self::acquire_impl(path, DEFAULT_GENERATION_LOCK_TIMEOUT, Some(external_lock))
     }
 
+    /// Acquire the surviving external generation lock for a plugin whose marker is intentionally
+    /// absent.
+    ///
+    /// The surviving lock is the only fence for this recovery path, so its identity and path
+    /// shape are validated before and after exclusive acquisition.
+    pub(crate) fn acquire_missing_for_plugin(
+        marker_path: &Path,
+        external_lock: &Path,
+    ) -> Result<Self, String> {
+        Self::acquire_missing_with_timeout_impl(
+            marker_path,
+            external_lock,
+            DEFAULT_GENERATION_LOCK_TIMEOUT,
+        )
+    }
+
     #[cfg(test)]
     pub(crate) fn acquire_with_timeout(
         path: &Path,
         timeout: Duration,
     ) -> Result<Option<Self>, String> {
         Self::acquire_impl(path, timeout, None)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn acquire_missing_with_timeout(
+        marker_path: &Path,
+        external_lock: &Path,
+        timeout: Duration,
+    ) -> Result<Self, String> {
+        Self::acquire_missing_with_timeout_impl(marker_path, external_lock, timeout)
+    }
+
+    fn acquire_missing_with_timeout_impl(
+        marker_path: &Path,
+        external_lock: &Path,
+        timeout: Duration,
+    ) -> Result<Self, String> {
+        ensure_path_absent_nofollow(marker_path, "MCP install generation")?;
+        let lock_path = absolute_lock_path(external_lock)?;
+        let file = open_existing_generation_lock_path_nofollow(&lock_path)?;
+        lock_exclusive_with_timeout(&file, marker_path, timeout)?;
+
+        let locked_result = (|| -> Result<String, String> {
+            let lock_id = read_generation_lock_identity(&file, &lock_path)?
+                .ok_or_else(|| empty_generation_lock_error(&lock_path))?;
+            if !visible_generation_lock_matches_nofollow(&file, &lock_path, &lock_id)? {
+                return Err(changed_generation_lock_error(&lock_path));
+            }
+            ensure_path_absent_nofollow(marker_path, "MCP install generation")?;
+            // Close the revalidation window in the other direction too: a lock-path replacement
+            // racing with the marker check must not leave us holding an unlinked inode.
+            if !visible_generation_lock_matches_nofollow(&file, &lock_path, &lock_id)? {
+                return Err(changed_generation_lock_error(&lock_path));
+            }
+            Ok(lock_id)
+        })();
+        let lock_id = locked_result.inspect_err(|_| {
+            let _ = unlock_file(&file);
+        })?;
+
+        Ok(Self {
+            lock: Some(file),
+            lock_id,
+            path: marker_path.to_owned(),
+            original: GenerationRetirementOriginal::MarkerAbsent { lock_path },
+            changed: false,
+            committed: false,
+            lock_released_for_tree_mutation: false,
+        })
     }
 
     fn acquire_impl(
@@ -427,11 +533,32 @@ impl GenerationRetirement {
             lock: Some(file),
             lock_id,
             path: path.to_owned(),
-            original,
+            original: GenerationRetirementOriginal::MarkerPresent(original),
             changed: false,
             committed: false,
             lock_released_for_tree_mutation: false,
         }))
+    }
+
+    /// Revalidate the marker-absent recovery precondition while retaining the exclusive lock.
+    ///
+    /// Callers use this immediately before their first host/filesystem mutation, after checking
+    /// the marketplace root under the same no-follow policy.
+    pub(crate) fn revalidate_missing_marker(&self) -> Result<(), String> {
+        if !self.original.marker_was_absent() {
+            return Err(format!(
+                "MCP install generation {} was not acquired as marker-absent recovery",
+                self.path.display()
+            ));
+        }
+        if !self.visible_lock_identity_matches_nofollow()? {
+            return Err(changed_generation_lock_error(self.original.lock_path()));
+        }
+        ensure_path_absent_nofollow(&self.path, "MCP install generation")?;
+        if !self.visible_lock_identity_matches_nofollow()? {
+            return Err(changed_generation_lock_error(self.original.lock_path()));
+        }
+        Ok(())
     }
 
     /// Persistently invalidate this generation while retaining its exclusive transaction lock.
@@ -451,10 +578,16 @@ impl GenerationRetirement {
         if self.lock_released_for_tree_mutation {
             return Ok(());
         }
-        if !self.changed && !self.original.is_retired() {
+        let Some(original) = self.original.marker() else {
+            return Err(format!(
+                "cannot release marker-absent MCP install generation lock {} before recovery",
+                self.original.lock_path().display()
+            ));
+        };
+        if !self.changed && !original.is_retired() {
             return Err(format!(
                 "cannot release active MCP install generation lock {}",
-                self.original.lock_path().display()
+                original.lock_path().display()
             ));
         }
         let Some(file) = self.lock.take() else {
@@ -467,7 +600,7 @@ impl GenerationRetirement {
             self.lock = Some(file);
             return Err(format!(
                 "failed to release MCP install generation lock {} before refreshing: {error}",
-                self.original.lock_path().display()
+                original.lock_path().display()
             ));
         }
         self.lock_released_for_tree_mutation = true;
@@ -478,13 +611,18 @@ impl GenerationRetirement {
         &mut self,
         write_retired: impl FnOnce(&Path, &GenerationMarker) -> Result<(), String>,
     ) -> Result<(), String> {
-        if self.original.is_retired() {
+        let Some(original) = self.original.marker().cloned() else {
+            // The external lock already fences marker-absent recovery, so no marker transition is
+            // needed.
+            return Ok(());
+        };
+        if original.is_retired() {
             return Ok(());
         }
         if self.changed {
             return Ok(());
         }
-        let retired = self.original.retired();
+        let retired = original.retired();
         self.lock.as_ref().ok_or_else(|| {
             format!(
                 "MCP install generation {} is not locked",
@@ -495,7 +633,7 @@ impl GenerationRetirement {
         if let Err(error) = write_retired(&self.path, &retired) {
             let restore_error = replace_generation_marker(
                 &self.path,
-                &self.original,
+                &original,
                 "restore after failed invalidation",
             )
             .err();
@@ -525,7 +663,7 @@ impl GenerationRetirement {
         let visible = read_generation_marker_path(&self.path)?;
         if visible.is_retired() {
             return Err(format!(
-                "replacement MCP install generation {} is already retired",
+                "replacement MCP install generation {} changed or is already retired",
                 self.path.display()
             ));
         }
@@ -552,20 +690,35 @@ impl GenerationRetirement {
 
     /// Restore an invalidated marker before a rolled-back plugin is registered again.
     pub(crate) fn restore_after_rollback(&mut self) -> Result<(), String> {
+        if self.original.marker_was_absent() {
+            // Failed dangling recovery leaves the marker absent. Revalidate that state before
+            // releasing its only fence.
+            self.revalidate_missing_marker()?;
+            self.lock = None;
+            self.changed = false;
+            self.committed = false;
+            self.lock_released_for_tree_mutation = false;
+            return Ok(());
+        }
         if !self.changed {
             self.lock = None;
             self.lock_released_for_tree_mutation = false;
             return Ok(());
         }
         self.reacquire_transaction_lock()?;
+        let original = self
+            .original
+            .marker()
+            .cloned()
+            .expect("marker-present generation retirement has an original marker");
         // Never publish the retired generation's token through a replacement tree. A failed
         // filesystem rollback can leave the promoted tree visible at the same path while this
         // transaction still owns the shared external lock.
-        self.verify_visible_state_for_rollback(&self.original.retired())?;
-        replace_generation_marker(&self.path, &self.original, "restore")?;
+        self.verify_visible_state_for_rollback(&original.retired())?;
+        replace_generation_marker(&self.path, &original, "restore")?;
         // Retain the post-write check so an unexpected path swap during restoration is still
         // reported before the old generation is considered active again.
-        self.verify_visible_state_for_rollback(&self.original)?;
+        self.verify_visible_state_for_rollback(&original)?;
         self.changed = false;
         self.committed = false;
         self.lock = None;
@@ -601,6 +754,16 @@ impl GenerationRetirement {
             )
         })?;
         visible_generation_lock_matches(lock, self.original.lock_path(), &self.lock_id)
+    }
+
+    fn visible_lock_identity_matches_nofollow(&self) -> Result<bool, String> {
+        let lock = self.lock.as_ref().ok_or_else(|| {
+            format!(
+                "MCP install generation {} has no transaction lock for rollback",
+                self.path.display()
+            )
+        })?;
+        visible_generation_lock_matches_nofollow(lock, self.original.lock_path(), &self.lock_id)
     }
 
     fn reacquire_transaction_lock(&mut self) -> Result<(), String> {
@@ -667,6 +830,72 @@ fn inspected_path_exists(path: &Path, description: &str) -> Result<bool, String>
             path.display()
         )),
     }
+}
+
+/// Inspect the final path component without following it.
+///
+/// Parent components retain the platform's ordinary path-resolution behavior; this specifically
+/// prevents a marker or lock file itself from being replaced by a symlink and treated as the
+/// expected Relay-owned object.
+fn inspected_path_exists_nofollow(path: &Path, description: &str) -> Result<bool, String> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            inspected_path_exists(path, description)
+        }
+        Err(error) => Err(format!(
+            "failed to inspect {description} {} without following links: {error}",
+            path.display()
+        )),
+    }
+}
+
+fn ensure_path_absent_nofollow(path: &Path, description: &str) -> Result<(), String> {
+    if !inspected_path_exists_nofollow(path, description)? {
+        return Ok(());
+    }
+    let kind = fs::symlink_metadata(path)
+        .map(|metadata| {
+            if metadata.file_type().is_symlink() {
+                "a symlink"
+            } else {
+                "present"
+            }
+        })
+        .unwrap_or("present");
+    Err(format!(
+        "expected {description} {} to remain absent without following links, but it is {kind}",
+        path.display()
+    ))
+}
+
+fn ensure_regular_file_nofollow(path: &Path, description: &str) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        format!(
+            "failed to open {description} {} safely without following links: {error}",
+            path.display()
+        )
+    })?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!(
+            "refusing to follow symlinked {description} {}",
+            path.display()
+        ));
+    }
+    if !metadata.is_file() {
+        return Err(format!(
+            "{description} {} is not a regular file",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn changed_generation_lock_error(lock_path: &Path) -> String {
+    format!(
+        "MCP install generation lock {} changed identity while acquiring recovery fencing",
+        lock_path.display()
+    )
 }
 
 fn replace_generation_marker(
@@ -922,6 +1151,41 @@ fn open_existing_generation_lock_path(lock_path: &Path) -> Result<File, String> 
         })
 }
 
+fn open_existing_generation_lock_path_nofollow(lock_path: &Path) -> Result<File, String> {
+    ensure_regular_file_nofollow(lock_path, "MCP install generation lock")?;
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // `O_NONBLOCK` prevents a path-shape race from hanging on a FIFO. It has no effect on
+        // regular files. `O_NOFOLLOW` closes the symlink race between inspection and open.
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options.open(lock_path).map_err(|error| {
+        format!(
+            "failed to open MCP install generation lock {}: {error}",
+            lock_path.display()
+        )
+    })?;
+    let opened_metadata = file.metadata().map_err(|error| {
+        format!(
+            "failed to inspect opened MCP install generation lock {}: {error}",
+            lock_path.display()
+        )
+    })?;
+    if !opened_metadata.is_file() {
+        return Err(format!(
+            "MCP install generation lock {} is not a regular file",
+            lock_path.display()
+        ));
+    }
+    // A replacement between the pre-open inspection and open is rejected even on platforms that
+    // do not expose `O_NOFOLLOW` through `OpenOptions`.
+    ensure_regular_file_nofollow(lock_path, "MCP install generation lock")?;
+    Ok(file)
+}
+
 fn ensure_generation_lock_identity_locked(file: &File, lock_path: &Path) -> Result<String, String> {
     if let Some(identity) = read_generation_lock_identity(file, lock_path)? {
         return Ok(identity);
@@ -988,9 +1252,36 @@ fn visible_generation_lock_matches(
     lock_path: &Path,
     expected_identity: &str,
 ) -> Result<bool, String> {
+    visible_generation_lock_matches_with(
+        locked,
+        lock_path,
+        expected_identity,
+        open_existing_generation_lock_path,
+    )
+}
+
+fn visible_generation_lock_matches_nofollow(
+    locked: &File,
+    lock_path: &Path,
+    expected_identity: &str,
+) -> Result<bool, String> {
+    visible_generation_lock_matches_with(
+        locked,
+        lock_path,
+        expected_identity,
+        open_existing_generation_lock_path_nofollow,
+    )
+}
+
+fn visible_generation_lock_matches_with(
+    locked: &File,
+    lock_path: &Path,
+    expected_identity: &str,
+    open_visible: fn(&Path) -> Result<File, String>,
+) -> Result<bool, String> {
     #[cfg(windows)]
     {
-        let visible = open_existing_generation_lock_path(lock_path)?;
+        let visible = open_visible(lock_path)?;
         if windows_file_identity(locked, lock_path)? != windows_file_identity(&visible, lock_path)?
         {
             return Ok(false);
@@ -1000,7 +1291,7 @@ fn visible_generation_lock_matches(
     }
     #[cfg(not(windows))]
     {
-        let visible = open_existing_generation_lock_path(lock_path)?;
+        let visible = open_visible(lock_path)?;
         #[cfg(unix)]
         if unix_file_identity(locked, lock_path)? != unix_file_identity(&visible, lock_path)? {
             return Ok(false);

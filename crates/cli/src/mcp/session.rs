@@ -12,24 +12,30 @@ use crate::error::CliError;
 
 pub(super) async fn run<W>(
     mut lease: GatewayLease,
-    mut frames: FrameReceiver,
+    frames: FrameReceiver,
+    writer: W,
+) -> Result<(), CliError>
+where
+    W: AsyncWrite + Unpin,
+{
+    tokio::select! {
+        result = run_without_gateway(frames, writer) => result,
+        result = lease.wait() => result,
+    }
+}
+
+/// Serves the no-tools MCP protocol when lifecycle is owned by the brokered daemon client.
+pub(super) async fn run_without_gateway<W>(
+    mut frames: super::transport::FrameReceiver,
     mut writer: W,
 ) -> Result<(), CliError>
 where
     W: AsyncWrite + Unpin,
 {
-    loop {
-        let received = tokio::select! {
-            frame = frames.recv() => frame,
-            result = lease.wait() => return result,
-        };
-        let Some(frame) = received else {
-            return Ok(());
-        };
-        let frame = frame?;
-        let action = evaluate_frame(&frame);
-        write_response(action, &mut writer).await?;
+    while let Some(frame) = frames.recv().await {
+        write_response(evaluate_frame(&frame?), &mut writer).await?;
     }
+    Ok(())
 }
 
 async fn write_response<W>(action: FrameAction, writer: &mut W) -> Result<(), CliError>

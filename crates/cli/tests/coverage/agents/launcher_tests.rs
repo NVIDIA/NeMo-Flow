@@ -1577,8 +1577,10 @@ fn exit_code_preserves_normal_and_shell_wrapped_codes() {
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn run_starts_gateway_injects_env_and_returns_agent_exit_code() {
+    let _guard = crate::test_support::PLUGIN_CONFIG_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().unwrap();
     let _cwd = crate::test_support::CwdTestScope::locked();
+    let _env = EnvScope::without_managed_bootstrap();
     let config = temp.path().join("config.toml");
     std::fs::write(&config, "[upstream]\n").unwrap();
     let output = temp.path().join("env.txt");

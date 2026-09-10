@@ -21,7 +21,7 @@ use crate::gateway::client::{RelayHealth, probe, request_shutdown};
 pub(crate) const BOOTSTRAP_STATE_DIR_ENV: &str = "NEMO_RELAY_BOOTSTRAP_STATE_DIR";
 pub(crate) const BOOTSTRAP_SHUTDOWN_TOKEN_ENV: &str = "NEMO_RELAY_BOOTSTRAP_SHUTDOWN_TOKEN";
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
-const UNHEALTHY_GATEWAY_TERMINATION_TIMEOUT: Duration = Duration::from_secs(1);
+const UNHEALTHY_GATEWAY_TERMINATION_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub(super) struct OwnerRecord {

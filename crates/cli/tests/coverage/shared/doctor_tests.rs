@@ -2,6 +2,416 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
+
+#[tokio::test]
+async fn pi_managed_install_diagnostics_distinguish_current_and_stale_versions() {
+    let _guard = PLUGIN_CONFIG_TEST_LOCK.lock().await;
+    let agent_dir = tempfile::tempdir().unwrap();
+    let _environment = crate::test_support::EnvScope::set(&[
+        (
+            crate::agents::pi::doctor::PI_AGENT_DIR_ENV,
+            Some(agent_dir.path().as_os_str()),
+        ),
+        (crate::agents::pi::launch::PI_EXTENSION_PATH_ENV, None),
+    ]);
+    crate::agents::pi::install::install(crate::installation::InstallRequest {
+        install_dir: None,
+        force: false,
+        dry_run: false,
+        skip_doctor: true,
+    })
+    .unwrap();
+
+    let current = pi_managed_install_check().unwrap();
+    assert_eq!(current.status, Status::Pass);
+    assert!(current.details.contains(env!("CARGO_PKG_VERSION")));
+    let root = crate::agents::pi::install::install_root().unwrap();
+    let state_path = root.join(".nemo-relay-install.json");
+    let mut state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    state["relay_version"] = serde_json::json!("0.0.0-stale");
+    std::fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+
+    let stale = pi_managed_install_check().unwrap();
+    assert_eq!(stale.status, Status::Warn);
+    assert!(stale.details.contains("0.0.0-stale"));
+    assert!(stale.details.contains("nemo-relay install pi"));
+}
+
+#[tokio::test]
+async fn pi_extension_diagnostics_warn_for_a_project_scoped_copy() {
+    let _guard = PLUGIN_CONFIG_TEST_LOCK.lock().await;
+    let agent_dir = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let _environment = crate::test_support::EnvScope::set(&[
+        (
+            crate::agents::pi::doctor::PI_AGENT_DIR_ENV,
+            Some(agent_dir.path().as_os_str()),
+        ),
+        (crate::agents::pi::launch::PI_EXTENSION_PATH_ENV, None),
+    ]);
+    let extension = project.path().join(".pi/extensions/nemo-relay");
+    std::fs::create_dir_all(&extension).unwrap();
+    std::fs::write(
+        extension.join("package.json"),
+        r#"{"name":"nemo-relay-pi","pi":{"extensions":["./index.ts"]}}"#,
+    )
+    .unwrap();
+    std::fs::write(extension.join("index.ts"), "export default 1").unwrap();
+
+    let check = pi_extension_trust_check(project.path());
+    assert_eq!(check.status, Status::Warn);
+    assert!(
+        check.details.contains("project-scoped"),
+        "{}",
+        check.details
+    );
+    assert!(
+        check.details.contains("silently skipped"),
+        "{}",
+        check.details
+    );
+}
+
+#[tokio::test]
+async fn pi_extension_diagnostics_distinguish_disabled_and_undecidable_settings_filters() {
+    let _guard = PLUGIN_CONFIG_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir().unwrap();
+    let agent_dir = temp.path().join("agent");
+    let checkout = temp.path().join("checkout");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::create_dir_all(&checkout).unwrap();
+    std::fs::write(
+        checkout.join("package.json"),
+        r#"{"name":"nemo-relay-pi","pi":{"extensions":["./index.ts"]}}"#,
+    )
+    .unwrap();
+    std::fs::write(checkout.join("index.ts"), "export default 1").unwrap();
+    let _environment = crate::test_support::EnvScope::set(&[
+        (
+            crate::agents::pi::doctor::PI_AGENT_DIR_ENV,
+            Some(agent_dir.as_os_str()),
+        ),
+        (crate::agents::pi::launch::PI_EXTENSION_PATH_ENV, None),
+    ]);
+
+    std::fs::write(
+        agent_dir.join("settings.json"),
+        r#"{"packages":[{"source":"../checkout","autoload":false}]}"#,
+    )
+    .unwrap();
+    let disabled = pi_extension_trust_check(temp.path());
+    assert_eq!(disabled.status, Status::Warn);
+    assert!(
+        disabled.details.contains("filtered off"),
+        "{}",
+        disabled.details
+    );
+
+    std::fs::write(
+        agent_dir.join("settings.json"),
+        r#"{"packages":[{"source":"../checkout","extensions":["src/*.ts"]}]}"#,
+    )
+    .unwrap();
+    let undecidable = pi_extension_trust_check(temp.path());
+    assert_eq!(undecidable.status, Status::Warn);
+    assert!(
+        undecidable.details.contains("cannot be decided"),
+        "{}",
+        undecidable.details
+    );
+}
+
+#[test]
+fn loopback_detection_accepts_local_hosts_and_rejects_remote_or_invalid_urls() {
+    for url in [
+        "http://localhost:8080",
+        "http://127.0.0.1:8080",
+        "http://[::1]:8080",
+    ] {
+        assert!(is_loopback(url), "expected loopback: {url}");
+    }
+    for url in [
+        "https://relay.example.com:443",
+        "not-a-url",
+        "http://192.0.2.1:80",
+    ] {
+        assert!(!is_loopback(url), "expected non-loopback: {url}");
+    }
+}
+
+#[tokio::test]
+async fn offline_pi_gateway_check_is_informational_without_network_io() {
+    let check =
+        pi_gateway_reachability_check(DoctorProbeMode::Offline, &ResolvedConfig::default()).await;
+    assert_eq!(check.name, "pi gateway reachability");
+    assert_eq!(check.status, Status::Info);
+    assert!(check.details.contains("live reachability probe skipped"));
+}
+
+#[tokio::test]
+async fn live_pi_gateway_check_distinguishes_foreign_and_unavailable_listeners() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let mut stream = accept_bounded(&listener);
+        let _ = read_headers(&mut stream);
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
+            .unwrap();
+    });
+    let mut resolved = ResolvedConfig::default();
+    resolved.gateway.bind = address;
+    let foreign = pi_gateway_reachability_check(DoctorProbeMode::Live, &resolved).await;
+    assert_eq!(foreign.status, Status::Warn);
+    assert!(foreign.details.contains("not a NeMo Relay gateway"));
+    server.join().unwrap();
+
+    let unavailable = TcpListener::bind("127.0.0.1:0").unwrap();
+    resolved.gateway.bind = unavailable.local_addr().unwrap();
+    drop(unavailable);
+    let unavailable = pi_gateway_reachability_check(DoctorProbeMode::Live, &resolved).await;
+    assert_eq!(unavailable.status, Status::Warn);
+    assert!(unavailable.details.contains("not answering"));
+}
+
+#[tokio::test]
+async fn live_pi_gateway_check_distinguishes_compatible_and_incompatible_relay_versions() {
+    for (status, body_status, expected) in [
+        ("200 OK", "ok", Status::Pass),
+        ("409 Conflict", "incompatible", Status::Warn),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let mut stream = accept_bounded(&listener);
+            let _ = read_headers(&mut stream);
+            let body = json!({
+                "status": body_status,
+                "service": "nemo-relay",
+                "bootstrap_protocol": crate::bootstrap::BOOTSTRAP_PROTOCOL_VERSION,
+                "instance_id": "doctor-fixture"
+            })
+            .to_string();
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .unwrap();
+        });
+        let mut resolved = ResolvedConfig::default();
+        resolved.gateway.bind = address;
+        let check = pi_gateway_reachability_check(DoctorProbeMode::Live, &resolved).await;
+        assert_eq!(check.status, expected, "{}", check.details);
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn agent_version_diagnostics_separate_unverified_optional_and_required_failures() {
+    let mut status = Status::Pass;
+    let mut details = Vec::new();
+    apply_agent_version_status(
+        CodingAgent::Pi,
+        Some("0.85.0"),
+        true,
+        false,
+        &mut status,
+        &mut details,
+    );
+    assert_eq!(status, Status::Warn);
+    assert!(details.iter().any(|detail| detail.contains("0.84")));
+
+    let mut status = Status::Pass;
+    let mut details = Vec::new();
+    apply_agent_version_status(
+        CodingAgent::Pi,
+        Some("invalid"),
+        true,
+        true,
+        &mut status,
+        &mut details,
+    );
+    assert_eq!(status, Status::Fail);
+    assert!(
+        details
+            .iter()
+            .any(|detail| detail.contains("could not parse"))
+    );
+}
+
+#[tokio::test]
+async fn remote_pi_gateway_probe_reports_success_and_http_failure() {
+    for (status_line, expected_status, expected_detail) in [
+        ("200 OK", Status::Pass, "answered /healthz"),
+        ("503 Service Unavailable", Status::Warn, "HTTP 503"),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let mut stream = accept_bounded(&listener);
+            let _ = read_headers(&mut stream);
+            stream
+                .write_all(
+                    format!("HTTP/1.1 {status_line}\r\nContent-Length: 0\r\n\r\n").as_bytes(),
+                )
+                .unwrap();
+        });
+        let gateway_url = format!("http://127.0.0.1:{port}");
+        let check = remote_pi_gateway_reachability_check(&gateway_url).await;
+        assert_eq!(check.status, expected_status, "{}", check.details);
+        assert!(check.details.contains(expected_detail), "{}", check.details);
+        server.join().unwrap();
+    }
+}
+
+#[tokio::test]
+async fn atof_header_validation_covers_all_authored_shape_errors() {
+    let _guard = PLUGIN_CONFIG_TEST_LOCK.lock().await;
+    let _environment = EnvScope::set(&[
+        ("NEMO_RELAY_MISSING_ATOF_HEADER", None),
+        (
+            "NEMO_RELAY_BLANK_ATOF_HEADER",
+            Some(std::ffi::OsStr::new("   ")),
+        ),
+        (
+            "NEMO_RELAY_VALID_ATOF_HEADER",
+            Some(std::ffi::OsStr::new("secret")),
+        ),
+    ]);
+    for (endpoint, expected) in [
+        (
+            serde_json::json!({"headers": {"bad header": "value"}}),
+            "invalid HTTP header name",
+        ),
+        (
+            serde_json::json!({"headers": {"x-test": "bad\nvalue"}}),
+            "headers.x-test invalid",
+        ),
+        (
+            serde_json::json!({"header_env": []}),
+            "header_env must be an object",
+        ),
+        (
+            serde_json::json!({"header_env": {"x-test": 1}}),
+            "must be a string",
+        ),
+        (
+            serde_json::json!({"header_env": {"bad header": "PATH"}}),
+            "invalid HTTP header name",
+        ),
+        (
+            serde_json::json!({"header_env": {"x-test": "NEMO_RELAY_MISSING_ATOF_HEADER"}}),
+            "is not set",
+        ),
+        (
+            serde_json::json!({"header_env": {"x-test": "NEMO_RELAY_BLANK_ATOF_HEADER"}}),
+            "is blank",
+        ),
+    ] {
+        let error = endpoint_headers(&endpoint).expect_err("invalid endpoint headers");
+        assert!(error.contains(expected), "{error}");
+    }
+    assert_eq!(
+        endpoint_headers(&serde_json::json!({
+            "headers": {"x-static": "literal"},
+            "header_env": {"x-secret": "NEMO_RELAY_VALID_ATOF_HEADER"}
+        }))
+        .unwrap(),
+        [
+            ("x-static".into(), "literal".into()),
+            ("x-secret".into(), "secret".into())
+        ]
+    );
+    let duplicate = endpoint_headers(&serde_json::json!({
+        "headers": {"x-secret": "literal"},
+        "header_env": {"x-secret": "NEMO_RELAY_VALID_ATOF_HEADER"}
+    }))
+    .expect_err("duplicate static and environment headers must be rejected");
+    assert_eq!(
+        duplicate,
+        "header \"x-secret\" cannot appear in both headers and header_env"
+    );
+}
+
+#[test]
+fn atof_probe_target_validation_rejects_malformed_hosts_schemes_and_transports() {
+    assert!(validate_atof_stream_probe_target(1, "http_post", "not a URL").is_err());
+    assert!(validate_atof_stream_probe_target(2, "http_post", "file:///tmp/events").is_err());
+    assert!(validate_atof_stream_probe_target(3, "http_post", "ws://example.com/events").is_err());
+    assert!(
+        validate_atof_stream_probe_target(4, "websocket", "http://example.com/events").is_err()
+    );
+    assert!(validate_atof_stream_probe_target(5, "grpc", "https://example.com/events").is_err());
+    assert!(validate_atof_stream_probe_target(6, "ndjson", "https://example.com/events").is_ok());
+}
+
+#[tokio::test]
+async fn pi_extension_load_path_reports_missing_user_and_project_scopes() {
+    let _guard = PLUGIN_CONFIG_TEST_LOCK.lock().await;
+    let directory = tempfile::tempdir().unwrap();
+    let agent_dir = directory.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    let _environment = EnvScope::set(&[
+        (crate::agents::pi::launch::PI_EXTENSION_PATH_ENV, None),
+        (
+            crate::agents::pi::doctor::PI_AGENT_DIR_ENV,
+            Some(agent_dir.as_os_str()),
+        ),
+    ]);
+    let missing = pi_extension_trust_check(directory.path());
+    assert_eq!(missing.status, Status::Info);
+
+    let user = agent_dir.join("extensions/nemo-relay");
+    write_doctor_pi_package(&user);
+    let installed = pi_extension_trust_check(directory.path());
+    assert_eq!(installed.status, Status::Pass);
+    assert!(installed.details.contains("user scope"));
+
+    std::fs::remove_dir_all(&user).unwrap();
+    let project = directory.path().join(".pi/extensions/nemo-relay");
+    write_doctor_pi_package(&project);
+    let project = pi_extension_trust_check(directory.path());
+    assert_eq!(project.status, Status::Warn);
+    assert!(project.details.contains("project-scoped"));
+}
+
+fn write_doctor_pi_package(path: &std::path::Path) {
+    std::fs::create_dir_all(path).unwrap();
+    std::fs::write(
+        path.join("package.json"),
+        r#"{"name":"nemo-relay-pi","pi":{"extensions":["./index.ts"]}}"#,
+    )
+    .unwrap();
+    std::fs::write(path.join("index.ts"), "export default 1").unwrap();
+}
+
+#[tokio::test]
+async fn atof_websocket_probe_sends_payload_and_reports_success() {
+    use futures_util::StreamExt as _;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}/events", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+        socket.next().await.unwrap().unwrap().into_text().unwrap()
+    });
+    let check = probe_atof_websocket(
+        &url,
+        vec![("x-observer".into(), "doctor".into())],
+        "{\"probe\":true}".into(),
+        std::time::Duration::from_secs(2),
+        42,
+    )
+    .await;
+    assert_eq!(check.status, Status::Pass);
+    assert_eq!(server.await.unwrap(), "{\"probe\":true}");
+}
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
@@ -9,7 +419,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::configuration::{GatewayConfig, ResolvedConfig, ResolvedDynamicPluginConfig};
 use crate::server::GatewayOverrides;
-use crate::test_support::{EnvScope, accept_bounded, read_headers};
+use crate::test_support::{EnvScope, PLUGIN_CONFIG_TEST_LOCK, accept_bounded, read_headers};
 
 fn start_doctor_http_capture_server() -> (String, Arc<Mutex<String>>, std::thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -197,6 +607,90 @@ fn exit_code_fails_when_agent_readiness_fails() {
         checks: Vec::new(),
     });
     assert_eq!(exit_code(&report), 1);
+}
+
+#[tokio::test]
+async fn managed_bundle_doctor_report_is_managed_only() {
+    let _guard = PLUGIN_CONFIG_TEST_LOCK.lock().await;
+    use base64::Engine;
+    use std::ffi::OsStr;
+
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("bundle");
+    let spec = crate::daemon::managed::ManagedBundleSpec::new(
+        "https://relay.example.com:443",
+        "/opt/nvidia/bin/nemo-relay-dispatch",
+        crate::daemon::managed::ManagedPlatform::Linux,
+        [crate::daemon::managed::ManagedAgent::Pi],
+    )
+    .unwrap();
+    let digest = crate::daemon::managed::write_new_bundle(&root, &spec).unwrap();
+    let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0x42_u8; 32]);
+    let _environment = EnvScope::set(&[(
+        crate::daemon::common::state::ROUTE_TOKEN_ENV,
+        Some(OsStr::new(&token)),
+    )]);
+
+    let report = collect_managed_bundle_report(&root, &digest);
+    assert_eq!(report.managed_bundle.status, Status::Pass);
+    let human = format_managed_bundle_human(&report);
+    assert!(human.contains("Managed bundle validation passed"));
+    let json: serde_json::Value =
+        serde_json::from_str(&format_managed_bundle_json(&report).unwrap()).unwrap();
+    assert_eq!(json["managed_bundle"]["status"], "pass");
+    for personal_section in [
+        "environment",
+        "configuration",
+        "agents",
+        "host_plugins",
+        "observability",
+        "completions",
+    ] {
+        assert!(json.get(personal_section).is_none(), "{personal_section}");
+    }
+}
+
+#[tokio::test]
+async fn managed_bundle_doctor_reports_digest_failures_and_both_output_modes() {
+    let _guard = PLUGIN_CONFIG_TEST_LOCK.lock().await;
+    use base64::Engine;
+    use std::ffi::OsStr;
+
+    let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0x43_u8; 32]);
+    let _environment = EnvScope::set(&[(
+        crate::daemon::common::state::ROUTE_TOKEN_ENV,
+        Some(OsStr::new(&token)),
+    )]);
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("bundle");
+    let spec = crate::daemon::managed::ManagedBundleSpec::new(
+        "https://relay.example.com:443",
+        "/opt/nvidia/bin/nemo-relay-dispatch",
+        crate::daemon::managed::ManagedPlatform::Linux,
+        [crate::daemon::managed::ManagedAgent::Codex],
+    )
+    .unwrap();
+    let digest = crate::daemon::managed::write_new_bundle(&root, &spec).unwrap();
+    assert_eq!(
+        run_managed_bundle_doctor(&root, &digest, true).unwrap(),
+        std::process::ExitCode::SUCCESS
+    );
+    assert_eq!(
+        run_managed_bundle_doctor(&root, &digest, false).unwrap(),
+        std::process::ExitCode::SUCCESS
+    );
+
+    let wrong: crate::daemon::managed::ManagedBundleDigest =
+        "0000000000000000000000000000000000000000000000000000000000000000"
+            .parse()
+            .unwrap();
+    let report = collect_managed_bundle_report(&root, &wrong);
+    assert_eq!(report.managed_bundle.status, Status::Fail);
+    assert!(report.managed_bundle.artifact_count.is_none());
+    assert_eq!(
+        run_managed_bundle_doctor(&root, &wrong, true).unwrap(),
+        std::process::ExitCode::FAILURE
+    );
 }
 
 #[test]
@@ -474,6 +968,155 @@ fn format_json_reports_discovered_dynamic_plugin_fields() {
     );
     assert_eq!(plugin["source"], "/tmp/plugins.toml");
     assert_eq!(plugin["host_config_status"], "present");
+}
+
+#[test]
+fn dynamic_plugin_diagnostic_checks_distinguish_registry_and_host_config_sources() {
+    let registry = DynamicPluginReferenceInfo {
+        plugin_id: "acme.registry".into(),
+        manifest_ref: "/opt/acme/relay-plugin.toml".into(),
+        source: PathBuf::from("/opt/acme/plugins.toml"),
+        host_config_status: DynamicPluginHostConfigStatus::Absent,
+    };
+    let check = dynamic_plugin_reference_check(&registry);
+    assert_eq!(check.status, Status::Pass);
+    assert!(check.details.contains("acme.registry"));
+    assert!(
+        dynamic_plugin_host_config_check(&registry)
+            .details
+            .contains("host config only")
+    );
+
+    let present = DynamicPluginReferenceInfo {
+        host_config_status: DynamicPluginHostConfigStatus::Present,
+        ..registry
+    };
+    let check = dynamic_plugin_host_config_check(&present);
+    assert_eq!(check.status, Status::Info);
+    assert!(check.details.contains("host-owned config present"));
+}
+
+#[tokio::test]
+async fn collect_report_preserves_configuration_and_plugin_resolution_failures() {
+    let _guard = PLUGIN_CONFIG_TEST_LOCK.lock().await;
+    let directory = tempfile::tempdir().unwrap();
+    let missing_config = directory.path().join("missing-config.toml");
+    let report = collect_report(
+        Some(CodingAgent::Codex),
+        DoctorProbeMode::Offline,
+        &GatewayOverrides {
+            config: Some(missing_config),
+            ..GatewayOverrides::default()
+        },
+    )
+    .await
+    .expect("diagnostic report");
+    assert_eq!(report.target_agent.as_deref(), Some("codex"));
+    assert_eq!(report.configuration.resolution.status, Status::Fail);
+    assert_eq!(
+        report.configuration.upstream_auth.openai,
+        SecretPresence::Unknown
+    );
+
+    let valid_config = directory.path().join("config.toml");
+    std::fs::write(&valid_config, "[upstream]\n").unwrap();
+    let invalid_plugins = directory.path().join("invalid-plugins.toml");
+    std::fs::write(&invalid_plugins, "[[invalid").unwrap();
+    let report = collect_report(
+        None,
+        DoctorProbeMode::Offline,
+        &GatewayOverrides {
+            config: Some(valid_config),
+            plugin_config_path: Some(invalid_plugins),
+            ..GatewayOverrides::default()
+        },
+    )
+    .await
+    .expect("plugin diagnostic report");
+    assert_eq!(report.configuration.plugin_resolution.status, Status::Fail);
+}
+
+#[tokio::test]
+async fn component_diagnostics_cover_disabled_malformed_and_explicit_sink_configuration() {
+    let disabled_cache: PluginConfig = serde_json::from_value(json!({
+        "version": 1,
+        "components": [{
+            "kind": "adaptive",
+            "enabled": false,
+            "config": {"response_cache": {"ttl_seconds": 60}}
+        }]
+    }))
+    .unwrap();
+    let mut checks = Vec::new();
+    collect_response_cache_component_checks(
+        &mut checks,
+        &disabled_cache,
+        false,
+        DoctorProbeMode::Offline,
+    )
+    .await;
+    assert_eq!(checks[0].status, Status::Info);
+    assert!(checks[0].details.contains("adaptive plugin disabled"));
+
+    let malformed_cache: PluginConfig = serde_json::from_value(json!({
+        "version": 1,
+        "components": [{
+            "kind": "adaptive",
+            "config": {"response_cache": "not-an-object"}
+        }]
+    }))
+    .unwrap();
+    let mut checks = Vec::new();
+    collect_response_cache_component_checks(
+        &mut checks,
+        &malformed_cache,
+        false,
+        DoctorProbeMode::Offline,
+    )
+    .await;
+    assert_eq!(checks[0].status, Status::Fail);
+    assert!(checks[0].details.contains("invalid response_cache config"));
+
+    let malformed_pricing: PluginConfig = serde_json::from_value(json!({
+        "version": 1,
+        "components": [{"kind": "pricing", "config": {"sources": "invalid"}}]
+    }))
+    .unwrap();
+    let mut checks = Vec::new();
+    collect_pricing_component_checks(&mut checks, &malformed_pricing);
+    assert_eq!(checks[0].status, Status::Fail);
+    assert!(checks[0].details.contains("invalid config"));
+
+    let directory = tempfile::tempdir().unwrap();
+    let file_checks = observability_atof_file_checks(&json!({
+        "atof": {
+            "enabled": true,
+            "sinks": [{"type": "file", "output_directory": directory.path()}]
+        }
+    }));
+    assert_eq!(file_checks[0].status, Status::Pass);
+    assert!(file_checks[0].details.starts_with("sinks[0]"));
+
+    let bad_scheme = probe_atof_websocket(
+        "http://127.0.0.1/events",
+        Vec::new(),
+        "{}".into(),
+        Duration::from_millis(10),
+        11,
+    )
+    .await;
+    assert_eq!(bad_scheme.status, Status::Fail);
+    assert!(bad_scheme.details.contains("must be ws or wss"));
+}
+
+#[test]
+fn diagnostic_layer_status_rejects_toml_syntax_before_shape_validation() {
+    let directory = tempfile::tempdir().unwrap();
+    let invalid = directory.path().join("invalid.toml");
+    std::fs::write(&invalid, "[[broken").unwrap();
+    let layer = layer_status(&invalid);
+    assert_eq!(layer.status, Status::Fail);
+    assert!(layer.details.contains("invalid TOML"));
 }
 
 #[test]

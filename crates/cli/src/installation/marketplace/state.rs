@@ -148,6 +148,8 @@ pub(super) struct PluginState {
     pub(super) host_plugin_removed: bool,
     pub(super) host_marketplace_removed: bool,
     pub(super) plugin_setup_installed: bool,
+    /// True only for a forced recovery that owns an intentionally marker-absent lock.
+    pub(super) marker_absent_recovery: bool,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -329,6 +331,7 @@ pub(super) fn write_state(
             host_plugin_removed: false,
             host_marketplace_removed: false,
             plugin_setup_installed: false,
+            marker_absent_recovery: false,
         },
         layout
             .state_path
@@ -349,6 +352,7 @@ pub(super) fn mark_plugin_setup_installed(
         host_plugin_removed: false,
         host_marketplace_removed: false,
         plugin_setup_installed: false,
+        marker_absent_recovery: false,
     });
     state.plugin_setup_installed = true;
     write_state_for_host(host, &state, &options.install_dir, options)
@@ -374,18 +378,19 @@ fn write_state_for_host_arg(
         println!("write {}", path.display());
         return Ok(());
     }
-    write_json(
-        &path,
-        &json!({
-            "host": host_arg,
-            "marketplaceRoot": state.marketplace_root,
-            "pluginRoot": state.plugin_root,
-            "hostUnregistered": state.host_plugin_removed && state.host_marketplace_removed,
-            "hostPluginRemoved": state.host_plugin_removed,
-            "hostMarketplaceRemoved": state.host_marketplace_removed,
-            "pluginSetupInstalled": state.plugin_setup_installed
-        }),
-    )
+    let mut value = json!({
+        "host": host_arg,
+        "marketplaceRoot": state.marketplace_root,
+        "pluginRoot": state.plugin_root,
+        "hostUnregistered": state.host_plugin_removed && state.host_marketplace_removed,
+        "hostPluginRemoved": state.host_plugin_removed,
+        "hostMarketplaceRemoved": state.host_marketplace_removed,
+        "pluginSetupInstalled": state.plugin_setup_installed
+    });
+    if state.marker_absent_recovery {
+        value["markerAbsentRecovery"] = Value::Bool(true);
+    }
+    write_json(&path, &value)
 }
 
 pub(super) fn read_state(host: impl MarketplaceHost, install_dir: &Path) -> Option<PluginState> {
@@ -410,6 +415,10 @@ pub(super) fn read_state(host: impl MarketplaceHost, install_dir: &Path) -> Opti
             .get("pluginSetupInstalled")
             .and_then(Value::as_bool)
             .unwrap_or(true),
+        marker_absent_recovery: value
+            .get("markerAbsentRecovery")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
     })
 }
 
@@ -453,3 +462,7 @@ pub(super) fn remove_path(path: &Path, options: &PluginInstallOptions) -> Result
             }
         })
 }
+
+#[cfg(test)]
+#[path = "../../../tests/coverage/shared/marketplace_state_tests.rs"]
+mod tests;

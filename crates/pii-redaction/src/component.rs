@@ -21,6 +21,7 @@ use serde_json::{Map, Value as Json};
 use super::builtin::{
     CompiledBuiltinBackend, is_valid_json_pointer, llm_sanitize_request_callback,
     llm_sanitize_response_callback, tool_sanitize_callback,
+    trajectory_llm_request_projection_callback, trajectory_llm_response_projection_callback,
 };
 #[cfg(test)]
 pub(crate) use super::builtin::{hex_sha256, mask_text};
@@ -30,6 +31,7 @@ pub use super::local::{clear_local_backend_provider, register_local_backend_prov
 
 /// The plugin kind reserved for the built-in privacy component.
 pub const PII_REDACTION_PLUGIN_KIND: &str = "pii_redaction";
+pub(super) const DEFAULT_CUSTOM_MARK_PAYLOAD_POLICY: &str = "redact_all_leaves";
 
 /// Top-level PII redaction component wrapper.
 #[derive(Debug, Clone)]
@@ -509,7 +511,7 @@ fn custom_mark_payload_policy_schema(
     string_enum_schema(
         generator,
         &["preserve", "redact_all_leaves"],
-        Some("preserve"),
+        Some(DEFAULT_CUSTOM_MARK_PAYLOAD_POLICY),
     )
 }
 
@@ -1293,10 +1295,15 @@ fn register_builtin_backend(
         )?;
     }
     if config.input {
+        let sanitizer = if compiled.is_trajectory() {
+            trajectory_llm_request_projection_callback(compiled.clone())
+        } else {
+            llm_sanitize_request_callback(compiled.clone())
+        };
         ctx.register_llm_sanitize_request_guardrail(
             &registration_name(profile_name, "input"),
             config.priority,
-            llm_sanitize_request_callback(compiled.clone()),
+            sanitizer,
         )?;
     }
     if config.input || config.tool_input {
@@ -1318,10 +1325,15 @@ fn register_builtin_backend(
         )?;
     }
     if config.output {
+        let sanitizer = if compiled.is_trajectory() {
+            trajectory_llm_response_projection_callback(compiled.clone())
+        } else {
+            llm_sanitize_response_callback(compiled.clone())
+        };
         ctx.register_llm_sanitize_response_guardrail(
             &registration_name(profile_name, "output"),
             config.priority,
-            llm_sanitize_response_callback(compiled.clone()),
+            sanitizer,
         )?;
     }
     if config.output || config.tool_output {
@@ -1484,7 +1496,7 @@ fn default_builtin_action() -> String {
 }
 
 fn default_custom_mark_payload_policy() -> String {
-    "preserve".to_string()
+    DEFAULT_CUSTOM_MARK_PAYLOAD_POLICY.to_string()
 }
 
 fn default_true() -> bool {
@@ -1504,7 +1516,7 @@ fn is_default_builtin_action(action: &str) -> bool {
 }
 
 fn is_default_custom_mark_payload_policy(policy: &str) -> bool {
-    policy == "preserve"
+    policy == DEFAULT_CUSTOM_MARK_PAYLOAD_POLICY
 }
 
 fn is_true(value: &bool) -> bool {
