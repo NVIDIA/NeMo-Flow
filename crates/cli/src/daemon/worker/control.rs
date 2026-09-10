@@ -69,6 +69,9 @@ impl Registration {
             .await
             .unwrap();
     }
+    pub(super) async fn recovery_deadline(&self) -> tokio::time::Instant {
+        self.client.recovery_deadline().await
+    }
     pub(super) async fn next(&self) -> Result<Event, CliError> {
         self.client.next().await
     }

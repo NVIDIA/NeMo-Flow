@@ -765,7 +765,8 @@ async fn monitor_control(
             return;
         }
         log::warn!(target: "nemo_relay.daemon.worker", event = "worker_control_lost", worker_id = state.worker_id.as_str(); "Worker control disconnected; attempting recovery");
-        let recovered = crate::daemon::common::socket::retry(|| async {
+        let deadline = registration.recovery_deadline().await;
+        let recovered = crate::daemon::common::socket::retry_until(deadline, || async {
             let mut next = control::recover(
                 &daemon_origin,
                 &identity,

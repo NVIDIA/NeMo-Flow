@@ -16,9 +16,8 @@ pub(super) struct Hub {
     restarting: Mutex<HashMap<Fingerprint, String>>,
     restart_deadline: Option<tokio::time::Instant>,
     pub(super) changed: Notify,
-    // Control transactions include registration and readiness publication. Serialization also
-    // fences an older socket while a replacement authenticates. HTTP forwarding never takes it.
-    gate: tokio::sync::Mutex<()>,
+    // Fence callbacks and reconnects for one logical session without blocking other peers.
+    gates: Mutex<HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>,
 }
 struct Peer {
     generation: String,
@@ -34,6 +33,23 @@ fn key(role: ComponentRole, id: &str) -> String {
     format!("{role:?}:{id}")
 }
 impl Hub {
+    async fn transaction(&self, role: ComponentRole, id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let gate = {
+            let mut gates = lock(&self.gates);
+            let key = key(role, id);
+            match gates.get(&key).and_then(std::sync::Weak::upgrade) {
+                Some(gate) => gate,
+                None => {
+                    gates.retain(|_, gate| gate.strong_count() != 0);
+                    let gate = Arc::new(tokio::sync::Mutex::new(()));
+                    gates.insert(key, Arc::downgrade(&gate));
+                    gate
+                }
+            }
+        };
+        gate.lock_owned().await
+    }
+
     pub(super) fn restarting(generations: HashMap<Fingerprint, String>) -> Self {
         Self {
             restarting: Mutex::new(generations),
@@ -166,15 +182,27 @@ pub(super) fn recover_after_restart(state: Arc<DaemonState>) {
     };
     tokio::spawn(async move {
         tokio::time::sleep_until(deadline).await;
-        let _transaction = state.sockets.gate.lock().await;
-        let generations = std::mem::take(&mut *lock(&state.sockets.restarting));
-        for (fingerprint, generation) in generations {
-            let work = state.clone();
-            let _ = tokio::task::spawn_blocking(move || {
-                revoke_active_worker_generation(&work, fingerprint, &generation)
-            })
-            .await;
-        }
+        let work = state.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            // Publication removes restored generations while holding this same durable-state
+            // lock. Taking the pending set here prevents expiry from revoking a recovered peer.
+            let _publication = lock(&work.worker_generation_publication);
+            let generations = std::mem::take(&mut *lock(&work.sockets.restarting));
+            for (fingerprint, generation) in generations {
+                if let Err(error) = work
+                    .active_worker_generations
+                    .revoke_if_matches(fingerprint, &generation)
+                {
+                    log::error!(
+                        target: "nemo_relay.daemon",
+                        event = "worker_generation_revocation_failed",
+                        error_kind = error.log_kind();
+                        "Failed to revoke expired worker generation"
+                    );
+                }
+            }
+        })
+        .await;
         state.sockets.changed.notify_waiters();
     });
 }
@@ -287,7 +315,13 @@ async fn run(state: Arc<DaemonState>, role: ComponentRole, local: bool, socket: 
                 } else {
                     None
                 };
-                let _transaction = state.sockets.gate.lock().await;
+                let session_id = match &request.command {
+                    Command::RegisterMcp { request, .. } => request.proof.transcript.initiator_instance_id.as_str(),
+                    Command::RegisterWorker(request) => request.worker_id.as_str(),
+                    Command::RecoverWorker(request) => request.worker_id.as_str(),
+                    _ => id.as_deref().unwrap_or(&generation),
+                };
+                let _transaction = state.sockets.transaction(role, session_id).await;
                 if let Some(id) = &id && lock(&state.sockets.peers).get(&key(role, id)).is_none_or(|p| p.generation != generation) { break; }
                 let response = match readiness {
                     Some(response) => response,
@@ -351,7 +385,7 @@ async fn socket_ready(
     request: &SessionRequest<WorkerReadyPayload>,
 ) -> Response<Body> {
     let candidate = {
-        let _transaction = state.sockets.gate.lock().await;
+        let _transaction = state.sockets.transaction(role, &request.session_id).await;
         if role != ComponentRole::Worker || id != Some(request.session_id.as_str()) {
             return control_message(StatusCode::UNAUTHORIZED, "worker connection required");
         }
@@ -364,7 +398,7 @@ async fn socket_ready(
         }
     };
     let probe = probe_worker(&candidate.target).await;
-    let _transaction = state.sockets.gate.lock().await;
+    let _transaction = state.sockets.transaction(role, &request.session_id).await;
     if let Err(response) = validate_ready_connection(state, &request.session_id, generation) {
         return response;
     }
@@ -552,7 +586,7 @@ async fn disconnected(
     id: String,
     generation: String,
 ) {
-    let _transaction = state.sockets.gate.lock().await;
+    let _transaction = state.sockets.transaction(role, &id).await;
     let deadline = {
         let mut peers = lock(&state.sockets.peers);
         let Some(peer) = peers
@@ -575,7 +609,7 @@ async fn disconnected(
     drop(_transaction);
     tokio::spawn(async move {
         tokio::time::sleep_until(deadline).await;
-        let _transaction = state.sockets.gate.lock().await;
+        let _transaction = state.sockets.transaction(role, &id).await;
         let current = lock(&state.sockets.peers)
             .get(&key(role, &id))
             .is_some_and(|p| p.generation == generation && p.sender.is_none());

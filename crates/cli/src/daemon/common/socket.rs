@@ -66,6 +66,7 @@ struct Connection {
     receive: mpsc::Receiver<Event>,
     pending: std::collections::VecDeque<Event>,
     task: tokio::task::JoinHandle<()>,
+    disconnected: Arc<std::sync::Mutex<Option<tokio::time::Instant>>>,
 }
 impl Drop for Connection {
     fn drop(&mut self) {
@@ -102,6 +103,8 @@ impl Client {
         })?;
         let (send, mut requests) = mpsc::channel::<Request>(QUEUE_CAPACITY);
         let (events, receive) = mpsc::channel(QUEUE_CAPACITY);
+        let disconnected = Arc::new(std::sync::Mutex::new(None));
+        let connection_loss = disconnected.clone();
         let task = tokio::spawn(async move {
             let (mut writer, mut reader) = socket.split();
             loop {
@@ -125,14 +128,30 @@ impl Client {
                     }
                 }
             }
+            // Record transport loss before closing the event channel. Consumers may still
+            // have queued directives to process when they observe its eventual EOF.
+            *connection_loss
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = Some(tokio::time::Instant::now());
         });
         *self.0.lock().await = Some(Connection {
             send,
             receive,
             pending: Default::default(),
             task,
+            disconnected,
         });
         Ok(())
+    }
+    pub(crate) async fn recovery_deadline(&self) -> tokio::time::Instant {
+        let guard = self.0.lock().await;
+        let disconnected = guard.as_ref().and_then(|connection| {
+            *connection
+                .disconnected
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+        });
+        disconnected.unwrap_or_else(tokio::time::Instant::now) + GRACE
     }
     pub(crate) async fn request<R: serde::de::DeserializeOwned>(
         &self,
@@ -221,14 +240,27 @@ pub(crate) fn failure(message: impl Into<String>) -> CliError {
     CliError::Launch(message.into())
 }
 
-pub(crate) async fn retry<T, F, Fut>(mut operation: F) -> Result<T, CliError>
+pub(crate) async fn retry<T, F, Fut>(operation: F) -> Result<T, CliError>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<T, CliError>>,
 {
-    let deadline = tokio::time::Instant::now() + GRACE;
+    retry_until(tokio::time::Instant::now() + GRACE, operation).await
+}
+
+pub(crate) async fn retry_until<T, F, Fut>(
+    deadline: tokio::time::Instant,
+    mut operation: F,
+) -> Result<T, CliError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, CliError>>,
+{
     let mut delay = Duration::from_millis(250);
     loop {
+        if tokio::time::Instant::now() >= deadline {
+            return Err(failure("control reconnect grace period expired"));
+        }
         let result = tokio::time::timeout_at(
             deadline.min(tokio::time::Instant::now() + ATTEMPT_TIMEOUT),
             operation(),

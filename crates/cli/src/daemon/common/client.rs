@@ -53,7 +53,9 @@ pub(crate) async fn begin_handshake(
             "a daemon cannot initiate a daemon client handshake".into(),
         ));
     }
-    client.connect(daemon_address, role).await?;
+    // Keep the WebSocket/TLS connect future off the nested MCP startup stack. Windows
+    // executable main threads have a smaller stack than the Rust test harness threads.
+    Box::pin(client.connect(daemon_address, role)).await?;
     let daemon = daemon_url(daemon_address)?;
     let daemon_origin = daemon.as_str().trim_end_matches('/').to_owned();
     let initiator = descriptor(role);

@@ -413,13 +413,16 @@ fn activation_timed_out(
 }
 
 async fn refresh_registration(lease: &mut McpSession) -> Result<Registration, CliError> {
-    let registration = register(
-        &lease.client,
-        &lease.daemon_origin,
-        &lease.route_credential,
-        &lease.identity,
-        &lease.session_id,
-    )
+    let deadline = lease.client.recovery_deadline().await;
+    let registration = super::common::socket::retry_until(deadline, || {
+        register_once(
+            &lease.client,
+            &lease.daemon_origin,
+            &lease.route_credential,
+            &lease.identity,
+            &lease.session_id,
+        )
+    })
     .await?;
     apply_registration(lease, &registration);
     Ok(registration)

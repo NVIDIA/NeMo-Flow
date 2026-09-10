@@ -1006,3 +1006,53 @@ async fn acknowledge_directives(client: Client) {
         }
     }
 }
+
+#[tokio::test]
+async fn blocked_worker_transaction_does_not_block_other_sessions() {
+    let fixture = recovering_worker().await;
+    let _worker = fixture
+        .state
+        .sockets
+        .transaction(ComponentRole::Worker, "worker")
+        .await;
+    let other = Client::default();
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        mcp(&other, &fixture.origin, &fixture.identity, "independent"),
+    )
+    .await
+    .unwrap();
+    // Another transaction for this same worker must still wait for the current owner.
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(20),
+            fixture
+                .state
+                .sockets
+                .transaction(ComponentRole::Worker, "worker")
+        )
+        .await
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn both_upgrade_routes_apply_transport_peer_rate_limits() {
+    for path in [
+        crate::daemon::common::socket::MCP_SOCKET_PATH,
+        crate::daemon::common::socket::WORKER_SOCKET_PATH,
+    ] {
+        let (_state, origin, task) = daemon(true).await;
+        let url = format!("{}{path}", origin.replacen("http", "ws", 1));
+        for _ in 0..CHALLENGES_PER_PEER_WINDOW {
+            let (socket, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+            drop(socket);
+        }
+        let error = tokio_tungstenite::connect_async(&url).await.unwrap_err();
+        let tokio_tungstenite::tungstenite::Error::Http(response) = error else {
+            panic!("expected rate-limit response")
+        };
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        task.abort();
+    }
+}
