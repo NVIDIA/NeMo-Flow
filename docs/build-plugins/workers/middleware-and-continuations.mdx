@@ -298,12 +298,12 @@ priority = execution["priority"]
 emit_pending_marks = execution["emit_pending_marks"]
 tag = settings["tag"]
 
-async def tool_execution(name, args, next_call):
-    downstream = await next_call.call(args)
+async def tool_execution(context, next_call):
+    downstream = await next_call.call(context.args)
     marks = (
         [PendingMarkSpec(
             name="example.python_worker.tool_execution",
-            data={"tool_name": name, "tag": tag},
+            data={"tool_name": context.tool_name, "tag": tag},
         )]
         if emit_pending_marks
         else []
@@ -312,7 +312,7 @@ async def tool_execution(name, args, next_call):
         result=downstream.result,
         annotation={
             "upstream": downstream.annotation,
-            "worker": {"tool_name": name, "tag": tag},
+            "worker": {"tool_name": context.tool_name, "tag": tag},
         },
         pending_marks=marks,
     )
@@ -358,8 +358,8 @@ context.register_tool_execution_intercept(
     config.execution.priority,
     {
         let emit_marks = config.execution.emit_pending_marks;
-        move |_name, request, next| async move {
-            let result = next.call(request).await?;
+        move |context, next| async move {
+            let result = next.call(context.into_args()).await?;
             let mut outcome = ToolExecutionInterceptOutcome::from(result);
             if emit_marks {
                 outcome = outcome.with_pending_mark(

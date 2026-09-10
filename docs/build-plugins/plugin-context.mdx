@@ -98,8 +98,8 @@ downstream result, then adds the pending mark without exposing it to the applica
 <Tabs>
 <Tab title="Python" language="python">
 ```python
-async def tool_execution(_name, args, next_call):
-    downstream = await next_call(args)
+async def tool_execution(context, next_call):
+    downstream = await next_call(context.args)
     return ToolExecutionInterceptOutcome(
         downstream.result,
         [PendingMarkSpec("plugin.tool.complete")],
@@ -116,8 +116,8 @@ context.register_tool_execution_intercept(
 context.registerToolExecutionIntercept(
   'tool_execution',
   executionPriority,
-  async (args, next) => {
-    const downstream = await next(args);
+  async (context, next) => {
+    const downstream = await next(context.args);
     return {
       ...downstream,
       pendingMarks: [{ name: 'plugin.tool.complete' }],

@@ -97,8 +97,11 @@ callbacks and `ToolNext` return `ToolExecutionResult`, preserving an application
 and optional opaque annotation. Tool execution intercepts return the same pair plus
 Relay-owned pending marks. The manifest contract remains `compat.native_api = "1"`.
 Relay 0.9 advances the C host-table ABI to v5 for `ToolExecutionContext`; the host keeps
-the frozen v4 table for previously compiled plugins. Plugins must rebuild and exclude
-pre-0.8 Relay versions because the JSON result boundary changed.
+the frozen v4 table for previously compiled plugins. Plugins that register a
+context-aware tool execution intercept must rebuild and set
+`compat.relay = ">=0.9.0,<1.0"`; the required registration is unavailable in the v4 host
+table. Typed async plugins that do not use this registration may retain
+`compat.relay = ">=0.8.0,<1.0"`.
 
 Set a plugin-wide default in Rust, then let the component's TOML configuration
 override it:
