@@ -2700,8 +2700,14 @@ fn gen_ai_tool_definitions_use_minimal_standard_schema() {
             }},
             {"type": "provider_native", "provider": "anthropic", "kind": "web_search",
              "value": {"type": "web_search_20250305", "name": "web_search", "private": "omitted"}},
-            {"type": "provider_native", "provider": "openai", "kind": "web_search",
+            {"type": "provider_native", "provider": "openai_responses", "kind": "web_search",
              "value": {"type": "web_search"}},
+            {"type": "provider_native", "provider": "gemini", "kind": "codeExecution",
+             "value": {"codeExecution": {}, "googleSearch": {}, "unknownTool": {}}},
+            {"type": "provider_native", "provider": "unknown", "kind": "web_search",
+             "value": {"type": "web_search"}},
+            {"type": "provider_native", "provider": "openai_responses", "kind": "unknown",
+             "value": {"type": "unknown"}},
             {"type": "function", "function": {"name": " "}}
         ]
     }))
@@ -2726,7 +2732,10 @@ fn gen_ai_tool_definitions_use_minimal_standard_schema() {
         definitions,
         json!([
             {"type": "function", "name": "search"},
-            {"type": "web_search_20250305", "name": "web_search"}
+            {"type": "web_search_20250305", "name": "web_search"},
+            {"type": "web_search", "name": "web_search"},
+            {"type": "codeExecution", "name": "codeExecution"},
+            {"type": "googleSearch", "name": "googleSearch"}
         ])
     );
 }

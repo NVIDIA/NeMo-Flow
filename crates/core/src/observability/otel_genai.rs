@@ -8,7 +8,7 @@
 use crate::api::event::{Event, EventNormalizationExt};
 use crate::api::scope::ScopeType;
 use crate::codec::request::{
-    ApiSpecificRequest, ContentPart, Message, MessageContent, ToolDefinition,
+    ApiSpecificRequest, ContentPart, Message, MessageContent, tool_definition_identities,
 };
 use crate::codec::response::{AnnotatedLlmResponse, FinishReason};
 use crate::json::Json;
@@ -637,20 +637,8 @@ fn push_tool_definitions(attributes: &mut Vec<KeyValue>, event: &Event) {
     };
     let definitions: Vec<Json> = tools
         .iter()
-        .filter_map(|tool| match tool {
-            ToolDefinition::Function { function, .. } if !function.name.trim().is_empty() => {
-                Some(serde_json::json!({"type": "function", "name": function.name}))
-            }
-            ToolDefinition::ProviderNative { kind, value, .. } => {
-                let name = value.get("name").and_then(Json::as_str)?;
-                let tool_type = value.get("type").and_then(Json::as_str).unwrap_or(kind);
-                if name.trim().is_empty() || tool_type.trim().is_empty() {
-                    return None;
-                }
-                Some(serde_json::json!({"type": tool_type, "name": name}))
-            }
-            _ => None,
-        })
+        .flat_map(tool_definition_identities)
+        .map(|(tool_type, name)| serde_json::json!({"type": tool_type, "name": name}))
         .collect();
     // Only required schema properties; provider wrappers and optional schemas
     // can be large and need not accompany every inference.
