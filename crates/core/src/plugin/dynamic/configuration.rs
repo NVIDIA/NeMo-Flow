@@ -387,7 +387,22 @@ pub(crate) fn sanitized_plugin_config(config: &PluginConfig) -> Json {
 
 fn sanitize_resolved_config(mut config: Json) -> Json {
     redact_config_value(&mut config, None);
+    redact_opaque_dynamic_plugin_configs(&mut config);
     config
+}
+
+fn redact_opaque_dynamic_plugin_configs(config: &mut Json) {
+    let Some(dynamic_plugins) = config
+        .pointer_mut("/plugins/dynamic")
+        .and_then(Json::as_array_mut)
+    else {
+        return;
+    };
+    for plugin in dynamic_plugins {
+        if let Some(plugin_config) = plugin.get_mut("config") {
+            redact_sensitive_value(plugin_config);
+        }
+    }
 }
 
 fn redact_config_value(value: &mut Json, field_name: Option<&str>) {

@@ -142,11 +142,12 @@ When library initialization discovers `plugins.toml` files, Relay emits one
 the operational log and included in the initialization result and active plugin
 report. The report also includes `config_paths` and `resolved_config`.
 `resolved_config` is the fully merged plugin configuration. Literal secrets are
-redacted, and URL user info, query parameters, and fragments are removed. Relay
-continues with the layered destination set; validation or activation errors in
-that effective configuration still fail normally. Except for the signal-list
-clearing behavior above, changing or removing an inherited endpoint requires
-editing the layer that declares it.
+redacted, URL user info, query parameters, and fragments are removed, and every
+scalar in opaque dynamic-plugin configuration is redacted. Relay continues with
+the layered destination set; validation or activation errors in that effective
+configuration still fail normally. Except for the signal-list clearing behavior
+above, changing or removing an inherited endpoint requires editing the layer
+that declares it.
 
 For complete layering rules, refer to
 [Plugin Configuration Files](/configure-plugins/plugin-configuration-files#precedence-and-merge-behavior).

@@ -158,6 +158,73 @@ fn resolved_config_redacts_secrets_without_hiding_its_structure() {
 }
 
 #[test]
+fn plugin_host_report_redacts_opaque_dynamic_plugin_config() {
+    let temp = tempfile::tempdir().unwrap();
+    let manifest_path = temp.path().join("relay-plugin.toml");
+    fs::write(
+        &manifest_path,
+        r#"
+manifest_version = 1
+
+[plugin]
+id = "fixture.opaque-config"
+kind = "worker"
+
+[compat]
+relay = ">=0.8.0,<1.0"
+worker_protocol = "grpc-v1"
+
+[defaults]
+enabled = false
+
+[capabilities]
+items = ["plugin_worker"]
+
+[load]
+runtime = "command"
+entrypoint = "fixture-worker"
+"#,
+    )
+    .unwrap();
+    let config_path = temp.path().join("plugins.toml");
+    fs::write(
+        &config_path,
+        format!(
+            r#"
+version = 1
+
+[[plugins.dynamic]]
+manifest = {:?}
+
+[plugins.dynamic.config]
+access_key = "access-secret"
+private_key = "private-secret"
+auth = "auth-secret"
+dsn = "https://user:password@collector.example?token=secret"
+
+[plugins.dynamic.config.nested]
+arbitrary_secret = "nested-secret"
+"#,
+            manifest_path.display().to_string()
+        ),
+    )
+    .unwrap();
+
+    let report = validate(PluginConfig::default(), Some(config_path)).unwrap();
+
+    assert_eq!(
+        report.resolved_config["plugins"]["dynamic"][0]["config"],
+        json!({
+            "access_key": "[REDACTED]",
+            "private_key": "[REDACTED]",
+            "auth": "[REDACTED]",
+            "dsn": "[REDACTED]",
+            "nested": {"arbitrary_secret": "[REDACTED]"}
+        })
+    );
+}
+
+#[test]
 fn lifecycle_state_selection_covers_absent_disabled_and_enabled_records() {
     let temp = tempfile::tempdir().unwrap();
     let plugins_toml = temp.path().join("plugins.toml");
