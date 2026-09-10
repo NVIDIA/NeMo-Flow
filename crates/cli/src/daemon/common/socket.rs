@@ -10,9 +10,10 @@ use crate::error::CliError;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio_tungstenite::tungstenite::{Message, protocol::WebSocketConfig};
 
 pub(crate) const MCP_SOCKET_PATH: &str = "/_nemo-relay/control/v2/mcp";
@@ -61,16 +62,34 @@ pub(crate) enum Event {
     },
 }
 
+struct Reply {
+    status: u16,
+    payload: Value,
+}
+
+struct PendingRequest {
+    request: Request,
+    reply: oneshot::Sender<Reply>,
+}
+
 struct Connection {
-    send: mpsc::Sender<Request>,
-    receive: mpsc::Receiver<Event>,
-    pending: std::collections::VecDeque<Event>,
+    send: mpsc::Sender<PendingRequest>,
+    receive: Arc<Mutex<mpsc::Receiver<Event>>>,
     task: tokio::task::JoinHandle<()>,
     disconnected: Arc<std::sync::Mutex<Option<tokio::time::Instant>>>,
 }
+impl Connection {
+    fn close(&self) {
+        self.disconnected
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get_or_insert_with(tokio::time::Instant::now);
+        self.task.abort();
+    }
+}
 impl Drop for Connection {
     fn drop(&mut self) {
-        self.task.abort();
+        self.close();
     }
 }
 #[derive(Clone, Default)]
@@ -104,24 +123,37 @@ impl Client {
                 "control protocol v2 WebSocket connection failed: {error}"
             ))
         })?;
-        let (send, mut requests) = mpsc::channel::<Request>(QUEUE_CAPACITY);
+        let (send, mut requests) = mpsc::channel::<PendingRequest>(QUEUE_CAPACITY);
         let (events, receive) = mpsc::channel(QUEUE_CAPACITY);
         let disconnected = Arc::new(std::sync::Mutex::new(None));
         let connection_loss = disconnected.clone();
         let task = tokio::spawn(async move {
             let (mut writer, mut reader) = socket.split();
+            let mut replies = HashMap::<String, oneshot::Sender<Reply>>::new();
             loop {
                 tokio::select! {
                     request = requests.recv() => {
-                        let Some(request) = request else { break };
+                        let Some(PendingRequest { request, reply }) = request else { break };
+                        if reply.is_closed() { continue; }
+                        // Cancelled or timed-out callers must not consume reply slots forever.
+                        replies.retain(|_, sender| !sender.is_closed());
+                        if replies.len() == QUEUE_CAPACITY { break; }
                         let Ok(encoded) = serde_json::to_string(&request) else { break };
                         if encoded.len() > MAX_CONTROL_BODY_BYTES { break; }
+                        replies.insert(request.request_id, reply);
                         if !matches!(tokio::time::timeout(ATTEMPT_TIMEOUT, writer.send(Message::Text(encoded.into()))).await, Ok(Ok(()))) { break; }
                     }
                     message = reader.next() => match message {
                         Some(Ok(Message::Text(text))) => {
                             let Ok(event) = serde_json::from_str::<Event>(&text) else { break };
-                            if events.try_send(event).is_err() { break; }
+                            match event {
+                                Event::Reply { request_id, status, payload } => {
+                                    if let Some(reply) = replies.remove(&request_id) {
+                                        let _ = reply.send(Reply { status, payload });
+                                    }
+                                }
+                                event => if events.try_send(event).is_err() { break; },
+                            }
                         }
                         Some(Ok(Message::Ping(bytes))) => {
                             if !matches!(tokio::time::timeout(ATTEMPT_TIMEOUT, writer.send(Message::Pong(bytes))).await, Ok(Ok(()))) { break; }
@@ -133,14 +165,14 @@ impl Client {
             }
             // Record transport loss before closing the event channel. Consumers may still
             // have queued directives to process when they observe its eventual EOF.
-            *connection_loss
+            connection_loss
                 .lock()
-                .unwrap_or_else(|error| error.into_inner()) = Some(tokio::time::Instant::now());
+                .unwrap_or_else(|error| error.into_inner())
+                .get_or_insert_with(tokio::time::Instant::now);
         });
         *self.0.lock().await = Some(Connection {
             send,
-            receive,
-            pending: Default::default(),
+            receive: Arc::new(Mutex::new(receive)),
             task,
             disconnected,
         });
@@ -160,80 +192,69 @@ impl Client {
         &self,
         command: Command,
     ) -> Result<R, CliError> {
-        let mut guard = self.0.lock().await;
-        let connection = guard
-            .as_mut()
-            .ok_or_else(|| failure("control connection is closed"))?;
-        let request_id = uuid::Uuid::now_v7().to_string();
-        connection
-            .send
-            .try_send(Request {
-                request_id: request_id.clone(),
-                command,
-            })
-            .map_err(|_| failure("control writer unavailable"))?;
         tokio::time::timeout(ATTEMPT_TIMEOUT, async {
-            loop {
-                let event = connection
-                    .receive
-                    .recv()
-                    .await
-                    .ok_or_else(|| failure("control connection lost"))?;
-                match event {
-                    Event::Reply {
-                        request_id: id,
-                        status,
-                        payload,
-                    } if id == request_id => {
-                        if !(200..300).contains(&status) {
-                            let message = payload
-                                .pointer("/error/message")
-                                .and_then(Value::as_str)
-                                .unwrap_or("control command rejected");
-                            return Err(if status == 401 {
-                                CliError::Unauthorized(message.into())
-                            } else {
-                                failure(message)
-                            });
-                        }
-                        return serde_json::from_value(payload)
-                            .map_err(|error| failure(format!("invalid control reply: {error}")));
-                    }
-                    Event::Reply { .. } => {}
-                    event => {
-                        if connection.pending.len() == QUEUE_CAPACITY {
-                            return Err(failure("control event queue overflow"));
-                        }
-                        connection.pending.push_back(event);
-                    }
+            let response = {
+                let guard = self.0.lock().await;
+                let connection = guard
+                    .as_ref()
+                    .ok_or_else(|| failure("control connection is closed"))?;
+                let (reply, response) = oneshot::channel();
+                if connection
+                    .send
+                    .try_send(PendingRequest {
+                        request: Request {
+                            request_id: uuid::Uuid::now_v7().to_string(),
+                            command,
+                        },
+                        reply,
+                    })
+                    .is_err()
+                {
+                    connection.close();
+                    return Err(failure("control writer unavailable"));
                 }
+                response
+            };
+            let Reply { status, payload } = response
+                .await
+                .map_err(|_| failure("control connection lost"))?;
+            if !(200..300).contains(&status) {
+                let message = payload
+                    .pointer("/error/message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("control command rejected");
+                return Err(if status == 401 {
+                    CliError::Unauthorized(message.into())
+                } else {
+                    failure(message)
+                });
             }
+            serde_json::from_value(payload)
+                .map_err(|error| failure(format!("invalid control reply: {error}")))
         })
         .await
         .map_err(|_| failure("control operation timed out"))?
     }
     pub(crate) async fn next(&self) -> Result<Event, CliError> {
-        let mut guard = self.0.lock().await;
-        let connection = guard
-            .as_mut()
-            .ok_or_else(|| failure("control connection is closed"))?;
-        loop {
-            let event = match connection.pending.pop_front() {
-                Some(event) => event,
-                None => connection
-                    .receive
-                    .recv()
-                    .await
-                    .ok_or_else(|| failure("control connection lost"))?,
-            };
-            if !matches!(event, Event::Reply { .. }) {
-                return Ok(event);
-            }
-        }
+        let receive = self
+            .0
+            .lock()
+            .await
+            .as_ref()
+            .ok_or_else(|| failure("control connection is closed"))?
+            .receive
+            .clone();
+        receive
+            .lock()
+            .await
+            .recv()
+            .await
+            .ok_or_else(|| failure("control connection lost"))
     }
     /// Registration replies are ordered after any pending drain intent on the same socket.
     pub(crate) async fn pending_event(&self) -> Option<Event> {
-        self.0.lock().await.as_mut()?.pending.pop_front()
+        let receive = self.0.lock().await.as_ref()?.receive.clone();
+        receive.try_lock().ok()?.try_recv().ok()
     }
     pub(crate) async fn acknowledge(&self, request_id: String) -> Result<(), CliError> {
         self.request(Command::Acknowledge { request_id }).await

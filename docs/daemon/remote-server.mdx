@@ -43,8 +43,8 @@ flowchart TD
         D["Daemon<br/>10.20.0.10:8443"]
     end
     H -->|"model and hook requests"| D
-    M -->|"HTTPS control"| D
-    W -->|"HTTPS control"| D
+    M <-->|"WSS control"| D
+    W <-->|"WSS control"| D
     D -->|"HTTPS requests to worker"| W
     W -->|"HTTPS model requests"| P["Provider"]
     D -->|"HTTPS in pass-through"| P
@@ -58,7 +58,7 @@ connection to the client worker**. This is not a reverse tunnel.
 
 | Initiator | Destination | Purpose |
 | --- | --- | --- |
-| Client harness, hooks, MCP, worker | Daemon TCP 8443 | HTTPS requests and control |
+| Client harness, hooks, MCP, worker | Daemon TCP 8443 | HTTPS requests and WSS control sessions |
 | Daemon | Assigned client worker TCP port | HTTPS readiness checks and routed requests |
 | Client worker | Configured provider, normally TCP 443 | Model requests |
 | Daemon | Configured provider, normally TCP 443 | Pass-through requests |
@@ -67,7 +67,10 @@ connection to the client worker**. This is not a reverse tunnel.
 Allow these paths through host firewalls, VPN rules, and network access controls.
 Clients must resolve `relay.example.com` to the private server address. The daemon
 must resolve or route to each worker's advertised IPv4 address. Plain HTTP is
-not accepted for a remote daemon origin.
+not accepted for a remote daemon origin. MCP and workers derive `wss` control
+URLs from the configured `https` origin; no additional control port is required.
+Firewalls and proxies must allow long-lived WebSocket sessions as well as HTTPS
+requests. See [Reverse Proxy Requirements](/daemon/reference#configure-a-trusted-reverse-proxy).
 
 ## Install the Server
 

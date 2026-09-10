@@ -66,8 +66,8 @@ nemo-relay daemon \
 Native TLS requires an `https` advertised URL. An `https` advertised URL may
 also name a trusted reverse proxy that terminates TLS before forwarding to the
 daemon listener. Every non-loopback `--daemon-address` target must use HTTPS.
-If a trusted reverse proxy is in the data path, apply the streaming
-[streaming requirements](#configure-a-trusted-reverse-proxy).
+If a trusted reverse proxy is in the data path, apply the
+[proxy requirements](#configure-a-trusted-reverse-proxy).
 
 ### Use Explicit Pass-Through Mode
 
@@ -236,16 +236,33 @@ instructions, release, and drain messages. Upgrade the daemon, MCP clients, and
 workers together; v1 HTTP control endpoints are no longer supported. Provider
 and hook requests still use HTTP, and MCP clients still serve stdio locally.
 
+The upgrade paths are `/_nemo-relay/control/v2/mcp` and
+`/_nemo-relay/control/v2/worker`. Clients derive `ws` or `wss` from the configured
+HTTP or HTTPS daemon origin. Each new connection authenticates before it can
+change state. Commands carry request IDs and receive explicit acknowledgments;
+pushed directives are received independently of command replies. A replaced
+connection cannot invalidate its successor. Each control command also has a
+five-second deadline, including time waiting to be sent.
+
+Control messages are limited to 256 KiB. Outbound queues and client event queues
+hold at most 64 messages; clients also bound outstanding replies to 64. Queue
+overflow closes the connection and triggers normal recovery. These limits are
+independent of HTTP body streaming and have no CLI configuration.
+
 Connected sessions do not require lease renewals. Strictly loopback connections
-send no periodic pings. For non-loopback connections, the daemon sends a ping
-every 30 seconds and requires its matching pong within 10 seconds. An idle hung
+send no periodic pings. Both actual socket endpoints must be loopback; the
+configured hostname or forwarded headers do not determine locality. For
+non-loopback connections, the daemon sends a ping every 30 seconds and requires its matching pong within 10 seconds. An idle hung
 loopback process may remain undetected until an operation times out.
 
-After a disconnect, clients retry immediately with backoff capped at two
-seconds. Each connection and authentication attempt has a five-second timeout,
+After a disconnect, clients retry immediately, then use exponential backoff
+starting at 250 milliseconds and capped at two seconds, with jitter. Each
+connection and authentication attempt has a five-second timeout,
 and the complete recovery window is 30 seconds. Failed attempts do not extend
 that window. A disconnected MCP retains its route reference during recovery;
-a separately connected worker can continue serving it.
+a separately connected worker can continue serving it. An acknowledged explicit
+release removes the reference immediately. Recovery reconciles the daemon's
+current assignment instead of blindly replaying state-changing commands.
 
 If a worker loses its control connection, it stops accepting new requests.
 Already accepted streams can finish while it reconnects. The daemon resumes
@@ -258,8 +275,9 @@ window expires. After a daemon restart, persisted worker generations have a
 When the last MCP reference leaves, the route enters a non-revivable drain.
 Already accepted requests have up to two minutes to finish before the worker
 terminates. A new MCP must wait for that termination, then begins a fresh
-activation. If a ready worker fails while references remain, the broker
-nominates one connected MCP to relaunch it.
+activation. Drain intent survives a control reconnect and is acknowledged when
+applied; a draining worker is never published as ready again. If a ready worker
+fails while references remain, the broker nominates one connected MCP to relaunch it.
 
 After MCP authentication succeeds, a worker activation, bind, registration,
 readiness, or activation-channel failure moves the whole fingerprint route to
@@ -328,6 +346,15 @@ across users as well as keeping the coding-agent artifacts byte-identical.
 A reverse proxy in front of the daemon becomes part of the streaming path.
 Configure it to:
 
+- Allow WebSocket upgrades on `/_nemo-relay/control/v2/mcp` and
+  `/_nemo-relay/control/v2/worker`, including bidirectional frames after upgrade.
+- Preserve WebSocket ping and pong frames. For a non-loopback daemon connection,
+  the daemon pings every 30 seconds and requires its matching pong within 10
+  seconds. Set proxy idle limits above that interval with enough margin.
+- If the proxy connects to the daemon over loopback, the daemon sends no periodic
+  pings on that connection. Configure the proxy to keep idle control sessions
+  open or manage keepalives across its remote connection; do not assume the daemon
+  detects that remote hop.
 - Disable response buffering.
 - Disable compression or other response transformations.
 - Disable cache coalescing.

@@ -51,6 +51,12 @@ return along the request path. Model streams travel back through the worker and
 daemon to the harness. Hook responses return through the hook forwarder.
 The harness and hook forwarder do not contact a worker directly.
 
+MCP and worker processes each open a persistent WebSocket control session to the
+daemon. The daemon pushes route decisions and drain commands on those sessions.
+Command replies and pushed events share the socket, while HTTP streams use
+separate connections. An idle control-event listener does not delay commands or
+their acknowledgments.
+
 ## Local Deployment
 
 <div role="region" aria-label="Local deployment diagram" tabIndex={0} style={{ overflowX: "auto" }}>
@@ -65,9 +71,9 @@ flowchart TD
         W["Per-user worker<br/>127.0.0.1:auto port"]
         H -->|"HTTP requests"| D
         H -. "launch" .-> M
-        M -->|"HTTP control"| D
+        M <-->|"WebSocket control"| D
         M -. "launch" .-> W
-        W -->|"HTTP control"| D
+        W <-->|"WebSocket control"| D
         D -->|"HTTP requests"| W
     end
     W -->|"HTTPS"| P["Model provider"]

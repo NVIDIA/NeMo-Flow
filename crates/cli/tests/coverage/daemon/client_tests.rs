@@ -158,3 +158,285 @@ async fn queued_disconnect_keeps_its_original_recovery_deadline() {
     assert!(client.next().await.is_err());
     assert_eq!(client.recovery_deadline().await, deadline);
 }
+
+async fn connected_control_pair() -> (
+    Client,
+    tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let client = Client::default();
+    let (connected, socket) = tokio::join!(client.connect(&origin, ComponentRole::Mcp), async {
+        let (stream, _) = listener.accept().await.unwrap();
+        tokio_tungstenite::accept_async(stream).await.unwrap()
+    });
+    connected.unwrap();
+    (client, socket)
+}
+
+async fn receive_control_request(
+    socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+) -> Request {
+    let message = socket.next().await.unwrap().unwrap();
+    serde_json::from_str(message.to_text().unwrap()).unwrap()
+}
+
+async fn send_control_event(
+    socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+    event: Event,
+) {
+    socket
+        .send(Message::Text(serde_json::to_string(&event).unwrap().into()))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn idle_event_receiver_does_not_block_concurrent_requests_or_reorder_replies() {
+    let (client, mut socket) = connected_control_pair().await;
+    let mut next = std::pin::pin!(client.next());
+    assert!(futures_util::poll!(&mut next).is_pending());
+    let first = client.request::<String>(Command::Acknowledge {
+        request_id: "first".into(),
+    });
+    let second = client.request::<String>(Command::Acknowledge {
+        request_id: "second".into(),
+    });
+    let server = async {
+        let first = receive_control_request(&mut socket).await;
+        let second = receive_control_request(&mut socket).await;
+        send_control_event(
+            &mut socket,
+            Event::Directive {
+                request_id: "directive".into(),
+                directive: BrokerDirective::UsePassThrough,
+            },
+        )
+        .await;
+        // Reply in the reverse order and interleave an event with those replies.
+        for request in [second, first] {
+            let Command::Acknowledge { request_id: label } = request.command else {
+                panic!("expected acknowledgment");
+            };
+            send_control_event(
+                &mut socket,
+                Event::Reply {
+                    request_id: request.request_id,
+                    status: 200,
+                    payload: Value::String(label),
+                },
+            )
+            .await;
+        }
+    };
+    let (first, second, event, ()) = tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::join!(first, second, next, server)
+    })
+    .await
+    .expect("idle event reception must not block command dispatch");
+    assert_eq!(first.unwrap(), "first");
+    assert_eq!(second.unwrap(), "second");
+    assert!(
+        matches!(event.unwrap(), Event::Directive { request_id, .. } if request_id == "directive")
+    );
+}
+
+#[tokio::test]
+async fn idle_event_receiver_does_not_delay_request_timeout_or_consume_late_replies() {
+    let (client, mut socket) = connected_control_pair().await;
+    let mut next = std::pin::pin!(client.next());
+    assert!(futures_util::poll!(&mut next).is_pending());
+    let mut request = std::pin::pin!(client.acknowledge("unanswered".into()));
+    assert!(futures_util::poll!(&mut request).is_pending());
+    let expired = receive_control_request(&mut socket).await;
+    tokio::time::pause();
+    tokio::time::advance(ATTEMPT_TIMEOUT).await;
+    let error = request.await.unwrap_err();
+    assert!(matches!(error, CliError::Launch(message) if message == "control operation timed out"));
+    assert!(futures_util::poll!(&mut next).is_pending());
+    tokio::time::resume();
+    let server = async {
+        let current = receive_control_request(&mut socket).await;
+        for (request_id, payload) in [
+            (expired.request_id, Value::String("late".into())),
+            (current.request_id, Value::Null),
+        ] {
+            send_control_event(
+                &mut socket,
+                Event::Reply {
+                    request_id,
+                    status: 200,
+                    payload,
+                },
+            )
+            .await;
+        }
+    };
+    let (result, ()) = tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::join!(client.acknowledge("current".into()), server)
+    })
+    .await
+    .unwrap();
+    result.unwrap();
+    assert!(futures_util::poll!(&mut next).is_pending());
+}
+
+#[tokio::test]
+async fn replacement_releases_old_waiters_without_consuming_new_connection_events() {
+    let (client, mut socket) = connected_control_pair().await;
+    let mut next = std::pin::pin!(client.next());
+    assert!(futures_util::poll!(&mut next).is_pending());
+    let mut request = std::pin::pin!(client.acknowledge("old".into()));
+    assert!(futures_util::poll!(&mut request).is_pending());
+    receive_control_request(&mut socket).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let server = async {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+        send_control_event(
+            &mut socket,
+            Event::Directive {
+                request_id: "replacement".into(),
+                directive: BrokerDirective::UsePassThrough,
+            },
+        )
+        .await;
+        socket
+    };
+    let (connected, _replacement_socket) = tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::join!(client.connect(&origin, ComponentRole::Mcp), server)
+    })
+    .await
+    .expect("replacement must not wait for the old event receiver");
+    connected.unwrap();
+    let (old_request, old_event) = tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::join!(request, next)
+    })
+    .await
+    .unwrap();
+    assert!(old_request.is_err());
+    assert!(old_event.is_err());
+    let event = tokio::time::timeout(Duration::from_secs(2), client.next())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(event, Event::Directive { request_id, .. } if request_id == "replacement"));
+}
+
+#[tokio::test]
+async fn pending_events_are_available_before_the_registration_reply_is_observed() {
+    let (client, mut socket) = connected_control_pair().await;
+    let server = async {
+        let request = receive_control_request(&mut socket).await;
+        send_control_event(
+            &mut socket,
+            Event::Directive {
+                request_id: "pending".into(),
+                directive: BrokerDirective::UsePassThrough,
+            },
+        )
+        .await;
+        send_control_event(
+            &mut socket,
+            Event::Reply {
+                request_id: request.request_id,
+                status: 200,
+                payload: Value::Null,
+            },
+        )
+        .await;
+    };
+    let (result, ()) = tokio::join!(client.acknowledge("registration".into()), server);
+    result.unwrap();
+    assert!(
+        matches!(client.pending_event().await, Some(Event::Directive { request_id, .. }) if request_id == "pending")
+    );
+    assert!(client.pending_event().await.is_none());
+}
+
+#[tokio::test]
+async fn cancelled_requests_do_not_exhaust_reply_capacity() {
+    let (client, mut socket) = connected_control_pair().await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        for _ in 0..=QUEUE_CAPACITY {
+            let mut request = std::pin::pin!(client.acknowledge("cancelled".into()));
+            assert!(futures_util::poll!(&mut request).is_pending());
+            receive_control_request(&mut socket).await;
+            // Drop the caller without a response; the next request must reclaim its slot.
+        }
+        let server = async {
+            let request = receive_control_request(&mut socket).await;
+            send_control_event(
+                &mut socket,
+                Event::Reply {
+                    request_id: request.request_id,
+                    status: 200,
+                    payload: Value::Null,
+                },
+            )
+            .await;
+        };
+        let (result, ()) = tokio::join!(client.acknowledge("active".into()), server);
+        result.unwrap();
+    })
+    .await
+    .expect("cancelled requests must not fill the pending reply map");
+}
+
+#[tokio::test]
+async fn event_overflow_closes_the_connection_and_fails_pending_requests() {
+    let (client, mut socket) = connected_control_pair().await;
+    let mut request = std::pin::pin!(client.acknowledge("unanswered".into()));
+    assert!(futures_util::poll!(&mut request).is_pending());
+    receive_control_request(&mut socket).await;
+    for _ in 0..=QUEUE_CAPACITY {
+        send_control_event(
+            &mut socket,
+            Event::Directive {
+                request_id: "overflow".into(),
+                directive: BrokerDirective::UsePassThrough,
+            },
+        )
+        .await;
+    }
+    let error = tokio::time::timeout(Duration::from_secs(2), request)
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert!(matches!(error, CliError::Launch(message) if message == "control connection lost"));
+    for _ in 0..QUEUE_CAPACITY {
+        assert!(client.pending_event().await.is_some());
+    }
+    assert!(client.pending_event().await.is_none());
+    assert!(client.next().await.is_err());
+}
+
+#[tokio::test]
+async fn outstanding_reply_limit_disconnects_and_releases_every_waiter() {
+    let (client, mut socket) = connected_control_pair().await;
+    let mut requests = Vec::new();
+    for _ in 0..QUEUE_CAPACITY {
+        let mut request = Box::pin(client.acknowledge("unanswered".into()));
+        assert!(futures_util::poll!(&mut request).is_pending());
+        receive_control_request(&mut socket).await;
+        requests.push(request);
+    }
+    let error = tokio::time::timeout(
+        Duration::from_secs(2),
+        client.acknowledge("overflow".into()),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert!(matches!(error, CliError::Launch(message) if message == "control connection lost"));
+    for request in requests {
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), request)
+                .await
+                .unwrap()
+                .is_err()
+        );
+    }
+    assert!(client.next().await.is_err());
+}
