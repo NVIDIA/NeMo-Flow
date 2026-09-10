@@ -1077,17 +1077,26 @@ fn test_opentelemetry_endpoint() -> OpenTelemetryEndpointConfig {
 }
 
 #[test]
-fn gen_ai_plugin_endpoint_rejects_remote_plaintext() {
+fn all_trace_plugin_endpoints_reject_remote_plaintext() {
     for (endpoint, allowed) in [
         ("http://collector.example:4318", false),
         ("https://collector.example:4318", true),
         ("http://127.0.0.1:4318", true),
         ("http://[::1]:4318", true),
     ] {
-        let mut section = test_opentelemetry_endpoint();
-        section.otel_type = OpenTelemetryType::GenAi;
-        section.endpoint = endpoint.to_string();
-        assert_eq!(build_otel_config(0, section).is_ok(), allowed, "{endpoint}");
+        for otel_type in [
+            OpenTelemetryType::Full,
+            OpenTelemetryType::GenAi,
+            OpenTelemetryType::OpenInference,
+        ] {
+            for transport in ["http_binary", "grpc"] {
+                let mut section = test_opentelemetry_endpoint();
+                section.otel_type = otel_type;
+                section.transport = transport.to_string();
+                section.endpoint = endpoint.to_string();
+                assert_eq!(build_otel_config(0, section).is_ok(), allowed, "{endpoint}");
+            }
+        }
     }
 }
 
@@ -1332,17 +1341,17 @@ fn invalid_batch_config_identifies_the_endpoint_during_activation() {
             "endpoints": [
                 {
                     "type": "full",
-                    "endpoint": "http://jaeger-local:4318/v1/traces",
+                    "endpoint": "https://jaeger-local:4318/v1/traces",
                     "max_queue_size": 256
                 },
                 {
                     "type": "full",
-                    "endpoint": "http://tempo-prod:4319/v1/traces",
+                    "endpoint": "https://tempo-prod:4319/v1/traces",
                     "max_queue_size": 0
                 },
                 {
                     "type": "full",
-                    "endpoint": "http://compliance:4320/v1/traces",
+                    "endpoint": "https://compliance:4320/v1/traces",
                     "max_queue_size": 128
                 }
             ]
@@ -1380,7 +1389,7 @@ fn all_invalid_trace_batch_configs_still_block_activation() {
             "enabled": true,
             "endpoints": [{
                 "type": "full",
-                "endpoint": "http://jaeger-local:4318/v1/traces",
+                "endpoint": "https://jaeger-local:4318/v1/traces",
                 "max_queue_size": 0
             }]
         }

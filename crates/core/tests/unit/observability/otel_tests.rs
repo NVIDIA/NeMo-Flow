@@ -2521,7 +2521,7 @@ fn gen_ai_projection_emits_only_span_specific_attributes() {
 }
 
 #[test]
-fn gen_ai_endpoints_require_protected_remote_transport() {
+fn all_trace_projections_require_protected_remote_transport() {
     for endpoint in [
         "https://collector.example/v1/traces",
         "http://localhost:4318/v1/traces",
@@ -2529,10 +2529,7 @@ fn gen_ai_endpoints_require_protected_remote_transport() {
         "http://127.0.0.2:4318/v1/traces",
         "http://[::1]:4318/v1/traces",
     ] {
-        assert!(
-            validate_gen_ai_endpoint(OpenTelemetryType::GenAi, endpoint).is_ok(),
-            "{endpoint}"
-        );
+        assert!(validate_trace_endpoint(endpoint).is_ok(), "{endpoint}");
     }
     for endpoint in [
         "http://collector.example/v1/traces",
@@ -2544,17 +2541,21 @@ fn gen_ai_endpoints_require_protected_remote_transport() {
         "not a URL",
     ] {
         for transport in [OtlpTransport::HttpBinary, OtlpTransport::Grpc] {
-            let result = OpenTelemetrySubscriber::new(
-                OpenTelemetryConfig::new(OpenTelemetryType::GenAi, endpoint)
-                    .with_transport(transport),
-            );
-            assert!(
-                result.err().unwrap().to_string().contains("require HTTPS"),
-                "{endpoint}"
-            );
+            for otel_type in [
+                OpenTelemetryType::Full,
+                OpenTelemetryType::GenAi,
+                OpenTelemetryType::OpenInference,
+            ] {
+                let result = OpenTelemetrySubscriber::new(
+                    OpenTelemetryConfig::new(otel_type, endpoint).with_transport(transport),
+                );
+                assert!(
+                    result.err().unwrap().to_string().contains("require HTTPS"),
+                    "{endpoint}"
+                );
+            }
         }
     }
-    assert!(validate_gen_ai_endpoint(OpenTelemetryType::Full, "http://collector.example").is_ok());
 }
 
 #[test]
