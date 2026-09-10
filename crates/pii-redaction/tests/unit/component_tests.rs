@@ -946,7 +946,7 @@ async fn trajectory_managed_llm_events_fail_closed_for_runtime_and_opaque_codecs
         ),
         ("opaque", LlmCodecIdentity::Opaque),
     ] {
-        initialize_plugins(plugin_config(json!({
+        test_initialize_plugin_host_exact(plugin_config(json!({
             "codec": "openai_responses",
             "mode": "builtin",
             "builtin": {"preset": "trajectory_context"}
@@ -1004,7 +1004,7 @@ async fn trajectory_managed_llm_events_fail_closed_for_runtime_and_opaque_codecs
         assert!(!serde_json::to_string(&captured).unwrap().contains("SECRET"));
 
         deregister_subscriber(&subscriber_name).unwrap();
-        clear_plugin_configuration().unwrap();
+        test_close_plugin_host().unwrap();
     }
 }
 
@@ -1014,7 +1014,7 @@ async fn trajectory_managed_llm_events_trust_the_active_builtin_codec_over_raw_s
     reset_runtime();
     setup_isolated_thread();
 
-    initialize_plugins(plugin_config(json!({
+    test_initialize_plugin_host_exact(plugin_config(json!({
         "codec": "openai_responses",
         "mode": "builtin",
         "builtin": {"preset": "trajectory_context"}
@@ -1074,7 +1074,7 @@ async fn trajectory_managed_llm_events_trust_the_active_builtin_codec_over_raw_s
     assert!(!serde_json::to_string(&captured).unwrap().contains("SECRET"));
 
     deregister_subscriber("pii-trajectory-active-codec-surface").unwrap();
-    clear_plugin_configuration().unwrap();
+    test_close_plugin_host().unwrap();
 }
 
 #[tokio::test]
@@ -2643,7 +2643,7 @@ fn trajectory_component_preserves_normalized_cost_source_and_optimization_summar
     reset_runtime();
     setup_isolated_thread();
 
-    futures::executor::block_on(initialize_plugins(plugin_config(json!({
+    futures::executor::block_on(test_initialize_plugin_host_exact(plugin_config(json!({
         "codec": "openai_chat",
         "mode": "builtin",
         "builtin": {"preset": "trajectory_context"}
@@ -2739,7 +2739,7 @@ fn trajectory_component_preserves_normalized_cost_source_and_optimization_summar
     assert_eq!(summary.estimated_cost_saved, Some(0.25));
 
     assert!(deregister_subscriber("trajectory-normalized-accounting").unwrap());
-    clear_plugin_configuration().unwrap();
+    test_close_plugin_host().unwrap();
 }
 
 #[tokio::test]
