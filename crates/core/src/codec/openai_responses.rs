@@ -396,7 +396,7 @@ fn decode_responses_content_part(value: &Json) -> Result<ContentPart> {
     }
 }
 
-fn decode_responses_input_item(value: &Json) -> Result<Message> {
+fn decode_responses_input_item(value: &Json, codex_dialect: bool) -> Result<Message> {
     let obj = value.as_object().ok_or_else(|| {
         FlowError::InvalidArgument("OpenAI Responses input item must be an object".into())
     })?;
@@ -483,6 +483,27 @@ fn decode_responses_input_item(value: &Json) -> Result<Message> {
             })
         }
         "function_call_output" => {
+            // Codex persists namespaced app-tool results in conversation history without the
+            // public Responses API's call_id. Keep that Codex-only extension opaque so Relay can
+            // forward it losslessly without treating it as a portable, correlated tool result.
+            if codex_dialect
+                && matches!(obj.get("call_id"), None | Some(Json::Null))
+                && obj
+                    .get("name")
+                    .and_then(Json::as_str)
+                    .is_some_and(|name| !name.is_empty())
+                && obj
+                    .get("namespace")
+                    .and_then(Json::as_str)
+                    .is_some_and(|namespace| !namespace.is_empty())
+                && obj.contains_key("output")
+            {
+                return Ok(Message::ProviderNative {
+                    provider: "openai_responses".into(),
+                    kind: kind.into(),
+                    value: value.clone(),
+                });
+            }
             let call_id = obj.get("call_id").and_then(Json::as_str).ok_or_else(|| {
                 FlowError::InvalidArgument(
                     "OpenAI Responses function_call_output is missing call_id".into(),
@@ -1292,6 +1313,12 @@ impl LlmCodec for OpenAIResponsesCodec {
         let input = obj.get("input").ok_or_else(|| {
             FlowError::InvalidArgument("OpenAI Responses request is missing input".into())
         })?;
+        let codex_dialect = obj
+            .get("client_metadata")
+            .and_then(Json::as_object)
+            .and_then(|metadata| metadata.get("x-codex-installation-id"))
+            .and_then(Json::as_str)
+            .is_some_and(|installation_id| !installation_id.is_empty());
         let messages = if let Some(input) = input.as_str() {
             vec![Message::User {
                 content: MessageContent::Text(input.to_string()),
@@ -1306,7 +1333,7 @@ impl LlmCodec for OpenAIResponsesCodec {
                     )
                 })?
                 .iter()
-                .map(decode_responses_input_item)
+                .map(|item| decode_responses_input_item(item, codex_dialect))
                 .collect::<Result<Vec<_>>>()?
         };
         let instructions = match obj.get("instructions") {
