@@ -4061,6 +4061,142 @@ anthropic_base_url = "http://127.0.0.1:1"
 }
 
 #[test]
+fn claude_hook_downgrade_cli_is_visible_structured_and_redacted() {
+    let temp = tempfile::tempdir().unwrap();
+    let (logging_config, log_path) = write_jsonl_logging_config(temp.path());
+    let config = temp.path().join("config.toml");
+    std::fs::write(
+        &config,
+        r#"
+[upstream]
+openai_base_url = "http://127.0.0.1:1"
+anthropic_base_url = "http://127.0.0.1:1"
+
+[agents.claude]
+command = "mise --bare exec -- claude"
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(gateway_bin())
+        .current_dir(temp.path())
+        .env("XDG_CONFIG_HOME", temp.path().join("xdg"))
+        .env("HOME", temp.path())
+        .env_remove("CLAUDE_CODE_SAFE_MODE")
+        .env_remove("CLAUDE_CODE_SIMPLE")
+        .args(["--log-config-path"])
+        .arg(&logging_config)
+        .args([
+            "--config",
+            config.to_str().unwrap(),
+            "run",
+            "--agent",
+            "claude",
+            "--dry-run",
+            "--",
+            "--safe-mode",
+            "-p",
+            "private prompt sentinel",
+        ])
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Claude hooks at risk (Claude safe mode)"));
+    assert!(
+        stderr.contains("claude_relay_hook_integrity_at_risk"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("private prompt sentinel"));
+
+    let diagnostic = read_jsonl_event(&log_path, "agent_invocation_warning");
+    assert_eq!(
+        diagnostic["fields"]["diagnostic_code"],
+        "claude_relay_hook_integrity_at_risk"
+    );
+    assert_eq!(diagnostic["fields"]["safe_mode_signal"], "true");
+    assert_eq!(diagnostic["fields"]["bare_mode_signal"], "false");
+    assert_eq!(diagnostic["fields"]["model_routing"], "configured");
+    assert_eq!(diagnostic["fields"]["hook_integrity"], "at_risk");
+    assert_eq!(diagnostic["fields"]["command_modified"], "false");
+    assert_eq!(
+        diagnostic["fields"]["action"],
+        "remove_hook_disabling_claude_mode_if_hook_integrity_is_required"
+    );
+    assert_eq!(diagnostic["fields"]["arguments_redacted"], "true");
+    assert!(!diagnostic.to_string().contains("private prompt sentinel"));
+}
+
+#[cfg(unix)]
+#[test]
+fn claude_bare_hook_warning_is_visible_in_a_default_non_tty_live_run() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let xdg = temp.path().join("xdg");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&xdg).unwrap();
+    let agent = temp.path().join("fake-claude");
+    std::fs::write(
+        &agent,
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo '2.1.267 (Claude Code)'\nfi\nexit 0\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let config = temp.path().join("config.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "[agents.claude]\ncommand = {}\n",
+            toml_basic_string(agent.to_string_lossy().as_ref())
+        ),
+    )
+    .unwrap();
+
+    let output = Command::new(gateway_bin())
+        .current_dir(temp.path())
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", &xdg)
+        .env_remove("CLAUDE_CODE_SAFE_MODE")
+        .env_remove("CLAUDE_CODE_SIMPLE")
+        .env_remove("NEMO_RELAY_LOG")
+        .env_remove("NEMO_RELAY_LOG_STDERR")
+        .env_remove("NEMO_RELAY_LOG_STDERR_FORMAT")
+        .env_remove("NEMO_RELAY_LOG_CONFIG_PATH")
+        .env("ANTHROPIC_API_KEY", "private-live-key-sentinel")
+        .args(["--config"])
+        .arg(&config)
+        .args([
+            "run",
+            "--agent",
+            "claude",
+            "--",
+            "--bare",
+            "-p",
+            "private-live-prompt-sentinel",
+        ])
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(output.stdout.is_empty());
+    assert!(
+        stderr.contains("Claude hooks at risk (Claude bare mode)"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("private-live-prompt-sentinel"), "{stderr}");
+    assert!(!stderr.contains("private-live-key-sentinel"), "{stderr}");
+    assert!(
+        !stderr.contains(temp.path().to_string_lossy().as_ref()),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn invocation_diagnostic_does_not_preflight_live_launches() {
     let temp = tempfile::tempdir().unwrap();
     let config = temp.path().join("config.toml");
