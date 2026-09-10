@@ -4512,6 +4512,7 @@ unsafe extern "C" fn native_plugin_context_register_tool_execution_intercept_v5(
     free_fn: NemoRelayNativeFreeFn,
 ) -> NemoRelayStatus {
     clear_native_last_error();
+    let user_data_guard = NativeCallbackUserDataGuard::new(user_data, free_fn);
     let host_context = match host_ctx_mut(ctx) {
         Ok(context) => context,
         Err(status) => return status,
@@ -4527,6 +4528,7 @@ unsafe extern "C" fn native_plugin_context_register_tool_execution_intercept_v5(
         Ok(name) => name,
         Err(status) => return status,
     };
+    let (user_data, free_fn) = user_data_guard.transfer();
     match registration_context.register_tool_execution_intercept(
         &name,
         priority,

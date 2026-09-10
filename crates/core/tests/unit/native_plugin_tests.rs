@@ -4575,6 +4575,16 @@ unsafe extern "C" fn noop_tool_execution(
     NemoRelayStatus::Ok
 }
 
+unsafe extern "C" fn noop_tool_execution_context(
+    _user_data: *mut c_void,
+    _context_json: *const NemoRelayNativeString,
+    _next_fn: NemoRelayNativeToolNextFn,
+    _next_ctx: *mut c_void,
+    _out_outcome_json: *mut *mut NemoRelayNativeString,
+) -> NemoRelayStatus {
+    NemoRelayStatus::Ok
+}
+
 unsafe extern "C" fn noop_llm_request(
     _user_data: *mut c_void,
     _request_json: *const NemoRelayNativeString,
@@ -4810,7 +4820,7 @@ fn native_registration_entrypoints_reject_invalid_host_contexts_and_names() {
     assert_registration_entrypoints_reject_invalid_names(ctx);
     assert_registration_entrypoints_accept_valid_names(ctx);
     assert_async_registration_entrypoints_validate_contracts(ctx);
-    assert_async_request_registration_rejects_legacy_relay_contract();
+    assert_context_registrations_reject_legacy_relay_contracts();
 }
 
 #[cfg(unix)]
@@ -5211,7 +5221,7 @@ fn assert_async_registration_entrypoints_validate_contracts(
 }
 
 #[cfg(unix)]
-fn assert_async_request_registration_rejects_legacy_relay_contract() {
+fn assert_context_registrations_reject_legacy_relay_contracts() {
     let instance = Arc::new(NativePluginInstance {
         plugin_kind: "test.native.legacy".into(),
         relay_compat: "^0.5".into(),
@@ -5241,6 +5251,35 @@ fn assert_async_request_registration_rejects_legacy_relay_contract() {
         NemoRelayStatus::InvalidArg
     );
     assert_last_error_contains("excludes Relay 0.5");
+
+    let context_instance = Arc::new(NativePluginInstance {
+        plugin_kind: "test.native.context-legacy".into(),
+        relay_compat: "^0.8".into(),
+        allows_multiple_components: false,
+        plugin: Mutex::new(NemoRelayNativePluginV1::default()),
+        _library: libloading::os::unix::Library::this().into(),
+    });
+    let mut context_registration = PluginRegistrationContext::new();
+    let mut context_host = NativeHostPluginContext {
+        ctx: ptr::from_mut(&mut context_registration),
+        instance: context_instance,
+    };
+    let frees = AtomicUsize::new(0);
+    assert_eq!(
+        unsafe {
+            native_plugin_context_register_tool_execution_intercept_v5(
+                ptr::from_mut(&mut context_host).cast(),
+                name,
+                0,
+                noop_tool_execution_context,
+                (&frees as *const AtomicUsize).cast_mut().cast(),
+                Some(count_user_data_free),
+            )
+        },
+        NemoRelayStatus::InvalidArg
+    );
+    assert_eq!(frees.load(Ordering::SeqCst), 1);
+    assert_last_error_contains("excludes Relay 0.8");
     unsafe { native_string_free(name) };
 }
 
