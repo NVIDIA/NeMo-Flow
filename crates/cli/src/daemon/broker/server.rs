@@ -13,13 +13,12 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use axum::body::Body;
-use axum::extract::{ConnectInfo, DefaultBodyLimit, State};
+use axum::extract::{ConnectInfo, State};
 use axum::http::header::{AUTHORIZATION, CONTENT_TYPE, RETRY_AFTER};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode, Uri};
 use axum::middleware::{Next, from_fn_with_state};
 use axum::response::IntoResponse;
-use axum::routing::post;
-use axum::serve::ListenerExt;
+use axum::routing::get;
 use axum::{Json, Router};
 use base64::Engine;
 use bytes::Bytes;
@@ -42,15 +41,11 @@ use crate::configuration::GatewayConfig;
 use crate::daemon::ServerOptions;
 use crate::daemon::common::address::{daemon_url, validate_bind_ip};
 use crate::daemon::common::control::{
-    ACTIVATION_LIFETIME_MS, ActivationFailedPayload, CHALLENGE_LIFETIME_MS, CHALLENGE_PATH,
-    CLIENT_TOKEN_HEADER, ChallengeRequest, ChallengeResponse, DRAIN_LIFETIME_MS, EmptyPayload,
-    MAX_CONTROL_BODY_BYTES, MCP_ACTIVATION_FAILED_PATH, MCP_HEARTBEAT_INTERVAL_MS,
-    MCP_HEARTBEAT_PATH, MCP_LEASE_MS, MCP_REGISTER_PATH, MCP_RELEASE_PATH, McpHeartbeatResponse,
+    ACTIVATION_LIFETIME_MS, ActivationFailedPayload, CHALLENGE_LIFETIME_MS, CLIENT_TOKEN_HEADER,
+    ChallengeRequest, ChallengeResponse, DRAIN_LIFETIME_MS, EmptyPayload, MAX_CONTROL_BODY_BYTES,
     McpRegisterRequest, McpRegisterResponse, RECOVERY_LIFETIME_MS, SessionRequest,
-    WORKER_DRAIN_PATH, WORKER_HEARTBEAT_INTERVAL_MS, WORKER_HEARTBEAT_PATH, WORKER_LEASE_MS,
-    WORKER_PROBE_PATH, WORKER_READY_PATH, WORKER_RECOVER_PATH, WORKER_REGISTER_PATH,
-    WORKER_ROUTE_FAILURE_HEADER, WORKER_TOKEN_HEADER, WorkerDrainRequest, WorkerGenerationGrant,
-    WorkerHeartbeatPayload, WorkerNetworkHint, WorkerReadyPayload, WorkerRecoverRequest,
+    WORKER_PROBE_PATH, WORKER_ROUTE_FAILURE_HEADER, WORKER_TOKEN_HEADER, WorkerDrainRequest,
+    WorkerGenerationGrant, WorkerNetworkHint, WorkerReadyPayload, WorkerRecoverRequest,
     WorkerRegisterRequest, WorkerRegisterResponse, now_unix_ms, random_secret,
 };
 use crate::daemon::common::identity::{
@@ -107,16 +102,8 @@ struct McpControlSession {
     lease_expires_at_unix_ms: u64,
     last_sequence: u64,
     last_request_id: String,
-    last_heartbeat: Option<CachedHeartbeat>,
     worker_network: WorkerNetworkHint,
     released: bool,
-}
-
-#[derive(Clone)]
-struct CachedHeartbeat {
-    sequence: u64,
-    request_id: String,
-    response: McpHeartbeatResponse,
 }
 
 struct WorkerControlSession {
@@ -126,7 +113,6 @@ struct WorkerControlSession {
     secret_digest: TokenDigest,
     last_sequence: u64,
     last_request_id: String,
-    next_daemon_sequence: u64,
     lease_expires_at_unix_ms: u64,
     pending_target: Arc<WorkerTarget>,
     publication: WorkerPublication,
@@ -140,7 +126,10 @@ enum WorkerPublication {
     Recovery { permit: RecoveryPermit },
 }
 
+mod socket;
+
 struct DaemonState {
+    sockets: socket::Hub,
     registry: Registry,
     identity: MachineIdentity,
     descriptor: crate::daemon::common::protocol::ComponentDescriptor,
@@ -152,7 +141,6 @@ struct DaemonState {
     challenges: Mutex<HashMap<ChallengeId, PendingChallenge>>,
     activations: Mutex<HashMap<String, Activation>>,
     mcp_sessions: Mutex<HashMap<String, McpControlSession>>,
-    mcp_heartbeat_serialization: Mutex<()>,
     worker_sessions: Mutex<HashMap<String, WorkerControlSession>>,
     pending_directives: Mutex<HashMap<String, BrokerDirective>>,
     active_worker_generations: ActiveWorkerGenerations,
@@ -168,7 +156,10 @@ pub(crate) async fn serve(options: ServerOptions) -> Result<(), CliError> {
     let local = listener.local_addr()?;
     let public_origin = daemon_origin(&options, local)?;
     let resolved = crate::configuration::resolve_server_config(&options.gateway)?;
+    let active_worker_generations = ActiveWorkerGenerations::load()?;
+    let sockets = socket::Hub::restarting(active_worker_generations.snapshot()?);
     let state = Arc::new(DaemonState {
+        sockets,
         registry: Registry::new(options.pass_through),
         identity: load_or_create_daemon_identity()?,
         descriptor: crate::daemon::common::control::descriptor(ComponentRole::Daemon),
@@ -180,12 +171,12 @@ pub(crate) async fn serve(options: ServerOptions) -> Result<(), CliError> {
         challenges: Mutex::new(HashMap::new()),
         activations: Mutex::new(HashMap::new()),
         mcp_sessions: Mutex::new(HashMap::new()),
-        mcp_heartbeat_serialization: Mutex::new(()),
         worker_sessions: Mutex::new(HashMap::new()),
         pending_directives: Mutex::new(HashMap::new()),
-        active_worker_generations: ActiveWorkerGenerations::load()?,
+        active_worker_generations,
         worker_generation_publication: Mutex::new(()),
     });
+    socket::recover_after_restart(Arc::clone(&state));
     spawn_maintenance(Arc::clone(&state));
     let app = router(Arc::clone(&state));
     let address = local.to_string();
@@ -203,10 +194,9 @@ pub(crate) async fn serve(options: ServerOptions) -> Result<(), CliError> {
             serve_tls(listener, app, tls).await
         }
         (None, None) => axum::serve(
-            listener.tap_io(|stream| {
-                let _ = stream.set_nodelay(true);
-            }),
-            app.into_make_service_with_connect_info::<SocketAddr>(),
+            listener,
+            app.layer(axum::middleware::from_fn(socket::connection_info))
+                .into_make_service_with_connect_info::<socket::SocketInfo>(),
         )
         .with_graceful_shutdown(shutdown_signal())
         .await
@@ -221,18 +211,14 @@ fn router(state: Arc<DaemonState>) -> Router {
     let peers: ChallengePeers = Arc::new(Mutex::new(HashMap::new()));
     let control = Router::new()
         .route(
-            CHALLENGE_PATH,
-            post(issue_challenge).route_layer(from_fn_with_state(peers, limit_challenges)),
+            crate::daemon::common::socket::MCP_SOCKET_PATH,
+            get(socket::mcp),
         )
-        .route(MCP_REGISTER_PATH, post(register_mcp))
-        .route(MCP_HEARTBEAT_PATH, post(heartbeat_mcp))
-        .route(MCP_RELEASE_PATH, post(release_mcp))
-        .route(MCP_ACTIVATION_FAILED_PATH, post(activation_failed))
-        .route(WORKER_REGISTER_PATH, post(register_worker))
-        .route(WORKER_RECOVER_PATH, post(recover_worker))
-        .route(WORKER_READY_PATH, post(ready_worker))
-        .route(WORKER_HEARTBEAT_PATH, post(heartbeat_worker))
-        .layer(DefaultBodyLimit::max(MAX_CONTROL_BODY_BYTES));
+        .route(
+            crate::daemon::common::socket::WORKER_SOCKET_PATH,
+            get(socket::worker),
+        )
+        .route_layer(from_fn_with_state(peers, limit_challenges));
     Router::new()
         .merge(control)
         .fallback(public_proxy)
@@ -286,6 +272,17 @@ async fn issue_challenge(
 ) -> Response<Body> {
     if let Err(error) = request.initiator.validate() {
         return control_error(StatusCode::UNAUTHORIZED, error);
+    }
+    if request
+        .initiator
+        .protocol
+        .negotiate(state.descriptor.protocol)
+        .is_err()
+    {
+        return control_message(
+            StatusCode::UPGRADE_REQUIRED,
+            "daemon control protocol v2 is required; upgrade all peers together",
+        );
     }
     if !has_required_transport_capabilities(&request.initiator) {
         return control_message(
@@ -413,17 +410,20 @@ async fn register_mcp(
     };
     let now = now_unix_ms();
     expire_activation_routes(&state, now);
-    let launch = match fresh_launch(request.worker_network.hint.clone()) {
+    let mut launch = match fresh_launch(request.worker_network.hint.clone()) {
         Ok(launch) => launch,
         Err(error) => return control_error(StatusCode::INTERNAL_SERVER_ERROR, error),
     };
+    state
+        .sockets
+        .defer_launch(transcript.initiator_fingerprint, &mut launch);
     let fresh_session_token = match random_secret(32).and_then(|secret| {
         SensitiveString::new(secret).map_err(|error| CliError::Launch(error.to_string()))
     }) {
         Ok(token) => token,
         Err(error) => return control_error(StatusCode::INTERNAL_SERVER_ERROR, error),
     };
-    let lease_expires_at_unix_ms = now.saturating_add(MCP_LEASE_MS);
+    let lease_expires_at_unix_ms = u64::MAX;
     let mut sessions = lock(&state.mcp_sessions);
     sessions.retain(|_, session| session.lease_expires_at_unix_ms > now);
     if !sessions.contains_key(session_id.as_str()) && sessions.len() >= MAX_MCP_CONTROL_SESSIONS {
@@ -471,7 +471,6 @@ async fn register_mcp(
                 lease_expires_at_unix_ms,
                 last_sequence: 0,
                 last_request_id: String::new(),
-                last_heartbeat: None,
                 worker_network: request.worker_network.hint,
                 released: false,
             },
@@ -485,8 +484,9 @@ async fn register_mcp(
     Json(McpRegisterResponse {
         daemon_proof,
         session_token,
-        heartbeat_interval_ms: MCP_HEARTBEAT_INTERVAL_MS,
-        directive,
+        directive: state
+            .sockets
+            .directive(transcript.initiator_fingerprint, directive),
     })
     .into_response()
 }
@@ -515,67 +515,6 @@ fn select_mcp_session_token(
         ));
     }
     Ok(reusable.map_or((fresh, false), |session| (session.secret.clone(), true)))
-}
-
-async fn heartbeat_mcp(
-    State(state): State<Arc<DaemonState>>,
-    Json(request): Json<SessionRequest<EmptyPayload>>,
-) -> Response<Body> {
-    // The critical section contains no I/O. Serializing it closes the small window in which a
-    // concurrent lost-response retry could observe the accepted sequence before its response was
-    // cached, while leaving the request data plane entirely lock-free.
-    let _heartbeat_serialization = lock(&state.mcp_heartbeat_serialization);
-    let lease_expires_at_unix_ms = now_unix_ms().saturating_add(MCP_LEASE_MS);
-    let authenticated = match authenticate_mcp(&state, &request, Some(lease_expires_at_unix_ms)) {
-        Ok(authenticated) => authenticated,
-        Err(response) => return response,
-    };
-    if authenticated.released {
-        return control_message(StatusCode::UNAUTHORIZED, "MCP session was already released");
-    }
-    if authenticated.duplicate {
-        return authenticated.cached_heartbeat.map_or_else(
-            || {
-                control_message(
-                    StatusCode::CONFLICT,
-                    "duplicate request does not match the cached heartbeat response",
-                )
-            },
-            |response| Json(response).into_response(),
-        );
-    }
-    if let Err(error) = state.registry.renew_mcp(
-        authenticated.fingerprint,
-        &authenticated.session_id,
-        lease_expires_at_unix_ms,
-    ) {
-        lock(&state.mcp_sessions).remove(authenticated.session_id.as_str());
-        lock(&state.pending_directives).remove(authenticated.session_id.as_str());
-        return registry_error(error);
-    }
-    let directive = lock(&state.pending_directives)
-        .remove(authenticated.session_id.as_str())
-        .map_or_else(
-            || {
-                state
-                    .registry
-                    .current_directive(authenticated.fingerprint, &authenticated.session_id)
-                    .map(Some)
-            },
-            |directive| Ok(Some(directive)),
-        );
-    let response = match directive {
-        Ok(directive) => McpHeartbeatResponse { directive },
-        Err(error) => return registry_error(error),
-    };
-    if let Some(session) = lock(&state.mcp_sessions).get_mut(authenticated.session_id.as_str()) {
-        session.last_heartbeat = Some(CachedHeartbeat {
-            sequence: request.sequence,
-            request_id: request.request_id,
-            response: response.clone(),
-        });
-    }
-    Json(response).into_response()
 }
 
 async fn release_mcp(
@@ -771,6 +710,21 @@ async fn recover_worker(
             "invalid worker recovery generation",
         );
     }
+    if state.sockets.draining(&request.worker_id) {
+        return replay_worker_registration(
+            &state,
+            fingerprint,
+            &request.worker_id,
+            &request.endpoint,
+            request.tls_root_certificate.as_deref(),
+            None,
+            Some(&request.generation_grant.generation_id),
+            daemon_proof,
+        )
+        .unwrap_or_else(|| {
+            control_message(StatusCode::UNAUTHORIZED, "draining worker session expired")
+        });
+    }
     tokio::task::spawn_blocking(move || {
         recover_worker_after_validation(state, request, daemon_proof, fingerprint)
     })
@@ -888,7 +842,6 @@ fn replay_worker_registration(
             daemon_proof,
             session_token: session.secret.clone(),
             data_token,
-            heartbeat_interval_ms: WORKER_HEARTBEAT_INTERVAL_MS,
             generation_grant: session.generation_grant.clone(),
         })
         .into_response(),
@@ -975,8 +928,7 @@ fn stage_worker(
             secret: control_secret.clone(),
             last_sequence: 0,
             last_request_id: String::new(),
-            next_daemon_sequence: 0,
-            lease_expires_at_unix_ms: now_unix_ms().saturating_add(WORKER_LEASE_MS),
+            lease_expires_at_unix_ms: u64::MAX,
             pending_target: target,
             publication,
             published: false,
@@ -988,7 +940,6 @@ fn stage_worker(
         daemon_proof,
         session_token: control_secret,
         data_token: data_secret,
-        heartbeat_interval_ms: WORKER_HEARTBEAT_INTERVAL_MS,
         generation_grant,
     })
     .into_response()
@@ -1014,17 +965,15 @@ async fn ready_worker(
         ) {
             return response;
         }
-        if session.published {
-            return StatusCode::NO_CONTENT.into_response();
-        }
         (
             session.fingerprint,
             Arc::clone(&session.pending_target),
             session.publication.clone(),
             session.generation_grant.generation_id.clone(),
+            session.published,
         )
     };
-    let (fingerprint, target, publication, generation_id) = candidate;
+    let (fingerprint, target, publication, generation_id, published) = candidate;
     if let Err(error) = probe_worker(&target).await {
         let fail_route = match &publication {
             WorkerPublication::Activation { .. } => true,
@@ -1050,6 +999,9 @@ async fn ready_worker(
         }
         lock(&state.worker_sessions).remove(target.worker_id());
         return control_error(StatusCode::BAD_GATEWAY, error);
+    }
+    if published {
+        return StatusCode::NO_CONTENT.into_response();
     }
     tokio::task::spawn_blocking(move || {
         publish_ready_worker(state, fingerprint, target, publication, generation_id)
@@ -1154,12 +1106,13 @@ fn publish_ready_worker(
             return registry_error(error);
         }
     };
+    state.sockets.restored(fingerprint);
     if let Some(activation_id) = canceled_activation {
         revoke_activation(&state, &activation_id);
     }
     if let Some(session) = lock(&state.worker_sessions).get_mut(target.worker_id()) {
         session.published = true;
-        session.lease_expires_at_unix_ms = now_unix_ms().saturating_add(WORKER_LEASE_MS);
+        session.lease_expires_at_unix_ms = u64::MAX;
     }
     StatusCode::NO_CONTENT.into_response()
 }
@@ -1169,6 +1122,7 @@ fn fail_worker_publication(
     fingerprint: Fingerprint,
     publication: &WorkerPublication,
 ) {
+    state.sockets.changed.notify_waiters();
     let canceled_activation = match publication {
         WorkerPublication::Activation { activation_id } => state
             .registry
@@ -1208,31 +1162,6 @@ async fn probe_worker(target: &Arc<WorkerTarget>) -> Result<(), CliError> {
         )));
     }
     Ok(())
-}
-
-async fn heartbeat_worker(
-    State(state): State<Arc<DaemonState>>,
-    Json(request): Json<SessionRequest<WorkerHeartbeatPayload>>,
-) -> Response<Body> {
-    let mut sessions = lock(&state.worker_sessions);
-    let Some(session) = sessions.get_mut(&request.session_id) else {
-        return control_message(StatusCode::UNAUTHORIZED, "unknown worker session");
-    };
-    if request.payload.worker_id != session.worker_id {
-        return control_message(StatusCode::UNAUTHORIZED, "worker identity mismatch");
-    }
-    match authenticate_sequence(
-        session.secret_digest,
-        &mut session.last_sequence,
-        &mut session.last_request_id,
-        &request,
-    ) {
-        Ok(_) => {
-            session.lease_expires_at_unix_ms = now_unix_ms().saturating_add(WORKER_LEASE_MS);
-            StatusCode::NO_CONTENT.into_response()
-        }
-        Err(response) => response,
-    }
 }
 
 async fn public_proxy(state: State<Arc<DaemonState>>, request: Request<Body>) -> Response<Body> {
@@ -1287,6 +1216,9 @@ async fn public_proxy_inner(
             forward_to_provider(&state, request, provider).await
         }
         (ResolvedTarget::Worker(worker), _) => {
+            if !worker.target().control_available() {
+                return unavailable_response();
+            }
             forward_to_worker(Arc::clone(&state), request, worker).await
         }
     }
@@ -1630,6 +1562,7 @@ fn handle_worker_communication_failure(
     if let Some(activation_id) = canceled_activation {
         revoke_activation(state, &activation_id);
     }
+    state.sockets.changed.notify_waiters();
     let fingerprint = fingerprint.to_string();
     log::error!(
         target: "nemo_relay.daemon",
@@ -1644,7 +1577,6 @@ struct AuthenticatedMcp {
     fingerprint: Fingerprint,
     session_id: McpSessionId,
     duplicate: bool,
-    cached_heartbeat: Option<McpHeartbeatResponse>,
     released: bool,
 }
 
@@ -1673,30 +1605,14 @@ fn authenticate_mcp<T: Serialize>(
     {
         session.lease_expires_at_unix_ms = lease_expires_at_unix_ms;
     }
-    let cached_heartbeat = cached_heartbeat_response(session, request, duplicate);
     let session_id = McpSessionId::new(request.session_id.clone())
         .map_err(|error| control_error(StatusCode::BAD_REQUEST, error))?;
     Ok(AuthenticatedMcp {
         fingerprint: session.fingerprint,
         session_id,
         duplicate,
-        cached_heartbeat,
         released: session.released,
     })
-}
-
-fn cached_heartbeat_response<T>(
-    session: &McpControlSession,
-    request: &SessionRequest<T>,
-    duplicate: bool,
-) -> Option<McpHeartbeatResponse> {
-    duplicate
-        .then_some(session.last_heartbeat.as_ref())
-        .flatten()
-        .filter(|cached| {
-            cached.sequence == request.sequence && cached.request_id == request.request_id
-        })
-        .map(|cached| cached.response.clone())
 }
 
 #[allow(clippy::result_large_err)]
@@ -1861,6 +1777,13 @@ fn expire_activation_routes(state: &DaemonState, now_unix_ms: u64) {
     } in state.registry.expire_activations(now_unix_ms)
     {
         revoke_activation(state, &activation_id);
+        let workers: Vec<_> = lock(&state.worker_sessions).iter().filter(|(_, session)| {
+            matches!(&session.publication, WorkerPublication::Activation { activation_id: staged } if *staged == activation_id)
+        }).map(|(id, _)| id.clone()).collect();
+        for worker in workers {
+            state.sockets.cancel_worker(&worker);
+        }
+        state.sockets.changed.notify_waiters();
         let fingerprint = fingerprint.to_string();
         log::error!(
             target: "nemo_relay.daemon",
@@ -1901,7 +1824,7 @@ fn handle_release_action(state: Arc<DaemonState>, fingerprint: Fingerprint, acti
                     let now = now_unix_ms();
                     if target.in_flight() == 0 || now >= deadline_unix_ms {
                         let _ = state.registry.finish_draining(fingerprint, now);
-                        lock(&state.worker_sessions).remove(target.worker_id());
+                        state.sockets.changed.notify_waiters();
                         break;
                     }
                     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1913,6 +1836,7 @@ fn handle_release_action(state: Arc<DaemonState>, fingerprint: Fingerprint, acti
             directive,
         } => {
             lock(&state.pending_directives).insert(session_id.as_str().to_owned(), directive);
+            state.sockets.changed.notify_waiters();
         }
         ReleaseAction::NominateMcp { session_id } => {
             nominate_relaunch(&state, fingerprint, session_id);
@@ -1981,6 +1905,7 @@ fn nominate_relaunch(state: &Arc<DaemonState>, fingerprint: Fingerprint, session
     };
     remember_activation(state, fingerprint, &directive);
     lock(&state.pending_directives).insert(session_id.as_str().to_owned(), directive);
+    state.sockets.changed.notify_waiters();
 }
 
 async fn request_worker_drain(
@@ -1988,60 +1913,15 @@ async fn request_worker_drain(
     target: &Arc<WorkerTarget>,
     deadline_unix_ms: u64,
 ) {
-    let request = {
-        let mut sessions = lock(&state.worker_sessions);
-        let Some(session) = sessions.get_mut(target.worker_id()) else {
-            return;
-        };
-        let Some(sequence) = session.next_daemon_sequence.checked_add(1) else {
-            return;
-        };
-        session.next_daemon_sequence = sequence;
-        SessionRequest::new(
-            target.worker_id().to_owned(),
-            session.secret.clone(),
-            sequence,
-            WorkerDrainRequest {
-                worker_id: target.worker_id().to_owned(),
-                deadline_unix_ms,
-                timeout_ms: Some(
-                    deadline_unix_ms
-                        .saturating_sub(now_unix_ms())
-                        .min(DRAIN_LIFETIME_MS),
-                ),
-            },
-        )
-    };
-    let Ok(request) = request else {
-        return;
-    };
-    let uri = format!(
-        "{}{}",
-        target.endpoint().trim_end_matches('/'),
-        WORKER_DRAIN_PATH
-    );
-    let Ok(uri) = uri.parse::<Uri>() else {
-        return;
-    };
-    let payload = match serde_json::to_vec(&request) {
-        Ok(payload) => payload,
-        Err(_) => return,
-    };
-    let payload = Bytes::from(payload);
-    for _ in 0..2 {
-        let request = match Request::post(uri.clone())
-            .header(CONTENT_TYPE, "application/json")
-            .header(WORKER_TOKEN_HEADER, target.session_token())
-            .body(box_body(http_body_util::Full::new(payload.clone())))
-        {
-            Ok(request) => request,
-            Err(_) => return,
-        };
-        match tokio::time::timeout(Duration::from_secs(2), target.client().request(request)).await {
-            Ok(Ok(response)) if response.status() == StatusCode::NO_CONTENT => return,
-            _ => {}
-        }
-    }
+    state.sockets.drain(WorkerDrainRequest {
+        worker_id: target.worker_id().to_owned(),
+        deadline_unix_ms,
+        timeout_ms: Some(
+            deadline_unix_ms
+                .saturating_sub(now_unix_ms())
+                .min(DRAIN_LIFETIME_MS),
+        ),
+    });
 }
 
 fn spawn_maintenance(state: Arc<DaemonState>) {
@@ -2053,63 +1933,11 @@ fn spawn_maintenance(state: Arc<DaemonState>) {
             let now = now_unix_ms();
             expire_activation_routes(&state, now);
             lock(&state.activations).retain(|_, activation| activation.deadline_unix_ms > now);
-            let actions = state
-                .registry
-                .expire_mcp_leases(now, now.saturating_add(DRAIN_LIFETIME_MS));
-            for (fingerprint, action) in actions {
-                handle_release_action(Arc::clone(&state), fingerprint, action);
-            }
-            prune_expired_mcp_control_state(
-                &mut lock(&state.mcp_sessions),
-                &mut lock(&state.pending_directives),
-                now,
-            );
-            let expired_workers: Vec<_> = {
-                let mut sessions = lock(&state.worker_sessions);
-                let expired = sessions
-                    .iter()
-                    .filter(|(_, session)| session.lease_expires_at_unix_ms <= now)
-                    .map(|(id, session)| {
-                        (
-                            id.clone(),
-                            session.fingerprint,
-                            session.generation_grant.generation_id.clone(),
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                for (id, _, _) in &expired {
-                    sessions.remove(id);
-                }
-                expired
-            };
-            for (worker_id, fingerprint, generation_id) in expired_workers {
-                let revoke_state = Arc::clone(&state);
-                if let Err(error) = tokio::task::spawn_blocking(move || {
-                    revoke_active_worker_generation(&revoke_state, fingerprint, &generation_id)
-                })
-                .await
-                {
-                    log::error!(
-                        target: "nemo_relay.daemon",
-                        event = "worker_generation_revocation_join_failed",
-                        error_kind = if error.is_panic() { "panic" } else { "cancelled" };
-                        "Worker generation revocation task failed during expiry; continuing recovery"
-                    );
-                }
-                if let Ok(WorkerFailureAction::NominateMcp { session_id }) =
-                    state.registry.worker_failed(
-                        fingerprint,
-                        &worker_id,
-                        now.saturating_add(RECOVERY_LIFETIME_MS),
-                    )
-                {
-                    nominate_relaunch(&state, fingerprint, session_id);
-                }
-            }
         }
     });
 }
 
+#[cfg(test)]
 fn prune_expired_mcp_control_state(
     sessions: &mut HashMap<String, McpControlSession>,
     pending_directives: &mut HashMap<String, BrokerDirective>,
@@ -2355,7 +2183,8 @@ async fn serve_tls(
                     continue;
                 };
                 let acceptor = acceptor.clone();
-                let service = app.clone().layer(axum::Extension(ConnectInfo(peer)));
+                let local = stream.local_addr()?;
+                let service = app.clone().layer(axum::Extension(ConnectInfo(peer))).layer(axum::Extension(socket::LocalAddress(local)));
                 let mut shutdown_rx = shutdown_rx.clone();
                 connections.spawn(async move {
                     let Ok(Ok(stream)) = tokio::time::timeout(

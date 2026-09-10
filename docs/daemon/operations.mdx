@@ -65,7 +65,7 @@ outcome of a test policy. Confirm both model and hook activity where supported.
 Open a second harness for the same user-machine identity. Confirm it reuses
 the worker. Close both sessions, allow up to two minutes for accepted requests
 to drain, and confirm the worker exits. If a process disappeared without
-unregistering, allow the MCP lease-expiry interval first.
+unregistering, allow the 30-second reconnect grace period first.
 
 </Step>
 
@@ -78,7 +78,7 @@ the worker and expected plugin behavior have been observed.
 </Warning>
 
 For a remote deployment, also test a planned daemon restart and a VPN reconnect.
-Verify recovery or start a fresh harness if the old one cannot restore its lease.
+Verify recovery or start a fresh harness if the old one cannot recover its control session.
 Check the documented [streaming limitations](/daemon/reference#preserve-streaming-responses)
 before selecting middleware that rewrites responses.
 

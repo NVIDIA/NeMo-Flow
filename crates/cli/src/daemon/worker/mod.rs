@@ -8,34 +8,7 @@ mod managed;
 mod runtime;
 
 #[cfg(test)]
-pub(crate) use runtime::{TestWorkerHandle, test_router, test_router_with_control_tokens};
-
-#[cfg(test)]
-pub(crate) async fn test_recover_control_session(
-    daemon_origin: &str,
-    identity: &super::common::identity::MachineIdentity,
-    worker_id: &str,
-    endpoint: &str,
-    generation_grant: super::common::control::WorkerGenerationGrant,
-) -> Result<
-    (
-        String,
-        String,
-        super::common::control::WorkerGenerationGrant,
-    ),
-    CliError,
-> {
-    let registration = control::recover(
-        daemon_origin,
-        identity,
-        worker_id,
-        endpoint,
-        None,
-        generation_grant,
-    )
-    .await?;
-    Ok(control::test_registration_values(registration))
-}
+pub(crate) use runtime::{TestWorkerHandle, test_router};
 
 use std::net::{Ipv4Addr, SocketAddr};
 

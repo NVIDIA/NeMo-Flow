@@ -7,21 +7,17 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::process::Stdio;
 use std::time::Duration;
 
-use reqwest::Client;
+use super::common::socket::{Client, Command as ControlCommand, Event};
 use tokio::io::AsyncWriteExt;
 use tokio::net::UdpSocket;
 use tokio::process::{Child, Command};
 
 use super::common::address::{daemon_url, explicit_daemon_origin};
-use super::common::client::{
-    ControlRetryPolicy, begin_handshake, control_client, post_empty_idempotent, post_json,
-    post_json_idempotent,
-};
+use super::common::client::{begin_handshake, control_client};
 use super::common::control::{
-    ACTIVATION_LIFETIME_MS, ActivationFailedPayload, EmptyPayload, MCP_ACTIVATION_FAILED_PATH,
-    MCP_HEARTBEAT_INTERVAL_MS, MCP_HEARTBEAT_PATH, MCP_LEASE_MS, MCP_REGISTER_PATH,
-    McpHeartbeatResponse, McpRegisterRequest, McpRegisterResponse, SessionRequest, WorkerBootstrap,
-    WorkerNetworkHint, WorkerNetworkHintProof,
+    ACTIVATION_LIFETIME_MS, ActivationFailedPayload, EmptyPayload, McpRegisterRequest,
+    McpRegisterResponse, SessionRequest, WorkerBootstrap, WorkerNetworkHint,
+    WorkerNetworkHintProof,
 };
 use super::common::identity::MachineIdentity;
 use super::common::protocol::{BrokerDirective, ComponentRole, SensitiveString};
@@ -30,22 +26,7 @@ use crate::error::CliError;
 
 // Includes the full two-minute legal drain plus reconciliation margin before a replacement
 // activation is issued.
-const ACTIVATION_POLL_MAX: Duration = Duration::from_secs(150);
-const REGISTRATION_RETRY_MAX: Duration = Duration::from_secs(30);
-const REGISTRATION_RETRY_DELAY: Duration = Duration::from_millis(100);
-const MIN_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
-const MAX_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(MCP_LEASE_MS / 3);
-const HEARTBEAT_RETRY_WINDOW_MS: u64 = MCP_LEASE_MS - MCP_HEARTBEAT_INTERVAL_MS - 5_000;
-const HEARTBEAT_RETRY_POLICY: ControlRetryPolicy = ControlRetryPolicy::new(
-    Duration::from_secs(2),
-    Duration::from_millis(HEARTBEAT_RETRY_WINDOW_MS),
-    Duration::from_millis(250),
-);
-const RELEASE_RETRY_POLICY: ControlRetryPolicy = ControlRetryPolicy::new(
-    Duration::from_millis(500),
-    Duration::from_secs(2),
-    Duration::from_millis(100),
-);
+const ACTIVATION_WAIT_MAX: Duration = Duration::from_secs(150);
 const WORKER_ADVERTISE_ENV: &str = "NEMO_RELAY_WORKER_ADVERTISE_ADDRESS";
 const WORKER_PORT_ENV: &str = "NEMO_RELAY_WORKER_PORT";
 
@@ -54,22 +35,19 @@ pub(crate) struct Options {
     pub(crate) daemon_address: String,
 }
 
-struct McpLease {
+struct McpSession {
     client: Client,
     daemon_origin: String,
     route_credential: RouteCredential,
     identity: MachineIdentity,
     session_id: String,
     session_token: SensitiveString,
-    heartbeat_interval: Duration,
     sequence: u64,
-    pending_heartbeat: Option<SessionRequest<EmptyPayload>>,
 }
 
 struct Registration {
     directive: BrokerDirective,
     session_token: SensitiveString,
-    heartbeat_interval: Duration,
 }
 
 pub(crate) async fn run(options: Options) -> Result<(), CliError> {
@@ -86,16 +64,14 @@ pub(crate) async fn run(options: Options) -> Result<(), CliError> {
         &session_id,
     )
     .await?;
-    let mut lease = McpLease {
+    let mut lease = McpSession {
         client,
         daemon_origin,
         route_credential,
         identity,
         session_id,
         session_token: registration.session_token,
-        heartbeat_interval: registration.heartbeat_interval,
         sequence: 0,
-        pending_heartbeat: None,
     };
     make_route_ready(&mut lease, registration.directive).await?;
 
@@ -106,7 +82,7 @@ pub(crate) async fn run(options: Options) -> Result<(), CliError> {
     );
     let result = {
         let protocol = crate::mcp::serve_daemon_stdio();
-        let control = maintain_lease(&mut lease);
+        let control = maintain_session(&mut lease);
         tokio::pin!(protocol);
         tokio::pin!(control);
         tokio::select! {
@@ -125,20 +101,10 @@ async fn register(
     identity: &MachineIdentity,
     session_id: &str,
 ) -> Result<Registration, CliError> {
-    let deadline = tokio::time::Instant::now() + REGISTRATION_RETRY_MAX;
-    loop {
-        match register_once(client, daemon_origin, credential, identity, session_id).await {
-            Ok(registration) => return Ok(registration),
-            Err(error @ CliError::Upstream(_)) => {
-                let now = tokio::time::Instant::now();
-                if now >= deadline {
-                    return Err(error);
-                }
-                tokio::time::sleep_until(deadline.min(now + REGISTRATION_RETRY_DELAY)).await;
-            }
-            Err(error) => return Err(error),
-        }
-    }
+    super::common::socket::retry(|| {
+        register_once(client, daemon_origin, credential, identity, session_id)
+    })
+    .await
 }
 
 async fn register_once(
@@ -166,21 +132,20 @@ async fn register_once(
         &identity.fingerprint(),
         identity,
     )?;
-    let response: McpRegisterResponse = post_json(
-        client,
-        &format!("{daemon_origin}{MCP_REGISTER_PATH}"),
-        &McpRegisterRequest {
-            proof: handshake.proof.clone(),
-            worker_network,
-        },
-        Some(credential.expose()),
-    )
-    .await?;
+    let response: McpRegisterResponse = client
+        .request(ControlCommand::RegisterMcp {
+            request: McpRegisterRequest {
+                proof: handshake.proof.clone(),
+                worker_network,
+            },
+            credential: SensitiveString::new(credential.expose())
+                .map_err(|error| CliError::Launch(error.to_string()))?,
+        })
+        .await?;
     handshake.authenticate_daemon(&response.daemon_proof)?;
     Ok(Registration {
         directive: response.directive,
         session_token: response.session_token,
-        heartbeat_interval: validate_heartbeat_interval(response.heartbeat_interval_ms)?,
     })
 }
 
@@ -287,16 +252,6 @@ fn optional_environment(name: &str) -> Result<Option<String>, CliError> {
         .transpose()
 }
 
-fn validate_heartbeat_interval(milliseconds: u64) -> Result<Duration, CliError> {
-    let interval = Duration::from_millis(milliseconds);
-    if !(MIN_HEARTBEAT_INTERVAL..=MAX_HEARTBEAT_INTERVAL).contains(&interval) {
-        return Err(CliError::Unauthorized(
-            "daemon returned an invalid MCP heartbeat interval".into(),
-        ));
-    }
-    Ok(interval)
-}
-
 /// A pending worker must not survive failed activation or cancellation. Readiness transfers
 /// ownership to the broker; only that success path disarms this guard.
 struct ActivationChild {
@@ -315,7 +270,7 @@ impl Drop for ActivationChild {
 type PendingLaunch = Option<(String, ActivationChild, tokio::time::Instant)>;
 
 fn route_activation_timed_out(started: tokio::time::Instant, directive: &BrokerDirective) -> bool {
-    started.elapsed() > ACTIVATION_POLL_MAX
+    started.elapsed() > ACTIVATION_WAIT_MAX
         && !matches!(
             directive,
             BrokerDirective::ReuseWorker { .. } | BrokerDirective::UsePassThrough
@@ -330,7 +285,7 @@ async fn stop_pending_launch(launched: &mut PendingLaunch) -> Result<(), CliErro
 }
 
 async fn make_route_ready(
-    lease: &mut McpLease,
+    lease: &mut McpSession,
     mut directive: BrokerDirective,
 ) -> Result<(), CliError> {
     let started = tokio::time::Instant::now();
@@ -405,20 +360,16 @@ async fn make_route_ready(
                         directive = refresh_registration(lease).await?.directive;
                         continue;
                     }
-                    // Poll readiness through the authenticated lease rather than repeating the full
-                    // signed registration handshake while the worker starts.
-                    if let Some(updated) = poll_worker_activation(lease).await? {
-                        directive = updated;
-                        continue;
-                    }
                 }
-                BrokerDirective::WaitForWorker { retry_after_ms } => {
-                    tokio::time::sleep(Duration::from_millis(retry_after_ms.clamp(10, 1_000)))
-                        .await;
-                }
+                BrokerDirective::WaitForWorker { .. } => {}
             }
-            if !matches!(directive, BrokerDirective::LaunchWorker { .. }) {
-                directive = refresh_registration(lease).await?.directive;
+            // The local timer supervises the child; it sends no network traffic.
+            let event = tokio::select! {
+                event = lease.client.next() => Some(event),
+                _ = tokio::time::sleep(Duration::from_millis(100)) => None,
+            };
+            if let Some(event) = event {
+                directive = receive_directive(lease, event).await?;
             }
         }
     }
@@ -427,11 +378,27 @@ async fn make_route_ready(
     result.and(cleanup)
 }
 
-async fn poll_worker_activation(lease: &mut McpLease) -> Result<Option<BrokerDirective>, CliError> {
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    Ok(renew_lease_with(lease, HEARTBEAT_RETRY_POLICY)
-        .await?
-        .directive)
+async fn next_directive(lease: &mut McpSession) -> Result<BrokerDirective, CliError> {
+    let event = lease.client.next().await;
+    receive_directive(lease, event).await
+}
+async fn receive_directive(
+    lease: &mut McpSession,
+    event: Result<Event, CliError>,
+) -> Result<BrokerDirective, CliError> {
+    match event {
+        Ok(Event::Directive {
+            request_id,
+            directive,
+        }) => {
+            if lease.client.acknowledge(request_id).await.is_err() {
+                return Ok(refresh_registration(lease).await?.directive);
+            }
+            Ok(directive)
+        }
+        Ok(_) => Err(CliError::Launch("unexpected MCP control event".into())),
+        Err(_) => Ok(refresh_registration(lease).await?.directive),
+    }
 }
 
 fn activation_timed_out(
@@ -445,7 +412,7 @@ fn activation_timed_out(
             >= Duration::from_millis(ACTIVATION_LIFETIME_MS)
 }
 
-async fn refresh_registration(lease: &mut McpLease) -> Result<Registration, CliError> {
+async fn refresh_registration(lease: &mut McpSession) -> Result<Registration, CliError> {
     let registration = register(
         &lease.client,
         &lease.daemon_origin,
@@ -458,14 +425,9 @@ async fn refresh_registration(lease: &mut McpLease) -> Result<Registration, CliE
     Ok(registration)
 }
 
-fn apply_registration(lease: &mut McpLease, registration: &Registration) {
-    let session_rotated = lease.session_token != registration.session_token;
+fn apply_registration(lease: &mut McpSession, registration: &Registration) {
     lease.session_token = registration.session_token.clone();
-    lease.heartbeat_interval = registration.heartbeat_interval;
-    if session_rotated {
-        lease.sequence = 0;
-        lease.pending_heartbeat = None;
-    }
+    lease.sequence = 0;
 }
 
 async fn launch_worker(
@@ -538,7 +500,7 @@ fn worker_command(
 }
 
 async fn report_activation_failed(
-    lease: &mut McpLease,
+    lease: &mut McpSession,
     activation_id: &str,
     error: &CliError,
 ) -> Result<(), CliError> {
@@ -558,144 +520,31 @@ async fn report_activation_failed(
             reason: error.to_string(),
         },
     )?;
-    post_empty_idempotent(
-        &lease.client,
-        &format!("{}{}", lease.daemon_origin, MCP_ACTIVATION_FAILED_PATH),
-        &request,
-        RELEASE_RETRY_POLICY,
-    )
-    .await
-}
-
-async fn maintain_lease(lease: &mut McpLease) -> Result<(), CliError> {
-    let mut interval = heartbeat_interval(lease.heartbeat_interval);
-    interval.tick().await;
-    loop {
-        interval.tick().await;
-        let response = match renew_lease_with(lease, HEARTBEAT_RETRY_POLICY).await {
-            Ok(response) => response,
-            Err(CliError::Unauthorized(_)) => {
-                // A daemon restart invalidates its in-memory session token. Re-authenticate using
-                // the pinned daemon identity and the same user-machine identity instead of
-                // tearing down an otherwise healthy MCP stdio session.
-                let registration = refresh_registration(lease).await?;
-                make_route_ready(lease, registration.directive).await?;
-                interval = heartbeat_interval(lease.heartbeat_interval);
-                continue;
-            }
-            Err(error) => return Err(error),
-        };
-        if let Some(directive) = response.directive {
-            make_route_ready(lease, directive).await?;
-            interval = heartbeat_interval(lease.heartbeat_interval);
-        }
-    }
-}
-
-async fn renew_lease_with(
-    lease: &mut McpLease,
-    retry_policy: ControlRetryPolicy,
-) -> Result<McpHeartbeatResponse, CliError> {
-    if lease.pending_heartbeat.is_none() {
-        lease.sequence = lease
-            .sequence
-            .checked_add(1)
-            .ok_or_else(|| CliError::Launch("daemon MCP control sequence was exhausted".into()))?;
-        lease.pending_heartbeat = Some(SessionRequest::new(
-            lease.session_id.clone(),
-            lease.session_token.clone(),
-            lease.sequence,
-            EmptyPayload::default(),
-        )?);
-    }
-    let request = lease
-        .pending_heartbeat
-        .as_ref()
-        .expect("pending MCP heartbeat was initialized");
-    let response = post_json_idempotent(
-        &lease.client,
-        &format!("{}{}", lease.daemon_origin, MCP_HEARTBEAT_PATH),
-        request,
-        None,
-        retry_policy,
-    )
-    .await?;
-    lease.pending_heartbeat = None;
-    Ok(response)
-}
-
-fn heartbeat_interval(duration: Duration) -> tokio::time::Interval {
-    let mut interval = tokio::time::interval(duration);
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    interval
-}
-
-async fn release(lease: &mut McpLease) {
-    if let Some(request) = lease.pending_heartbeat.as_ref()
-        && let Err(error) = post_json_idempotent::<_, McpHeartbeatResponse>(
-            &lease.client,
-            &format!("{}{}", lease.daemon_origin, MCP_HEARTBEAT_PATH),
-            request,
-            None,
-            RELEASE_RETRY_POLICY,
-        )
+    lease
+        .client
+        .request::<()>(ControlCommand::ActivationFailed(request))
         .await
-    {
-        log::warn!(
-            target: "nemo_relay.daemon.mcp",
-            event = "mcp_release_failed",
-            error_kind = error.log_kind();
-            "Failed to settle the pending MCP heartbeat before release"
-        );
-        return;
+}
+
+async fn maintain_session(lease: &mut McpSession) -> Result<(), CliError> {
+    loop {
+        let directive = next_directive(lease).await?;
+        make_route_ready(lease, directive).await?;
     }
-    lease.pending_heartbeat = None;
-    lease.sequence = match lease.sequence.checked_add(1) {
-        Some(sequence) => sequence,
-        None => {
-            log::warn!(
-                target: "nemo_relay.daemon.mcp",
-                event = "mcp_release_failed";
-                "Daemon MCP control sequence was exhausted before release"
-            );
-            return;
-        }
-    };
-    let request = match SessionRequest::new(
+}
+
+async fn release(lease: &mut McpSession) {
+    lease.sequence = lease.sequence.saturating_add(1);
+    if let Ok(request) = SessionRequest::new(
         lease.session_id.clone(),
         lease.session_token.clone(),
         lease.sequence,
         EmptyPayload::default(),
     ) {
-        Ok(request) => request,
-        Err(error) => {
-            log::warn!(
-                target: "nemo_relay.daemon.mcp",
-                event = "mcp_release_failed",
-                error_kind = error.log_kind();
-                "Failed to construct the MCP release message"
-            );
-            return;
-        }
-    };
-    if let Err(error) = post_empty_idempotent(
-        &lease.client,
-        &format!(
-            "{}{}",
-            lease.daemon_origin,
-            super::common::control::MCP_RELEASE_PATH
-        ),
-        &request,
-        RELEASE_RETRY_POLICY,
-    )
-    .await
-    {
-        log::warn!(
-            target: "nemo_relay.daemon.mcp",
-            event = "mcp_release_failed",
-            error_kind = error.log_kind();
-            "Failed to release the daemon MCP reference"
-        );
+        let _ = lease
+            .client
+            .request::<()>(ControlCommand::Release(request))
+            .await;
     }
 }
 

@@ -230,15 +230,30 @@ One fingerprint moves through these broker states:
 | `PassThrough` | The daemon forwards authenticated requests directly to providers.           |
 | `Recovering`  | One connected MCP is nominated to replace a failed worker.                  |
 
-MCP clients renew their references every 10 seconds, and the daemon expires a
-reference after 30 seconds without renewal. Workers send a heartbeat every five
-seconds and expire after 20 seconds without one. There is no independent worker
-idle timeout.
+MCP clients and workers each open an authenticated WebSocket control session to
+the daemon. Protocol v2 carries registration, recovery, readiness, launch
+instructions, release, and drain messages. Upgrade the daemon, MCP clients, and
+workers together; v1 HTTP control endpoints are no longer supported. Provider
+and hook requests still use HTTP, and MCP clients still serve stdio locally.
 
-If a worker loses its authenticated control relationship, it immediately stops
-accepting new requests. Already accepted streams can finish while the worker
-reconnects or re-registers after a daemon restart. The worker exits if it cannot
-restore control within two minutes.
+Connected sessions do not require lease renewals. Strictly loopback connections
+send no periodic pings. For non-loopback connections, the daemon sends a ping
+every 30 seconds and requires its matching pong within 10 seconds. An idle hung
+loopback process may remain undetected until an operation times out.
+
+After a disconnect, clients retry immediately with backoff capped at two
+seconds. Each connection and authentication attempt has a five-second timeout,
+and the complete recovery window is 30 seconds. Failed attempts do not extend
+that window. A disconnected MCP retains its route reference during recovery;
+a separately connected worker can continue serving it.
+
+If a worker loses its control connection, it stops accepting new requests.
+Already accepted streams can finish while it reconnects. The daemon resumes
+forwarding only after authenticating the same worker generation and probing its
+HTTP readiness endpoint. After 30 seconds without recovery, the worker exits
+and the daemon revokes its generation. MCP clients also exit when their recovery
+window expires. After a daemon restart, persisted worker generations have a
+30-second recovery window before replacement workers can launch.
 
 When the last MCP reference leaves, the route enters a non-revivable drain.
 Already accepted requests have up to two minutes to finish before the worker
@@ -251,7 +266,6 @@ readiness, or activation-channel failure moves the whole fingerprint route to
 transient pass-through until all MCP references leave. A connection or identity
 failure before authentication instead makes the MCP process log the error and
 exit with a nonzero status.
-
 
 ## Preserve Streaming Responses
 

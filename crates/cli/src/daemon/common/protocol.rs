@@ -16,7 +16,7 @@ use super::identity::{
 };
 
 pub(crate) const SERVICE_NAME: &str = "nemo-relay";
-pub(crate) const PROTOCOL_V1: u16 = 1;
+pub(crate) const PROTOCOL_V2: u16 = 2;
 const HANDSHAKE_DOMAIN: &[u8] = b"nemo-relay/daemon-handshake/v1";
 const MAX_CAPABILITIES: usize = 64;
 const MAX_CAPABILITY_BYTES: usize = 128;
@@ -86,8 +86,8 @@ impl ProtocolRange {
 impl Default for ProtocolRange {
     fn default() -> Self {
         Self {
-            minimum: PROTOCOL_V1,
-            maximum: PROTOCOL_V1,
+            minimum: PROTOCOL_V2,
+            maximum: PROTOCOL_V2,
         }
     }
 }

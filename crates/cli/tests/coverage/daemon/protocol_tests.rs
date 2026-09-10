@@ -28,7 +28,7 @@ fn sample_transcript() -> (HandshakeTranscript, MachineIdentity, MachineIdentity
             ),
             initiator_instance_id: "mcp-1".to_owned(),
             responder_instance_id: "daemon-1".to_owned(),
-            selected_protocol: PROTOCOL_V1,
+            selected_protocol: PROTOCOL_V2,
             initiator_public_identity: initiator.public_identity(),
             responder_public_identity: responder.public_identity(),
             initiator_fingerprint: initiator.fingerprint(),
@@ -112,7 +112,7 @@ fn any_signed_field_mutation_invalidates_the_proof() {
     reject_mutation!(initiator.service, "other".into());
     reject_mutation!(initiator.role, ComponentRole::Worker);
     reject_mutation!(initiator.protocol.minimum, 0);
-    reject_mutation!(initiator.protocol.maximum, 2);
+    reject_mutation!(initiator.protocol.maximum, 3);
     reject_mutation!(
         initiator.capabilities,
         Capabilities::new(["different"]).unwrap()
@@ -121,7 +121,7 @@ fn any_signed_field_mutation_invalidates_the_proof() {
     reject_mutation!(responder.service, "other".into());
     reject_mutation!(responder.role, ComponentRole::Mcp);
     reject_mutation!(responder.protocol.minimum, 0);
-    reject_mutation!(responder.protocol.maximum, 2);
+    reject_mutation!(responder.protocol.maximum, 3);
     reject_mutation!(
         responder.capabilities,
         Capabilities::new(["different"]).unwrap()
@@ -129,7 +129,7 @@ fn any_signed_field_mutation_invalidates_the_proof() {
     reject_mutation!(responder.binary_version, "other".into());
     reject_mutation!(initiator_instance_id, "other".into());
     reject_mutation!(responder_instance_id, "other".into());
-    reject_mutation!(selected_protocol, 2);
+    reject_mutation!(selected_protocol, 3);
     reject_mutation!(
         initiator_public_identity,
         transcript.responder_public_identity

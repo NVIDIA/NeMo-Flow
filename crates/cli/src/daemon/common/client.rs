@@ -1,85 +1,15 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-
-//! Shared authenticated control-plane client used by MCP and worker processes.
-
-use std::future::Future;
-use std::time::Duration;
-
-use bytes::{Bytes, BytesMut};
-use futures_util::StreamExt;
-use reqwest::{Client, Response, StatusCode};
-use serde::Serialize;
-use serde::de::DeserializeOwned;
-
+//! Signed authentication over the v2 control socket.
 use super::address::daemon_url;
 use super::control::{
-    CHALLENGE_PATH, CLIENT_TOKEN_HEADER, ChallengeRequest, ChallengeResponse, RegistrationProof,
-    descriptor, fresh_nonce,
+    ChallengeRequest, ChallengeResponse, RegistrationProof, descriptor, fresh_nonce,
 };
 use super::identity::{MachineIdentity, TokenDigest};
 use super::protocol::{ComponentRole, HandshakeTranscript};
+use super::socket::{Client, Command};
 use super::state::verify_or_store_daemon_pin;
 use crate::error::CliError;
-
-const CONTROL_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const CONTROL_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-const MAX_CONTROL_RESPONSE_BYTES: usize = 256 * 1024;
-
-/// Limits retries for one idempotent, session-authenticated control request.
-///
-/// The request is serialized once before the first attempt. Every retry therefore carries the
-/// same session sequence, request ID, payload hash, and JSON bytes.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct ControlRetryPolicy {
-    attempt_timeout: Duration,
-    total_timeout: Duration,
-    retry_delay: Duration,
-}
-
-impl ControlRetryPolicy {
-    pub(crate) const fn new(
-        attempt_timeout: Duration,
-        total_timeout: Duration,
-        retry_delay: Duration,
-    ) -> Self {
-        Self {
-            attempt_timeout,
-            total_timeout,
-            retry_delay,
-        }
-    }
-}
-
-struct ControlAttemptError {
-    error: CliError,
-    transient: bool,
-    retry_after: Option<Duration>,
-}
-
-impl ControlAttemptError {
-    fn permanent(error: CliError) -> Self {
-        Self {
-            error,
-            transient: false,
-            retry_after: None,
-        }
-    }
-
-    fn transient(error: CliError) -> Self {
-        Self {
-            error,
-            transient: true,
-            retry_after: None,
-        }
-    }
-
-    fn with_retry_after(mut self, retry_after: Option<Duration>) -> Self {
-        self.retry_after = retry_after;
-        self
-    }
-}
-
 pub(crate) struct ClientHandshake {
     pub(crate) proof: RegistrationProof,
     daemon_origin: String,
@@ -108,15 +38,8 @@ impl ClientHandshake {
 }
 
 pub(crate) fn control_client() -> Result<Client, CliError> {
-    Client::builder()
-        .connect_timeout(CONTROL_CONNECT_TIMEOUT)
-        .timeout(CONTROL_REQUEST_TIMEOUT)
-        .redirect(reqwest::redirect::Policy::none())
-        .http2_keep_alive_interval(Duration::from_secs(15))
-        .build()
-        .map_err(CliError::Upstream)
+    Ok(Client::default())
 }
-
 pub(crate) async fn begin_handshake(
     client: &Client,
     daemon_address: &str,
@@ -130,6 +53,7 @@ pub(crate) async fn begin_handshake(
             "a daemon cannot initiate a daemon client handshake".into(),
         ));
     }
+    client.connect(daemon_address, role).await?;
     let daemon = daemon_url(daemon_address)?;
     let daemon_origin = daemon.as_str().trim_end_matches('/').to_owned();
     let initiator = descriptor(role);
@@ -141,13 +65,7 @@ pub(crate) async fn begin_handshake(
         initiator_fingerprint: identity.fingerprint(),
         initiator_nonce,
     };
-    let challenge: ChallengeResponse = post_json(
-        client,
-        &format!("{daemon_origin}{CHALLENGE_PATH}"),
-        &request,
-        None,
-    )
-    .await?;
+    let challenge: ChallengeResponse = client.request(Command::Challenge(request.clone())).await?;
     challenge
         .daemon
         .validate()
@@ -195,277 +113,3 @@ pub(crate) async fn begin_handshake(
         daemon_origin,
     })
 }
-
-pub(crate) async fn post_json<T, R>(
-    client: &Client,
-    url: &str,
-    payload: &T,
-    route_token: Option<&str>,
-) -> Result<R, CliError>
-where
-    T: Serialize + ?Sized,
-    R: DeserializeOwned,
-{
-    let body = encode_control_request(payload)?;
-    post_json_encoded(client, url, body, route_token)
-        .await
-        .map_err(|failure| failure.error)
-}
-
-pub(crate) async fn post_json_idempotent<T, R>(
-    client: &Client,
-    url: &str,
-    payload: &T,
-    route_token: Option<&str>,
-    policy: ControlRetryPolicy,
-) -> Result<R, CliError>
-where
-    T: Serialize + ?Sized,
-    R: DeserializeOwned,
-{
-    let body = encode_control_request(payload)?;
-    retry_control(policy, || {
-        post_json_encoded(client, url, body.clone(), route_token)
-    })
-    .await
-}
-
-pub(crate) async fn post_empty_idempotent<T: Serialize + ?Sized>(
-    client: &Client,
-    url: &str,
-    payload: &T,
-    policy: ControlRetryPolicy,
-) -> Result<(), CliError> {
-    let body = encode_control_request(payload)?;
-    retry_control(policy, || post_empty_encoded(client, url, body.clone())).await
-}
-
-fn encode_control_request<T: Serialize + ?Sized>(payload: &T) -> Result<Bytes, CliError> {
-    serde_json::to_vec(payload)
-        .map(Bytes::from)
-        .map_err(|error| {
-            CliError::Launch(format!("failed to encode daemon control request: {error}"))
-        })
-}
-
-async fn post_json_encoded<R: DeserializeOwned>(
-    client: &Client,
-    url: &str,
-    body: Bytes,
-    route_token: Option<&str>,
-) -> Result<R, ControlAttemptError> {
-    let response = send_control_request(client, url, body, route_token).await?;
-    let status = response.status();
-    let retry_after = retry_after(&response);
-    let bytes = read_bounded_control_response(response).await?;
-    if !status.is_success() {
-        return Err(status_error(status, &bytes).with_retry_after(retry_after));
-    }
-    serde_json::from_slice(&bytes).map_err(|error| {
-        ControlAttemptError::permanent(CliError::Launch(format!(
-            "invalid daemon control response: {error}"
-        )))
-    })
-}
-
-async fn post_empty_encoded(
-    client: &Client,
-    url: &str,
-    body: Bytes,
-) -> Result<(), ControlAttemptError> {
-    let response = send_control_request(client, url, body, None).await?;
-    let status = response.status();
-    let retry_after = retry_after(&response);
-    if status.is_success() {
-        return Ok(());
-    }
-    Err(if status == StatusCode::UNAUTHORIZED {
-        ControlAttemptError::permanent(CliError::Unauthorized(
-            "daemon rejected the control session credential".into(),
-        ))
-    } else {
-        let error = CliError::Launch(format!("daemon control request failed with HTTP {status}"));
-        if is_transient_status(status) {
-            ControlAttemptError::transient(error)
-        } else {
-            ControlAttemptError::permanent(error)
-        }
-        .with_retry_after(retry_after)
-    })
-}
-
-async fn send_control_request(
-    client: &Client,
-    url: &str,
-    body: Bytes,
-    route_token: Option<&str>,
-) -> Result<Response, ControlAttemptError> {
-    let mut request = client
-        .post(url)
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .body(body);
-    if let Some(token) = route_token {
-        request = request.header(CLIENT_TOKEN_HEADER, token);
-    }
-    request
-        .send()
-        .await
-        .map_err(|error| ControlAttemptError::transient(CliError::Upstream(error)))
-}
-
-async fn read_bounded_control_response(response: Response) -> Result<Bytes, ControlAttemptError> {
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_CONTROL_RESPONSE_BYTES as u64)
-    {
-        return Err(response_too_large());
-    }
-    let initial_capacity = response
-        .content_length()
-        .and_then(|length| usize::try_from(length).ok())
-        .unwrap_or(0)
-        .min(MAX_CONTROL_RESPONSE_BYTES);
-    read_bounded_control_chunks(response.bytes_stream(), initial_capacity, |error| {
-        ControlAttemptError::transient(CliError::Upstream(error))
-    })
-    .await
-}
-
-async fn read_bounded_control_chunks<S, E, F>(
-    stream: S,
-    initial_capacity: usize,
-    map_error: F,
-) -> Result<Bytes, ControlAttemptError>
-where
-    S: futures_util::Stream<Item = Result<Bytes, E>>,
-    F: Fn(E) -> ControlAttemptError,
-{
-    let mut bytes = BytesMut::with_capacity(initial_capacity.min(MAX_CONTROL_RESPONSE_BYTES));
-    futures_util::pin_mut!(stream);
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(&map_error)?;
-        if chunk.len() > MAX_CONTROL_RESPONSE_BYTES.saturating_sub(bytes.len()) {
-            return Err(response_too_large());
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    Ok(bytes.freeze())
-}
-
-fn response_too_large() -> ControlAttemptError {
-    ControlAttemptError::permanent(CliError::Launch(format!(
-        "daemon control response exceeded {MAX_CONTROL_RESPONSE_BYTES} bytes"
-    )))
-}
-
-fn status_error(status: StatusCode, bytes: &[u8]) -> ControlAttemptError {
-    let message = serde_json::from_slice::<serde_json::Value>(bytes)
-        .ok()
-        .and_then(|value| {
-            value
-                .pointer("/error/message")
-                .and_then(serde_json::Value::as_str)
-                .map(ToOwned::to_owned)
-        })
-        .unwrap_or_else(|| "daemon rejected the control request".into());
-    if status == StatusCode::UNAUTHORIZED {
-        return ControlAttemptError::permanent(CliError::Unauthorized(message));
-    }
-    let error = CliError::Launch(format!(
-        "daemon control request failed with HTTP {status}: {message}"
-    ));
-    if is_transient_status(status) {
-        ControlAttemptError::transient(error)
-    } else {
-        ControlAttemptError::permanent(error)
-    }
-}
-
-fn is_transient_status(status: StatusCode) -> bool {
-    matches!(
-        status,
-        StatusCode::REQUEST_TIMEOUT
-            | StatusCode::TOO_MANY_REQUESTS
-            | StatusCode::INTERNAL_SERVER_ERROR
-            | StatusCode::BAD_GATEWAY
-            | StatusCode::SERVICE_UNAVAILABLE
-            | StatusCode::GATEWAY_TIMEOUT
-    ) || status.as_u16() == 425
-}
-
-fn retry_after(response: &Response) -> Option<Duration> {
-    if response.status() != StatusCode::SERVICE_UNAVAILABLE {
-        return None;
-    }
-    response
-        .headers()
-        .get(reqwest::header::RETRY_AFTER)?
-        .to_str()
-        .ok()?
-        .trim()
-        .parse::<u64>()
-        .ok()
-        .map(Duration::from_secs)
-}
-
-fn retry_backoff(base: Duration, attempt: u32) -> Duration {
-    const MAX_BACKOFF: Duration = Duration::from_secs(5);
-    if base.is_zero() {
-        return Duration::ZERO;
-    }
-    let scaled = base
-        .saturating_mul(1_u32 << attempt.min(6))
-        .min(MAX_BACKOFF);
-    let jitter_bound = scaled / 4;
-    let jitter = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .map_or(Duration::ZERO, |elapsed| {
-            let bound = jitter_bound.as_nanos();
-            if bound == 0 {
-                Duration::ZERO
-            } else {
-                Duration::from_nanos((elapsed.as_nanos() % bound).min(u64::MAX as u128) as u64)
-            }
-        });
-    scaled
-        .saturating_sub(jitter_bound / 2)
-        .saturating_add(jitter)
-}
-
-async fn retry_control<T, Operation, Attempt>(
-    policy: ControlRetryPolicy,
-    mut operation: Operation,
-) -> Result<T, CliError>
-where
-    Operation: FnMut() -> Attempt,
-    Attempt: Future<Output = Result<T, ControlAttemptError>>,
-{
-    let deadline = tokio::time::Instant::now() + policy.total_timeout;
-    let mut retry_attempt = 0;
-    loop {
-        let now = tokio::time::Instant::now();
-        let attempt_deadline = deadline.min(now + policy.attempt_timeout);
-        let result = tokio::time::timeout_at(attempt_deadline, operation()).await;
-        let (error, retry_after) = match result {
-            Ok(Ok(value)) => return Ok(value),
-            Ok(Err(failure)) if !failure.transient => return Err(failure.error),
-            Ok(Err(failure)) => (failure.error, failure.retry_after),
-            Err(_) => (
-                CliError::Launch("daemon control request attempt timed out".into()),
-                None,
-            ),
-        };
-        let now = tokio::time::Instant::now();
-        if now >= deadline {
-            return Err(error);
-        }
-        let delay = retry_after.unwrap_or_else(|| retry_backoff(policy.retry_delay, retry_attempt));
-        retry_attempt = retry_attempt.saturating_add(1);
-        tokio::time::sleep_until(deadline.min(now + delay)).await;
-    }
-}
-
-#[cfg(test)]
-#[path = "../../../tests/coverage/daemon/client_tests.rs"]
-mod tests;

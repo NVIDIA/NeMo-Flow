@@ -5,14 +5,13 @@ use base64::Engine;
 use std::sync::Arc;
 
 use super::*;
-use crate::daemon::common::client::{begin_handshake, control_client, post_json};
+use crate::daemon::common::client::{begin_handshake, control_client};
 use crate::daemon::common::control::{
-    WorkerBootstrap, WorkerNetworkHintProof, WorkerReadyPayload, WorkerRegisterResponse,
+    WorkerNetworkHintProof, WorkerReadyPayload, WorkerRegisterResponse,
 };
 use crate::daemon::common::routes::HookRoute;
 use crate::daemon::common::state::ROUTE_TOKEN_ENV;
 use crate::daemon::common::worker_tls::pooled_worker_tls_client;
-use crate::daemon::worker::test_router_with_control_tokens;
 use crate::test_support::{EnvScope, PLUGIN_CONFIG_TEST_LOCK};
 use axum::Router;
 use axum::extract::State;
@@ -114,7 +113,14 @@ async fn shared_model_catalogs_disable_cache_reuse_between_credentials() {
 async fn challenge_admission_limits_transport_peers_before_polling_bodies() {
     let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0x91; 32]);
     let state = test_daemon_state(false, &token, GatewayConfig::default());
-    let app = router(Arc::clone(&state));
+    let peers: ChallengePeers = Arc::new(Mutex::new(HashMap::new()));
+    let app = Router::new()
+        .route(
+            crate::daemon::common::socket::MCP_SOCKET_PATH,
+            post(issue_challenge),
+        )
+        .route_layer(from_fn_with_state(peers, limit_challenges))
+        .with_state(state.clone());
     let identity = MachineIdentity::generate().unwrap().identity;
     let mut challenge = ChallengeRequest {
         initiator: crate::daemon::common::control::descriptor(ComponentRole::Mcp),
@@ -127,7 +133,7 @@ async fn challenge_admission_limits_transport_peers_before_polling_bodies() {
         let response = app
             .clone()
             .oneshot(
-                Request::post(CHALLENGE_PATH)
+                Request::post(crate::daemon::common::socket::MCP_SOCKET_PATH)
                     .extension(ConnectInfo(SocketAddr::from(([192, 0, 2, 1], port as u16))))
                     .header(CONTENT_TYPE, "application/json")
                     .body(Body::from(serde_json::to_vec(&challenge).unwrap()))
@@ -140,7 +146,7 @@ async fn challenge_admission_limits_transport_peers_before_polling_bodies() {
     let response = app
         .clone()
         .oneshot(
-            Request::post(CHALLENGE_PATH)
+            Request::post(crate::daemon::common::socket::MCP_SOCKET_PATH)
                 .extension(ConnectInfo(SocketAddr::from(([192, 0, 2, 1], 65535))))
                 .header("x-forwarded-for", "192.0.2.99")
                 .header(CONTENT_TYPE, "application/json")
@@ -163,7 +169,7 @@ async fn challenge_admission_limits_transport_peers_before_polling_bodies() {
     // A worker on another peer still has capacity and needs no MCP route-token header.
     challenge.initiator = crate::daemon::common::control::descriptor(ComponentRole::Worker);
     let request = |peer| {
-        Request::post(CHALLENGE_PATH)
+        Request::post(crate::daemon::common::socket::MCP_SOCKET_PATH)
             .extension(ConnectInfo(SocketAddr::from((peer, 1))))
             .header(CONTENT_TYPE, "application/json")
             .body(Body::from(serde_json::to_vec(&challenge).unwrap()))
@@ -222,8 +228,9 @@ async fn enroll_test_mcp(
     session: &str,
 ) -> Response<Body> {
     let credential = RouteCredential::parse(token.to_owned()).unwrap();
+    let control = control_client().unwrap();
     let handshake = begin_handshake(
-        &control_client().unwrap(),
+        &control,
         origin,
         ComponentRole::Mcp,
         identity,
@@ -954,7 +961,7 @@ fn test_daemon_state(pass_through: bool, token: &str, config: GatewayConfig) -> 
     test_daemon_state_at(pass_through, token, config, "http://127.0.0.1:47632".into())
 }
 
-fn test_daemon_state_at(
+pub(super) fn test_daemon_state_at(
     pass_through: bool,
     _token: &str,
     config: GatewayConfig,
@@ -965,6 +972,7 @@ fn test_daemon_state_at(
         .keep()
         .join("active-worker-generations.json");
     Arc::new(DaemonState {
+        sockets: socket::Hub::default(),
         registry: Registry::new(pass_through),
         descriptor: crate::daemon::common::control::descriptor(ComponentRole::Daemon),
         instance_id: "public-proxy-test-daemon".into(),
@@ -975,7 +983,6 @@ fn test_daemon_state_at(
         challenges: Mutex::new(HashMap::new()),
         activations: Mutex::new(HashMap::new()),
         mcp_sessions: Mutex::new(HashMap::new()),
-        mcp_heartbeat_serialization: Mutex::new(()),
         worker_sessions: Mutex::new(HashMap::new()),
         pending_directives: Mutex::new(HashMap::new()),
         active_worker_generations: ActiveWorkerGenerations::load_for_test(generation_path)
@@ -1056,7 +1063,6 @@ fn active_mcp_registration_reuses_its_session_credential() {
             lease_expires_at_unix_ms: 200,
             last_sequence: 0,
             last_request_id: String::new(),
-            last_heartbeat: None,
             worker_network: worker_network(),
             released: false,
         },
@@ -1105,7 +1111,6 @@ fn mcp_session_reuse_rejects_identity_token_and_network_rebinding() {
             lease_expires_at_unix_ms: 200,
             last_sequence: 0,
             last_request_id: String::new(),
-            last_heartbeat: None,
             worker_network: worker_network(),
             released: false,
         },
@@ -1192,53 +1197,6 @@ fn registry_errors_map_to_stable_control_statuses() {
 }
 
 #[test]
-fn duplicate_heartbeat_replays_the_exact_cached_directive() {
-    let identity = MachineIdentity::generate().expect("identity").identity;
-    let secret = SensitiveString::new("session-secret").expect("secret");
-    let mut request = SessionRequest::new(
-        "mcp-session".to_owned(),
-        secret.clone(),
-        7,
-        EmptyPayload::default(),
-    )
-    .expect("request");
-    request.request_id = "stable-request-id".to_owned();
-    let expected = McpHeartbeatResponse {
-        directive: Some(BrokerDirective::WaitForWorker {
-            retry_after_ms: 321,
-        }),
-    };
-    let session = McpControlSession {
-        fingerprint: identity.fingerprint(),
-        token_digest: TokenDigest::from_token(b"route-token"),
-        secret: secret.clone(),
-        secret_digest: TokenDigest::from_token(secret.expose().as_bytes()),
-        lease_expires_at_unix_ms: 1_000,
-        last_sequence: request.sequence,
-        last_request_id: request.request_id.clone(),
-        last_heartbeat: Some(CachedHeartbeat {
-            sequence: request.sequence,
-            request_id: request.request_id.clone(),
-            response: expected,
-        }),
-        worker_network: worker_network(),
-        released: false,
-    };
-
-    let replayed =
-        cached_heartbeat_response(&session, &request, true).expect("duplicate heartbeat response");
-    assert!(matches!(
-        replayed.directive,
-        Some(BrokerDirective::WaitForWorker {
-            retry_after_ms: 321
-        })
-    ));
-    assert!(cached_heartbeat_response(&session, &request, false).is_none());
-    request.request_id = "different-request-id".to_owned();
-    assert!(cached_heartbeat_response(&session, &request, true).is_none());
-}
-
-#[test]
 fn expired_mcp_control_sessions_and_pending_directives_are_removed_together() {
     let identity = MachineIdentity::generate().expect("identity").identity;
     let fingerprint = identity.fingerprint();
@@ -1253,7 +1211,6 @@ fn expired_mcp_control_sessions_and_pending_directives_are_removed_together() {
             lease_expires_at_unix_ms,
             last_sequence: 0,
             last_request_id: String::new(),
-            last_heartbeat: None,
             worker_network: worker_network(),
             released: false,
         }
@@ -1525,12 +1482,6 @@ async fn control_handlers_reject_unknown_sessions_and_oversized_failure_payloads
     let empty =
         SessionRequest::new("unknown".into(), secret.clone(), 1, EmptyPayload::default()).unwrap();
     assert_eq!(
-        heartbeat_mcp(State(Arc::clone(&state)), Json(empty.clone()))
-            .await
-            .status(),
-        StatusCode::UNAUTHORIZED
-    );
-    assert_eq!(
         release_mcp(State(Arc::clone(&state)), Json(empty))
             .await
             .status(),
@@ -1548,21 +1499,6 @@ async fn control_handlers_reject_unknown_sessions_and_oversized_failure_payloads
     .unwrap();
     assert_eq!(
         ready_worker(State(Arc::clone(&state)), Json(ready))
-            .await
-            .status(),
-        StatusCode::UNAUTHORIZED
-    );
-    let heartbeat = SessionRequest::new(
-        "unknown".into(),
-        secret.clone(),
-        1,
-        WorkerHeartbeatPayload {
-            worker_id: "unknown".into(),
-        },
-    )
-    .unwrap();
-    assert_eq!(
-        heartbeat_worker(State(Arc::clone(&state)), Json(heartbeat))
             .await
             .status(),
         StatusCode::UNAUTHORIZED
@@ -1607,123 +1543,6 @@ async fn worker_control_handlers_bind_payload_identity_before_sequence_authentic
             .status(),
         StatusCode::UNAUTHORIZED
     );
-    let heartbeat = SessionRequest::new(
-        "staged".into(),
-        secret,
-        1,
-        WorkerHeartbeatPayload {
-            worker_id: "different".into(),
-        },
-    )
-    .unwrap();
-    assert_eq!(
-        heartbeat_worker(State(state), Json(heartbeat))
-            .await
-            .status(),
-        StatusCode::UNAUTHORIZED
-    );
-}
-
-#[tokio::test]
-async fn mcp_handlers_cover_registry_loss_duplicate_cache_and_released_sessions() {
-    let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0x48_u8; 32]);
-    let state = test_daemon_state(false, &token, GatewayConfig::default());
-    let fingerprint = MachineIdentity::generate().unwrap().identity.fingerprint();
-    let token_digest = TokenDigest::from_token(token.as_bytes());
-    let secret = SensitiveString::new("mcp-handler-secret").unwrap();
-    let session = |released, last_sequence, last_request_id: String| McpControlSession {
-        fingerprint,
-        token_digest,
-        secret: secret.clone(),
-        secret_digest: TokenDigest::from_token(secret.expose().as_bytes()),
-        lease_expires_at_unix_ms: u64::MAX,
-        last_sequence,
-        last_request_id,
-        last_heartbeat: None,
-        worker_network: worker_network(),
-        released,
-    };
-
-    lock(&state.mcp_sessions).insert("lost-route".into(), session(false, 0, String::new()));
-    let lost = SessionRequest::new(
-        "lost-route".into(),
-        secret.clone(),
-        1,
-        EmptyPayload::default(),
-    )
-    .unwrap();
-    assert_eq!(
-        heartbeat_mcp(State(Arc::clone(&state)), Json(lost))
-            .await
-            .status(),
-        StatusCode::NOT_FOUND
-    );
-    assert!(!lock(&state.mcp_sessions).contains_key("lost-route"));
-
-    let duplicate = SessionRequest::new(
-        "duplicate".into(),
-        secret.clone(),
-        1,
-        EmptyPayload::default(),
-    )
-    .unwrap();
-    lock(&state.mcp_sessions).insert(
-        "duplicate".into(),
-        session(false, 1, duplicate.request_id.clone()),
-    );
-    assert_eq!(
-        heartbeat_mcp(State(Arc::clone(&state)), Json(duplicate))
-            .await
-            .status(),
-        StatusCode::CONFLICT
-    );
-
-    let released_duplicate = SessionRequest::new(
-        "released".into(),
-        secret.clone(),
-        1,
-        EmptyPayload::default(),
-    )
-    .unwrap();
-    lock(&state.mcp_sessions).insert(
-        "released".into(),
-        session(true, 1, released_duplicate.request_id.clone()),
-    );
-    assert_eq!(
-        release_mcp(State(Arc::clone(&state)), Json(released_duplicate.clone()))
-            .await
-            .status(),
-        StatusCode::NO_CONTENT
-    );
-    let released_new = SessionRequest::new(
-        "released".into(),
-        secret.clone(),
-        2,
-        EmptyPayload::default(),
-    )
-    .unwrap();
-    assert_eq!(
-        release_mcp(State(Arc::clone(&state)), Json(released_new))
-            .await
-            .status(),
-        StatusCode::UNAUTHORIZED
-    );
-
-    lock(&state.mcp_sessions).insert("activation".into(), session(false, 0, String::new()));
-    let failed = SessionRequest::new(
-        "activation".into(),
-        secret,
-        1,
-        ActivationFailedPayload {
-            activation_id: "unknown".into(),
-            reason: "failed".into(),
-        },
-    )
-    .unwrap();
-    assert_eq!(
-        activation_failed(State(state), Json(failed)).await.status(),
-        StatusCode::NOT_FOUND
-    );
 }
 
 #[tokio::test]
@@ -1738,18 +1557,18 @@ async fn worker_handlers_cover_bad_sequence_and_already_published_readiness() {
         "staged".into(),
         SensitiveString::new("wrong-secret").unwrap(),
         1,
-        WorkerHeartbeatPayload {
+        WorkerReadyPayload {
             worker_id: "staged".into(),
         },
     )
     .unwrap();
+
     assert_eq!(
-        heartbeat_worker(State(Arc::clone(&state)), Json(wrong))
+        ready_worker(State(state.clone()), Json(wrong))
             .await
             .status(),
         StatusCode::UNAUTHORIZED
     );
-
     let ready = SessionRequest::new(
         "staged".into(),
         SensitiveString::new("control-secret").unwrap(),
@@ -1761,7 +1580,7 @@ async fn worker_handlers_cover_bad_sequence_and_already_published_readiness() {
     .unwrap();
     assert_eq!(
         ready_worker(State(state), Json(ready)).await.status(),
-        StatusCode::NO_CONTENT
+        StatusCode::BAD_GATEWAY
     );
 }
 
@@ -2317,7 +2136,6 @@ fn released_mcp_session_credential_is_never_reused() {
             lease_expires_at_unix_ms: 1_000,
             last_sequence: 1,
             last_request_id: "release-request".into(),
-            last_heartbeat: None,
             worker_network: worker_network(),
             released: true,
         },
@@ -2445,7 +2263,6 @@ fn staged_worker_session(worker_id: &str, lease_expires_at_unix_ms: u64) -> Work
         secret_digest: TokenDigest::from_token(secret.expose().as_bytes()),
         last_sequence: 0,
         last_request_id: String::new(),
-        next_daemon_sequence: 0,
         lease_expires_at_unix_ms,
         pending_target: Arc::new(
             WorkerTarget::new(worker_id, endpoint, data).expect("worker target"),
@@ -2463,57 +2280,6 @@ fn staged_worker_session(worker_id: &str, lease_expires_at_unix_ms: u64) -> Work
         )
         .expect("generation grant"),
     }
-}
-
-#[tokio::test]
-async fn daemon_drain_control_is_authenticated_retried_and_sequence_bounded() {
-    async fn drain(headers: HeaderMap, body: Bytes) -> Response<Body> {
-        assert_eq!(headers[WORKER_TOKEN_HEADER], "data-secret");
-        let request: SessionRequest<WorkerDrainRequest> = serde_json::from_slice(&body).unwrap();
-        assert_eq!(request.session_id, "drain-worker");
-        assert_eq!(request.sequence, 1);
-        StatusCode::NO_CONTENT.into_response()
-    }
-
-    let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0x4b_u8; 32]);
-    let state = test_daemon_state(false, &token, GatewayConfig::default());
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
-        axum::serve(
-            listener,
-            Router::new().route(WORKER_DRAIN_PATH, post(drain)),
-        )
-        .await
-        .unwrap();
-    });
-    let endpoint = format!("http://{address}");
-    let target = Arc::new(
-        WorkerTarget::new(
-            "drain-worker",
-            endpoint,
-            SensitiveString::new("data-secret").unwrap(),
-        )
-        .unwrap(),
-    );
-    let mut session = staged_worker_session("drain-worker", u64::MAX);
-    session.pending_target = Arc::clone(&target);
-    lock(&state.worker_sessions).insert("drain-worker".into(), session);
-
-    request_worker_drain(&state, &target, now_unix_ms().saturating_add(1_000)).await;
-    assert_eq!(
-        lock(&state.worker_sessions)["drain-worker"].next_daemon_sequence,
-        1
-    );
-
-    lock(&state.worker_sessions)
-        .get_mut("drain-worker")
-        .unwrap()
-        .next_daemon_sequence = u64::MAX;
-    request_worker_drain(&state, &target, u64::MAX).await;
-    lock(&state.worker_sessions).remove("drain-worker");
-    request_worker_drain(&state, &target, u64::MAX).await;
-    server.abort();
 }
 
 #[test]
@@ -2711,7 +2477,6 @@ async fn nominated_live_mcp_receives_a_fresh_relaunch_activation() {
             lease_expires_at_unix_ms: u64::MAX,
             last_sequence: 0,
             last_request_id: String::new(),
-            last_heartbeat: None,
             worker_network: worker_network(),
             released: false,
         },
@@ -2894,288 +2659,12 @@ async fn readiness_rechecks_activation_and_recovery_authority_after_the_probe() 
     server.abort();
 }
 
-#[tokio::test]
-async fn authenticated_control_plane_activates_heartbeats_and_drains_a_worker() {
-    let route_token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0x5a_u8; 32]);
-    let credential = RouteCredential::parse(route_token.clone()).expect("route credential");
-    let daemon_listener = TcpListener::bind("127.0.0.1:0").await.expect("daemon bind");
-    let daemon_address = daemon_listener.local_addr().expect("daemon address");
-    let daemon_origin = format!("http://{daemon_address}");
-    let generation_directory = tempfile::tempdir().expect("generation directory");
-    let daemon_identity = MachineIdentity::generate()
-        .expect("daemon identity")
-        .identity;
-    let state = Arc::new(DaemonState {
-        registry: Registry::new(false),
-        descriptor: crate::daemon::common::control::descriptor(ComponentRole::Daemon),
-        instance_id: "control-plane-test-daemon".into(),
-        public_origin: daemon_origin.clone(),
-        config: GatewayConfig::default(),
-        upstream: pooled_client().expect("daemon client"),
-        worker_clients: WorkerClientPool::new().expect("worker clients"),
-        challenges: Mutex::new(HashMap::new()),
-        activations: Mutex::new(HashMap::new()),
-        mcp_sessions: Mutex::new(HashMap::new()),
-        mcp_heartbeat_serialization: Mutex::new(()),
-        worker_sessions: Mutex::new(HashMap::new()),
-        pending_directives: Mutex::new(HashMap::new()),
-        active_worker_generations: ActiveWorkerGenerations::load_for_test(
-            generation_directory.path().join("active-workers.json"),
-        )
-        .expect("generation state"),
-        worker_generation_publication: Mutex::new(()),
-        identity: daemon_identity,
-    });
-    let daemon_task = tokio::spawn({
-        let state = Arc::clone(&state);
-        async move {
-            axum::serve(daemon_listener, router(state))
-                .await
-                .expect("daemon serve");
-        }
-    });
-
-    let client = control_client().expect("control client");
-    let machine_identity = MachineIdentity::generate()
-        .expect("machine identity")
-        .identity;
-    let mcp_session_id = "control-plane-test-mcp";
-    let mcp_handshake = begin_handshake(
-        &client,
-        &daemon_origin,
-        ComponentRole::Mcp,
-        &machine_identity,
-        mcp_session_id,
-        Some(credential.digest()),
-    )
-    .await
-    .expect("MCP handshake");
-    let hint =
-        WorkerNetworkHint::new(Ipv4Addr::LOCALHOST.to_string(), None).expect("worker network hint");
-    let hint_proof = WorkerNetworkHintProof::sign(
-        hint,
-        &mcp_handshake.proof.transcript.daemon_target,
-        mcp_session_id,
-        &mcp_handshake.proof.transcript.challenge_id,
-        &machine_identity.fingerprint(),
-        &machine_identity,
-    )
-    .expect("worker network proof");
-    let mcp_registration: McpRegisterResponse = post_json(
-        &client,
-        &format!("{daemon_origin}{MCP_REGISTER_PATH}"),
-        &McpRegisterRequest {
-            proof: mcp_handshake.proof.clone(),
-            worker_network: hint_proof,
-        },
-        Some(&route_token),
-    )
-    .await
-    .expect("MCP registration");
-    mcp_handshake
-        .authenticate_daemon(&mcp_registration.daemon_proof)
-        .expect("daemon MCP proof");
-    let bootstrap = WorkerBootstrap::from_directive(mcp_registration.directive.clone())
-        .expect("launch directive");
-
-    let worker_listener = TcpListener::bind("127.0.0.1:0").await.expect("worker bind");
-    let worker_address = worker_listener.local_addr().expect("worker address");
-    let worker_endpoint = format!("http://{worker_address}");
-    let worker_id = "test-worker";
-    let worker_handshake = begin_handshake(
-        &client,
-        &daemon_origin,
-        ComponentRole::Worker,
-        &machine_identity,
-        worker_id,
-        None,
-    )
-    .await
-    .expect("worker handshake");
-    let worker_registration: WorkerRegisterResponse = post_json(
-        &client,
-        &format!("{daemon_origin}{WORKER_REGISTER_PATH}"),
-        &WorkerRegisterRequest {
-            proof: worker_handshake.proof.clone(),
-            worker_id: worker_id.into(),
-            endpoint: worker_endpoint,
-            activation_id: bootstrap.activation_id,
-            activation_token: bootstrap.activation_token,
-            tls_root_certificate: None,
-        },
-        None,
-    )
-    .await
-    .expect("worker registration");
-    worker_handshake
-        .authenticate_daemon(&worker_registration.daemon_proof)
-        .expect("daemon worker proof");
-
-    let upstream_listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("provider bind");
-    let upstream_address = upstream_listener.local_addr().expect("provider address");
-    let upstream_task = tokio::spawn(async move {
-        axum::serve(
-            upstream_listener,
-            Router::new().route(
-                "/v1/responses",
-                post(|| async {
-                    Response::builder()
-                        .status(StatusCode::CREATED)
-                        .header("x-worker-provider", "reached")
-                        .body(Body::from("worker provider bytes"))
-                        .expect("provider response")
-                }),
-            ),
-        )
-        .await
-        .expect("serve provider");
-    });
-    let worker_config = GatewayConfig {
-        openai_base_url: format!("http://{upstream_address}"),
-        ..GatewayConfig::default()
-    };
-    let (worker_router, worker_handle) = test_router_with_control_tokens(
-        worker_config,
-        pooled_client().expect("worker upstream client"),
-        worker_registration.data_token.expose().as_bytes(),
-        worker_registration.session_token.expose().as_bytes(),
-    );
-    let worker_task = tokio::spawn(async move {
-        axum::serve(worker_listener, worker_router)
-            .await
-            .expect("worker serve");
-    });
-
-    let ready = SessionRequest::new(
-        worker_id.into(),
-        worker_registration.session_token.clone(),
-        1,
-        WorkerReadyPayload {
-            worker_id: worker_id.into(),
-        },
-    )
-    .expect("ready request");
-    let response = client
-        .post(format!("{daemon_origin}{WORKER_READY_PATH}"))
-        .json(&ready)
-        .send()
-        .await
-        .expect("ready response");
-    assert_eq!(response.status(), StatusCode::NO_CONTENT);
-    assert!(state.registry.resolve_target(&credential.digest()).is_ok());
-
-    let public_response = router(Arc::clone(&state))
-        .oneshot(
-            Request::post("/v1/responses")
-                .header(CLIENT_TOKEN_HEADER, &route_token)
-                .body(Body::from(r#"{"model":"test","stream":true}"#))
-                .expect("public worker request"),
-        )
-        .await
-        .expect("public worker response");
-    assert_eq!(public_response.status(), StatusCode::CREATED);
-    assert_eq!(public_response.headers()["x-worker-provider"], "reached");
-    assert_eq!(
-        public_response
-            .into_body()
-            .collect()
-            .await
-            .expect("public worker body")
-            .to_bytes(),
-        "worker provider bytes"
-    );
-
-    let worker_heartbeat = SessionRequest::new(
-        worker_id.into(),
-        worker_registration.session_token,
-        2,
-        WorkerHeartbeatPayload {
-            worker_id: worker_id.into(),
-        },
-    )
-    .expect("worker heartbeat");
-    let response = client
-        .post(format!("{daemon_origin}{WORKER_HEARTBEAT_PATH}"))
-        .json(&worker_heartbeat)
-        .send()
-        .await
-        .expect("worker heartbeat response");
-    assert_eq!(response.status(), StatusCode::NO_CONTENT);
-
-    lock(&state.worker_sessions).remove(worker_id);
-    let (recovery_data, recovery_session, _generation_grant) =
-        crate::daemon::worker::test_recover_control_session(
-            &daemon_origin,
-            &machine_identity,
-            worker_id,
-            &format!("http://{worker_address}"),
-            worker_registration.generation_grant,
-        )
-        .await
-        .expect("worker recovery registration");
-    worker_handle.stage_recovery_tokens(recovery_data.as_bytes(), recovery_session.as_bytes());
-    let recovery_ready = SessionRequest::new(
-        worker_id.into(),
-        SensitiveString::new(recovery_session).expect("recovery session token"),
-        1,
-        WorkerReadyPayload {
-            worker_id: worker_id.into(),
-        },
-    )
-    .expect("recovery ready request");
-    let response = client
-        .post(format!("{daemon_origin}{WORKER_READY_PATH}"))
-        .json(&recovery_ready)
-        .send()
-        .await
-        .expect("recovery ready response");
-    assert_eq!(response.status(), StatusCode::NO_CONTENT);
-
-    let mcp_heartbeat = SessionRequest::new(
-        mcp_session_id.into(),
-        mcp_registration.session_token.clone(),
-        1,
-        EmptyPayload::default(),
-    )
-    .expect("MCP heartbeat");
-    let heartbeat: McpHeartbeatResponse = post_json(
-        &client,
-        &format!("{daemon_origin}{MCP_HEARTBEAT_PATH}"),
-        &mcp_heartbeat,
-        None,
-    )
-    .await
-    .expect("MCP heartbeat response");
-    assert!(matches!(
-        heartbeat.directive,
-        Some(BrokerDirective::ReuseWorker { .. })
-    ));
-
-    let release = SessionRequest::new(
-        mcp_session_id.into(),
-        mcp_registration.session_token,
-        2,
-        EmptyPayload::default(),
-    )
-    .expect("MCP release");
-    let response = client
-        .post(format!("{daemon_origin}{MCP_RELEASE_PATH}"))
-        .json(&release)
-        .send()
-        .await
-        .expect("MCP release response");
-    assert_eq!(response.status(), StatusCode::NO_CONTENT);
-
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while !worker_handle.is_draining() {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("daemon sent authenticated drain request");
-    worker_task.abort();
-    upstream_task.abort();
-    daemon_task.abort();
+fn router(state: Arc<DaemonState>) -> Router {
+    super::router(state)
+        .layer(axum::Extension(ConnectInfo(
+            "127.0.0.1:1".parse::<SocketAddr>().unwrap(),
+        )))
+        .layer(axum::Extension(socket::LocalAddress(
+            "127.0.0.1:2".parse().unwrap(),
+        )))
 }
