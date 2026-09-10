@@ -116,8 +116,14 @@ fn resolved_config_redacts_secrets_without_hiding_its_structure() {
                 "opentelemetry": {
                     "endpoints": [{
                         "endpoint": "https://user:secret@collector.example/v1/traces?token=secret#fragment",
+                        "Collector_URL": "https://user:secret@collector.example/v1/logs?token=secret#fragment",
                         "headers": {"authorization": "Bearer secret"},
-                        "header_env": {"x-api-key": "OTEL_API_KEY"}
+                        "header_env": {"x-api-key": "OTEL_API_KEY"},
+                        "credentials": {
+                            "username": "collector",
+                            "password": "secret",
+                            "scopes": ["traces", {"name": "logs"}]
+                        }
                     }]
                 },
                 "nested": {"api_token": "secret"}
@@ -134,8 +140,14 @@ fn resolved_config_redacts_secrets_without_hiding_its_structure() {
                     "opentelemetry": {
                         "endpoints": [{
                             "endpoint": "https://collector.example/v1/traces",
+                            "Collector_URL": "https://collector.example/v1/logs",
                             "headers": {"authorization": "[REDACTED]"},
-                            "header_env": {"x-api-key": "OTEL_API_KEY"}
+                            "header_env": {"x-api-key": "OTEL_API_KEY"},
+                            "credentials": {
+                                "username": "[REDACTED]",
+                                "password": "[REDACTED]",
+                                "scopes": ["[REDACTED]", {"name": "[REDACTED]"}]
+                            }
                         }]
                     },
                     "nested": {"api_token": "[REDACTED]"}

@@ -392,10 +392,10 @@ fn sanitize_resolved_config(mut config: Json) -> Json {
 
 fn redact_config_value(value: &mut Json, field_name: Option<&str>) {
     if field_name.is_some_and(is_sensitive_field_name) {
-        *value = Json::String("[REDACTED]".to_string());
+        redact_sensitive_value(value);
         return;
     }
-    if field_name.is_some_and(|name| matches!(name, "endpoint" | "url")) {
+    if field_name.is_some_and(is_url_field_name) {
         if let Some(endpoint) = value.as_str() {
             *value = Json::String(diagnostic_endpoint(endpoint));
         }
@@ -405,7 +405,7 @@ fn redact_config_value(value: &mut Json, field_name: Option<&str>) {
         Json::Object(values) => {
             if field_name == Some("headers") {
                 for value in values.values_mut() {
-                    *value = Json::String("[REDACTED]".to_string());
+                    redact_sensitive_value(value);
                 }
             } else {
                 for (name, value) in values {
@@ -422,6 +422,22 @@ fn redact_config_value(value: &mut Json, field_name: Option<&str>) {
     }
 }
 
+fn redact_sensitive_value(value: &mut Json) {
+    match value {
+        Json::Object(values) => {
+            for value in values.values_mut() {
+                redact_sensitive_value(value);
+            }
+        }
+        Json::Array(values) => {
+            for value in values {
+                redact_sensitive_value(value);
+            }
+        }
+        _ => *value = Json::String("[REDACTED]".to_string()),
+    }
+}
+
 fn is_sensitive_field_name(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
     matches!(
@@ -431,6 +447,18 @@ fn is_sensitive_field_name(name: &str) -> bool {
         || name.contains("secret")
         || name.contains("token")
         || name.contains("password")
+}
+
+fn is_url_field_name(name: &str) -> bool {
+    let normalized = name
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    normalized == "url"
+        || normalized == "endpoint"
+        || normalized.ends_with("url")
+        || normalized.ends_with("endpoint")
 }
 
 fn diagnostic_endpoint(endpoint: &str) -> String {
