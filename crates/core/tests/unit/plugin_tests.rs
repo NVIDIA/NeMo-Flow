@@ -2927,6 +2927,26 @@ fn test_programmatic_observability_destinations_concatenate_with_discovered_file
 }
 
 #[test]
+fn test_resolved_plugin_config_reports_every_contributing_file() {
+    let user = PathBuf::from("user/plugins.toml");
+    let system = PathBuf::from("system/plugins.toml");
+    let resolved = resolve_plugin_config_documents(
+        PluginConfig::default(),
+        None,
+        vec![
+            (user.clone(), json!({"version": 1})),
+            (system.clone(), json!({"version": 1})),
+        ],
+    )
+    .unwrap();
+
+    assert_eq!(
+        resolved.config_paths,
+        vec![user.display().to_string(), system.display().to_string(),]
+    );
+}
+
+#[test]
 fn test_no_inherited_configuration_warning_without_discovered_files() {
     let discovered = resolve_discovered_plugin_config(Vec::new()).unwrap();
     let resolved = resolve_programmatic_plugin_config(discovered, PluginConfig::default()).unwrap();

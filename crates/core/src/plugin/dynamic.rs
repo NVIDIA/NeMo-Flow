@@ -36,12 +36,12 @@ mod trust;
 mod worker;
 
 pub use bounded::*;
-pub(crate) use configuration::resolve_plugin_host_config;
 pub use configuration::{
     DynamicPluginValidationReport, PluginHostReport, validate, validate_exact,
 };
 #[cfg(test)]
 pub(crate) use configuration::{PluginHostValidationRequest, PluginHostValidationTarget};
+pub(crate) use configuration::{resolve_plugin_host_config, sanitized_plugin_config};
 pub use host::*;
 pub use manifest::*;
 pub use native::*;
