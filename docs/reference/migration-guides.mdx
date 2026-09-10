@@ -18,10 +18,11 @@ argument, and continuation parameters. Migrate Rust, Python, and Go callbacks
 from `(tool_name, args, next)` to `(context, next)`. Migrate Node.js and public
 C callbacks from their argument-only shape to the context shape.
 
-Forward `context.args` to the continuation and read the tool name and optional
-provider-issued identifier from the context. Node.js exposes these fields as
-`toolName`, `args`, and `toolCallId`; the public C callback receives
-`tool_name`, `args`, and `tool_call_id` in `context_json`.
+Forward the context arguments to the continuation using the binding's context
+API. Read the tool name and optional provider-issued identifier from the
+context. Node.js exposes these fields as `toolName`, `args`, and `toolCallId`;
+the public C callback receives `tool_name`, `args`, and `tool_call_id` in
+`context_json`.
 
 Native and worker plugins that register this context-aware surface must declare
 `compat.relay = ">=0.9,<1.0"` or another range that excludes Relay 0.8. Native

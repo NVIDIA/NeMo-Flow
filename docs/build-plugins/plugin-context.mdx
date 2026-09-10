@@ -154,8 +154,7 @@ the intercept, and the managed `tool_call_id`, which a plugin needs when it
 completes execution itself and must still associate its result with the
 originating tool call. See
 [Tool Execution Intercept Outcomes](/reference/tool-execution-intercept-outcomes)
-for the full field list. When upgrading from Relay 0.8, follow the
-[Relay 0.9 migration guide](/reference/migration-guides#tool-execution-intercept-callbacks-receive-context).
+for the full field list.
 
 The application receives the `ToolExecutionResult`, including its optional annotation,
 from the tool path and provider JSON from the LLM paths. Relay consumes pending marks and

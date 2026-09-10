@@ -41,6 +41,17 @@ mode. See the [0.9 migration guidance](/reference/migration-guides).
 
 </Warning>
 
+<Warning title="Breaking change: tool execution intercept callbacks">
+
+Tool execution intercept callbacks now receive `(ToolExecutionContext, next)`.
+`ToolExecutionContext` contains the tool name, incoming arguments, and optional
+`tool_call_id`.
+
+Update existing callbacks and declare a Relay 0.9-compatible plugin range before
+upgrading. See the [0.9 migration guidance](/reference/migration-guides).
+
+</Warning>
+
 ### Compatibility changes
 
 - Python plugin-host activation now raises `ValueError` for invalid static
