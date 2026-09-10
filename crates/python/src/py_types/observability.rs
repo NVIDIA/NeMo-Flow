@@ -497,8 +497,6 @@ pub struct PyOpenTelemetryConfig {
     pub(crate) promote_metadata_prefixes: Vec<String>,
     #[pyo3(get, set)]
     pub(crate) promote_resource_metadata_prefixes: Vec<String>,
-    #[pyo3(get, set)]
-    pub(crate) gen_ai_capture_tool_content: bool,
 }
 
 impl PyOpenTelemetryConfig {
@@ -558,7 +556,6 @@ impl PyOpenTelemetryConfig {
         )
         .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
         Ok(config
-            .with_gen_ai_capture_tool_content(self.gen_ai_capture_tool_content)
             .with_mark_projection(mark_projection)
             .with_mark_exclude_names(self.mark_exclude_names.clone())
             .with_attribute_mappings(self.attribute_mappings.clone())
@@ -591,7 +588,6 @@ impl PyOpenTelemetryConfig {
             attribute_mappings: Vec::new(),
             promote_metadata_prefixes: Vec::new(),
             promote_resource_metadata_prefixes: Vec::new(),
-            gen_ai_capture_tool_content: false,
         }
     }
 

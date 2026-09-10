@@ -66,7 +66,6 @@ type ObservabilityOpenTelemetryMetricConfig struct {
 
 // ObservabilityOpenTelemetryEndpointConfig configures one typed OTLP destination.
 type ObservabilityOpenTelemetryEndpointConfig struct {
-	GenAiCaptureToolContent       bool                   `json:"gen_ai_capture_tool_content,omitempty"`
 	Type                          OpenTelemetryType      `json:"type"`
 	Endpoint                      string                 `json:"endpoint"`
 	MarkProjection                string                 `json:"mark_projection,omitempty"`

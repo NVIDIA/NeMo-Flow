@@ -74,7 +74,6 @@ export interface OpenTelemetryEndpointConfig {
   attribute_mappings?: Array<{ key: string; alias: string }>;
   promote_metadata_prefixes?: string[];
   promote_resource_metadata_prefixes?: string[];
-  gen_ai_capture_tool_content?: boolean;
   transport?: 'http_binary' | 'grpc';
   headers?: Record<string, string>;
   header_env?: Record<string, string>;

@@ -286,7 +286,6 @@ extern int32_t nemo_relay_otel_subscriber_create_with_projection_options(const c
 extern int32_t nemo_relay_otel_subscriber_create_with_projection_options_v2(const char*, const char*, const char*, const char*, const char*, const char*, const char*, const char*, const char*, uint64_t, const char*, const char*, const char*, const char*, void**);
 extern int32_t nemo_relay_otel_subscriber_create_with_projection_options_v3(const char*, const char*, const char*, const char*, const char*, const char*, const char*, const char*, const char*, uint64_t, const char*, const char*, const char*, const char*, uint64_t, void**);
 extern int32_t nemo_relay_otel_subscriber_create_with_projection_options_v4(const char*, const char*, const char*, const char*, const char*, const char*, const char*, const char*, const char*, const char*, uint64_t, const char*, const char*, const char*, const char*, uint64_t, void**);
-extern int32_t nemo_relay_otel_subscriber_create_with_projection_options_v5(const char*, const char*, const char*, const char*, const char*, const char*, const char*, const char*, const char*, const char*, uint64_t, const char*, const char*, const char*, const char*, uint64_t, bool, void**);
 extern int32_t nemo_relay_otel_subscriber_register(const void*, const char*);
 extern int32_t nemo_relay_otel_subscriber_deregister(const char*);
 extern int32_t nemo_relay_otel_subscriber_force_flush(const void*);
@@ -2404,12 +2403,10 @@ const (
 // Create it with [NewOpenTelemetryConfig], then mutate fields as needed before
 // passing it to [NewOpenTelemetrySubscriber].
 type OpenTelemetryConfig struct {
-	// GenAiCaptureToolContent opts into sanitized GenAI tool payloads and definitions.
-	GenAiCaptureToolContent bool
-	Type                    OpenTelemetryType
-	Transport               OpenTelemetryTransport
-	Endpoint                string
-	Headers                 map[string]string
+	Type      OpenTelemetryType
+	Transport OpenTelemetryTransport
+	Endpoint  string
+	Headers   map[string]string
 	// HeaderEnv maps outbound header names to environment variables resolved at activation.
 	HeaderEnv               map[string]string
 	ResourceAttributes      map[string]string
@@ -2598,7 +2595,7 @@ func NewOpenTelemetrySubscriber(config OpenTelemetryConfig) (*OpenTelemetrySubsc
 	defer C.free(unsafe.Pointer(cPromoteMetadataPrefixesJSON))
 
 	var ptr unsafe.Pointer
-	status := C.nemo_relay_otel_subscriber_create_with_projection_options_v5(
+	status := C.nemo_relay_otel_subscriber_create_with_projection_options_v4(
 		cType,
 		cTransport,
 		cEndpoint,
@@ -2615,7 +2612,6 @@ func NewOpenTelemetrySubscriber(config OpenTelemetryConfig) (*OpenTelemetrySubsc
 		cAttributeMappingsJSON,
 		cPromoteMetadataPrefixesJSON,
 		C.uint64_t(*config.CompletedSpanContextTTL/time.Millisecond),
-		C.bool(config.GenAiCaptureToolContent),
 		&ptr,
 	)
 	if err := checkStatus(status); err != nil {

@@ -261,7 +261,6 @@ describe('OpenTelemetrySubscriber', () => {
     const subscriber = new OpenTelemetrySubscriber({
       type: 'gen_ai',
       endpoint: collector.endpoint,
-      genAiCaptureToolContent: true,
     });
 
     const name = uniqueId('node_gen_ai_e2e');

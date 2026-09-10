@@ -4049,6 +4049,23 @@ fn sanitized_trajectory_content_never_reaches_subscribers_or_exporters() {
     let atif_json = serde_json::to_string(&trajectory).unwrap();
     let otel_debug = format!("{:?}", otel_exporter.get_finished_spans().unwrap());
     let genai_debug = format!("{:?}", genai_exporter.get_finished_spans().unwrap());
+    let genai_spans = genai_exporter.get_finished_spans().unwrap();
+    let tool_span = genai_spans
+        .iter()
+        .find(|span| span.name == "execute_tool lookup")
+        .expect("sanitized tool span retains its identity");
+    for key in ["gen_ai.tool.call.arguments", "gen_ai.tool.call.result"] {
+        let value = tool_span
+            .attributes
+            .iter()
+            .find(|attribute| attribute.key.as_str() == key)
+            .expect("tool content is projected by default after sanitization");
+        assert_eq!(value.value.to_string(), "{}");
+    }
+    assert!(genai_spans.iter().any(|span| {
+        span.name == "invoke_agent hermes-agent"
+            && span.span_context.span_id() == tool_span.parent_span_id
+    }));
     let openinference_debug = format!("{:?}", openinference_exporter.get_finished_spans().unwrap());
     for (surface, output) in [
         ("subscriber", subscriber_json),

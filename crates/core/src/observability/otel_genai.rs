@@ -75,15 +75,7 @@ pub(super) fn span_kind(event: &Event) -> SpanKind {
     }
 }
 
-#[cfg(test)]
 pub(super) fn start_attributes(event: &Event) -> Vec<KeyValue> {
-    start_attributes_with_tool_content(event, false)
-}
-
-pub(super) fn start_attributes_with_tool_content(
-    event: &Event,
-    capture_tool_content: bool,
-) -> Vec<KeyValue> {
     if !has_gen_ai_semantics(event) {
         return Vec::new();
     }
@@ -102,15 +94,11 @@ pub(super) fn start_attributes_with_tool_content(
             push_provider_and_server_attributes(&mut attributes, event);
             push_conversation_attribute(&mut attributes, event);
             push_llm_request_attributes(&mut attributes, event);
-            if capture_tool_content {
-                push_tool_definitions(&mut attributes, event);
-            }
+            push_tool_definitions(&mut attributes, event);
         }
         Some(ScopeType::Tool) => {
             push_tool_attributes(&mut attributes, event);
-            if capture_tool_content {
-                push_tool_content(&mut attributes, "gen_ai.tool.call.arguments", event.input());
-            }
+            push_tool_content(&mut attributes, "gen_ai.tool.call.arguments", event.input());
         }
         Some(ScopeType::Retriever) => {
             push_provider_and_server_attributes(&mut attributes, event);
@@ -125,15 +113,7 @@ pub(super) fn start_attributes_with_tool_content(
     attributes
 }
 
-#[cfg(test)]
 pub(super) fn end_attributes(event: &Event) -> Vec<KeyValue> {
-    end_attributes_with_tool_content(event, false)
-}
-
-pub(super) fn end_attributes_with_tool_content(
-    event: &Event,
-    capture_tool_content: bool,
-) -> Vec<KeyValue> {
     let mut attributes = Vec::new();
     push_error_attributes(&mut attributes, event);
     match event.scope_type() {
@@ -143,7 +123,7 @@ pub(super) fn end_attributes_with_tool_content(
             // Correlation can become available only at completion. Never replace
             // the start name with an end-event label.
             push_tool_metadata(&mut attributes, event);
-            if capture_tool_content && !attributes.iter().any(|a| a.key.as_str() == "error.type") {
+            if !attributes.iter().any(|a| a.key.as_str() == "error.type") {
                 push_tool_content(&mut attributes, "gen_ai.tool.call.result", event.output());
             }
         }

@@ -334,7 +334,6 @@ func TestOpenTelemetrySubscriberExportsGenAIAgentProjection(t *testing.T) {
 	defer server.Close()
 
 	config := NewOpenTelemetryConfig(OpenTelemetryTypeGenAI, server.URL+otelTestPath)
-	config.GenAiCaptureToolContent = true
 	subscriber, err := NewOpenTelemetrySubscriber(config)
 	if err != nil {
 		t.Fatalf(newOpenTelemetrySubscriberFailed, err)

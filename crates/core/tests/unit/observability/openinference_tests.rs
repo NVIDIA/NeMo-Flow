@@ -779,7 +779,6 @@ fn mapped_aliases_are_typed_and_cannot_replace_projected_span_fields() {
         crate::observability::OpenTelemetryType::OpenInference,
         crate::observability::otel::OpenTelemetrySubscriberOptions {
             mark_projection: MarkProjection::Tool,
-            gen_ai_capture_tool_content: false,
             mark_exclude_names: vec!["custom.mark".to_string()],
             attribute_mappings: vec![
                 crate::observability::OtlpAttributeMapping::new(

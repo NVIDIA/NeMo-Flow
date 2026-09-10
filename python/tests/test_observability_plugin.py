@@ -96,12 +96,6 @@ class _AtofCapture:
 
 
 class TestObservabilityConfigHelpers:
-    def test_gen_ai_tool_content_opt_in_serializes(self):
-        endpoint = OpenTelemetryEndpointConfig("gen_ai", "http://localhost:4318/v1/traces")
-        assert endpoint.gen_ai_capture_tool_content is False
-        endpoint.gen_ai_capture_tool_content = True
-        assert endpoint.to_dict()["gen_ai_capture_tool_content"] is True
-
     def test_opentelemetry_endpoint_preserves_existing_positional_arguments(self):
         endpoint = OpenTelemetryEndpointConfig(
             "full",
@@ -156,7 +150,6 @@ class TestObservabilityConfigHelpers:
             "attribute_mappings": [],
             "promote_metadata_prefixes": [],
             "promote_resource_metadata_prefixes": [],
-            "gen_ai_capture_tool_content": False,
             "transport": "http_binary",
             "service_name": "unknown_service",
             "instrumentation_scope": "opentelemetry",

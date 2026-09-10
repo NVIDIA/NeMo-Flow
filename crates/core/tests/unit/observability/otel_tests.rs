@@ -1877,7 +1877,6 @@ fn mapped_aliases_are_typed_and_cannot_replace_projected_span_fields() {
         "mapping-scope",
         OpenTelemetrySubscriberOptions {
             mark_projection: MarkProjection::Tool,
-            gen_ai_capture_tool_content: false,
             mark_exclude_names: vec!["custom.mark".to_string()],
             attribute_mappings: vec![
                 crate::observability::OtlpAttributeMapping::new(
@@ -2266,14 +2265,14 @@ fn gen_ai_projection_is_fixed_and_preserves_all_scope_parentage() {
         Some(reranker_uuid),
         "web-search",
         ScopeType::Tool,
-        Some(json!({"query": "must-not-export"})),
+        Some(json!({"query": "exported-tool-input"})),
     ));
     processor.process(&make_end_event(
         tool_uuid,
         Some(reranker_uuid),
         "web-search",
         ScopeType::Tool,
-        Some(json!({"result": "must-not-export"})),
+        Some(json!({"result": "exported-tool-result"})),
     ));
     processor.process(&make_end_event(
         reranker_uuid,
@@ -2444,6 +2443,7 @@ fn gen_ai_projection_emits_only_span_specific_attributes() {
             "search",
             [
                 "gen_ai.operation.name",
+                "gen_ai.tool.call.arguments",
                 "gen_ai.tool.call.id",
                 "gen_ai.tool.description",
                 "gen_ai.tool.name",
@@ -2521,10 +2521,8 @@ fn gen_ai_projection_emits_only_span_specific_attributes() {
 }
 
 #[test]
-fn gen_ai_tool_content_is_opt_in_and_object_shaped() {
-    use crate::observability::otel_genai::{
-        end_attributes_with_tool_content, start_attributes_with_tool_content,
-    };
+fn gen_ai_tool_content_is_captured_by_default_and_object_shaped() {
+    use crate::observability::otel_genai::{end_attributes, start_attributes};
     for (payload, expected) in [
         (
             json!({"query": "sanitized"}),
@@ -2550,28 +2548,20 @@ fn gen_ai_tool_content_is_opt_in_and_object_shaped() {
             Some(payload.clone()),
         );
         let mut end = make_end_event(start.uuid(), None, "search", ScopeType::Tool, Some(payload));
-        for enabled in [false, true] {
-            for (attrs, key) in [
-                (
-                    start_attributes_with_tool_content(&start, enabled),
-                    "gen_ai.tool.call.arguments",
-                ),
-                (
-                    end_attributes_with_tool_content(&end, enabled),
-                    "gen_ai.tool.call.result",
-                ),
-            ] {
-                let attrs = attr_map(&attrs);
-                let actual = attrs
-                    .get(key)
-                    .map(|value| serde_json::from_str::<Json>(value).unwrap());
-                assert_eq!(actual, if enabled { expected.clone() } else { None });
-            }
+        for (attrs, key) in [
+            (start_attributes(&start), "gen_ai.tool.call.arguments"),
+            (end_attributes(&end), "gen_ai.tool.call.result"),
+        ] {
+            let attrs = attr_map(&attrs);
+            let actual = attrs
+                .get(key)
+                .map(|value| serde_json::from_str::<Json>(value).unwrap());
+            assert_eq!(actual, expected.clone());
         }
         if let Event::Scope(scope) = &mut end {
             scope.base.metadata = Some(json!({"otel.status_code": "ERROR"}));
         }
-        let attrs = attr_map(&end_attributes_with_tool_content(&end, true));
+        let attrs = attr_map(&end_attributes(&end));
         assert!(attrs.contains_key("error.type"));
         assert!(!attrs.contains_key("gen_ai.tool.call.result"));
     }
@@ -2594,7 +2584,7 @@ fn gen_ai_tool_identity_ignores_payload_keys_and_blank_metadata() {
         attrs.get("gen_ai.tool.name").map(String::as_str),
         Some("search")
     );
-    assert_eq!(attrs.len(), 2);
+    assert_eq!(attrs.len(), 3);
     if let Event::Scope(scope) = &mut event {
         scope.base.metadata = Some(json!({
             "gen_ai.tool.name": " ", "gen_ai.tool.call.id": "", "tool_call_id": "call-1",
@@ -2626,44 +2616,39 @@ fn gen_ai_tool_identity_ignores_payload_keys_and_blank_metadata() {
 }
 
 #[test]
-fn gen_ai_tool_content_options_reach_the_subscriber() {
-    for enabled in [false, true] {
-        let (provider, exporter) = make_provider();
-        let subscriber = OpenTelemetrySubscriber::from_tracer_provider_with_type_and_options(
-            provider,
-            "tool-content",
-            OpenTelemetryType::GenAi,
-            OpenTelemetrySubscriberOptions {
-                gen_ai_capture_tool_content: enabled,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        let id = Uuid::now_v7();
-        let start = make_start_event(
-            id,
-            None,
-            "search",
-            ScopeType::Tool,
-            Some(json!({"q": "docs"})),
-        );
-        let end = make_end_event(
-            id,
-            None,
-            "search",
-            ScopeType::Tool,
-            Some(json!({"hits": []})),
-        );
-        (subscriber.inner.subscriber)(&start);
-        (subscriber.inner.subscriber)(&end);
-        subscriber.force_flush().unwrap();
-        let spans = exporter.get_finished_spans().unwrap();
-        assert_eq!(spans.len(), 1);
-        let attrs = attr_map(&spans[0].attributes);
-        assert_eq!(attrs.contains_key("gen_ai.tool.call.arguments"), enabled);
-        assert_eq!(attrs.contains_key("gen_ai.tool.call.result"), enabled);
-        subscriber.shutdown().unwrap();
-    }
+fn gen_ai_tool_content_is_exported_with_default_options() {
+    let (provider, exporter) = make_provider();
+    let subscriber = OpenTelemetrySubscriber::from_tracer_provider_with_type_and_options(
+        provider,
+        "tool-content",
+        OpenTelemetryType::GenAi,
+        OpenTelemetrySubscriberOptions::default(),
+    )
+    .unwrap();
+    let id = Uuid::now_v7();
+    let start = make_start_event(
+        id,
+        None,
+        "search",
+        ScopeType::Tool,
+        Some(json!({"q": "docs"})),
+    );
+    let end = make_end_event(
+        id,
+        None,
+        "search",
+        ScopeType::Tool,
+        Some(json!({"hits": []})),
+    );
+    (subscriber.inner.subscriber)(&start);
+    (subscriber.inner.subscriber)(&end);
+    subscriber.force_flush().unwrap();
+    let spans = exporter.get_finished_spans().unwrap();
+    assert_eq!(spans.len(), 1);
+    let attrs = attr_map(&spans[0].attributes);
+    assert!(attrs.contains_key("gen_ai.tool.call.arguments"));
+    assert!(attrs.contains_key("gen_ai.tool.call.result"));
+    subscriber.shutdown().unwrap();
 }
 
 #[test]
@@ -2696,9 +2681,7 @@ fn gen_ai_tool_definitions_use_minimal_standard_schema() {
                 .build(),
         ),
     );
-    let enabled = attr_map(
-        &crate::observability::otel_genai::start_attributes_with_tool_content(&event, true),
-    );
+    let enabled = attr_map(&crate::observability::otel_genai::start_attributes(&event));
     let definitions: Json =
         serde_json::from_str(enabled.get("gen_ai.tool.definitions").unwrap()).unwrap();
     assert_eq!(
@@ -2707,10 +2690,6 @@ fn gen_ai_tool_definitions_use_minimal_standard_schema() {
             {"type": "function", "name": "search"},
             {"type": "web_search_20250305", "name": "web_search"}
         ])
-    );
-    assert!(
-        !attr_map(&crate::observability::otel_genai::start_attributes(&event))
-            .contains_key("gen_ai.tool.definitions")
     );
 }
 

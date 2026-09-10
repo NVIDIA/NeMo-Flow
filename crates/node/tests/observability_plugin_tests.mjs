@@ -19,15 +19,6 @@ function tempDir(prefix) {
 }
 
 describe('observability plugin helpers', () => {
-  it('preserves explicit GenAI tool content opt-in', () => {
-    const endpoint = { type: 'gen_ai', endpoint: 'http://localhost:4318/v1/traces' };
-    assert.equal(observability.openTelemetryEndpoint(endpoint).gen_ai_capture_tool_content, false);
-    assert.equal(
-      observability.openTelemetryEndpoint({ ...endpoint, gen_ai_capture_tool_content: true })
-        .gen_ai_capture_tool_content,
-      true,
-    );
-  });
   it('builds defaults and plugin component shape', () => {
     assert.deepEqual(observability.defaultConfig(), { version: 4 });
     assert.equal(
@@ -63,7 +54,6 @@ describe('observability plugin helpers', () => {
         resource_attributes: {},
         promote_metadata_prefixes: [],
         promote_resource_metadata_prefixes: [],
-        gen_ai_capture_tool_content: false,
         service_name: 'unknown_service',
         instrumentation_scope: 'opentelemetry',
         timeout_millis: 3000,
