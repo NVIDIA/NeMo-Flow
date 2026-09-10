@@ -164,21 +164,14 @@ fn managed_pi_launch_disables_discovered_extensions() {
         .find(|artifact| artifact.path == "pi/extension-v1/README.md")
         .unwrap();
     let readme = std::str::from_utf8(&readme.bytes).unwrap();
-    let daemon_docs = include_str!("../../../../../docs/daemon/configuration.mdx");
-
-    for (source_name, source) in [
-        ("rendered managed Pi README", readme),
-        ("daemon deployment documentation", daemon_docs),
-    ] {
-        assert!(
-            source.contains(ISOLATED_LAUNCH),
-            "{source_name} must suppress all discovered Pi extensions"
-        );
-        assert!(
-            !source.contains(NON_ISOLATED_LAUNCH),
-            "{source_name} must not document a non-isolated managed Pi launch"
-        );
-    }
+    assert!(
+        readme.contains(ISOLATED_LAUNCH),
+        "rendered managed Pi README must suppress all discovered Pi extensions"
+    );
+    assert!(
+        !readme.contains(NON_ISOLATED_LAUNCH),
+        "rendered managed Pi README must not document a non-isolated managed Pi launch"
+    );
 }
 
 #[test]

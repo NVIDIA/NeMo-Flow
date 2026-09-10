@@ -67,9 +67,13 @@ impl StreamingSourceVisitor {
         self.function.as_deref().unwrap_or("<module>")
     }
 
-    fn allows_request_body_decode(&self) -> bool {
-        self.file == "daemon/worker/managed.rs"
-            && matches!(self.function_name(), "handle_hook_inner" | "read")
+    fn allows_bounded_body_decode(&self) -> bool {
+        (self.file == "daemon/worker/managed.rs"
+            && matches!(self.function_name(), "handle_hook_inner" | "read"))
+            // WebSocket control replies are capped at MAX_CONTROL_BODY_BYTES and never
+            // carry provider bodies. Keep forwarding functions subject to this rule.
+            || (self.file == "daemon/broker/server/socket.rs"
+                && matches!(self.function_name(), "dispatch" | "run"))
     }
 
     fn allows_sse_observation(&self) -> bool {
@@ -151,7 +155,7 @@ impl<'ast> Visit<'ast> for StreamingSourceVisitor {
                 .map(|segment| segment.ident.to_string())
                 .collect::<Vec<_>>();
             let last = segments.last().map(String::as_str).unwrap_or_default();
-            if last == "to_bytes" && !self.allows_request_body_decode() {
+            if last == "to_bytes" && !self.allows_bounded_body_decode() {
                 self.reject("to_bytes() response aggregation");
             }
             if last == "from_stream" {

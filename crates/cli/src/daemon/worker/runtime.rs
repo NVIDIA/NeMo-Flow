@@ -13,7 +13,7 @@ use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::IntoResponse;
-use axum::routing::{get, post};
+use axum::routing::get;
 use axum::serve::ListenerExt;
 use axum::{Json, Router};
 use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -24,9 +24,8 @@ use tokio::net::TcpListener;
 use tokio::sync::{Notify, Semaphore};
 
 use super::super::common::control::{
-    CLIENT_TOKEN_HEADER, DRAIN_LIFETIME_MS, MAX_CONTROL_BODY_BYTES, RECOVERY_LIFETIME_MS,
-    SessionRequest, WORKER_DRAIN_PATH, WORKER_PROBE_PATH, WORKER_ROUTE_FAILURE_HEADER,
-    WORKER_TOKEN_HEADER, WorkerDrainRequest, now_unix_ms,
+    CLIENT_TOKEN_HEADER, DRAIN_LIFETIME_MS, MAX_CONTROL_BODY_BYTES, WORKER_PROBE_PATH,
+    WORKER_ROUTE_FAILURE_HEADER, WORKER_TOKEN_HEADER, WorkerDrainRequest, now_unix_ms,
 };
 use super::super::common::identity::{MachineIdentity, TokenDigest};
 use super::super::common::routes::{ProviderRoute, PublicRoute};
@@ -36,15 +35,15 @@ use super::super::common::transport::{
 };
 use super::control::{self, Registration};
 use crate::configuration::GatewayConfig;
+#[cfg(test)]
+use crate::daemon::common::control::SessionRequest;
 use crate::error::CliError;
 use crate::plugins::lifecycle::ActiveDynamicPluginComponent;
 
 use super::managed::ManagedRuntime;
 
 const RESPONSE_HEAD_TIMEOUT: Duration = Duration::from_secs(60);
-const CONTROL_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
 const INITIAL_READY_TIMEOUT: Duration = Duration::from_secs(15);
-const RECOVERY_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_CONCURRENT_TLS_HANDSHAKES: usize = 256;
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -182,6 +181,7 @@ impl WorkerState {
         }
     }
 
+    #[cfg(test)]
     fn authenticate_control(&self, request: &SessionRequest<WorkerDrainRequest>) -> bool {
         if request.payload.worker_id != self.worker_id
             || request.session_id != self.worker_id
@@ -361,7 +361,7 @@ pub(super) async fn serve(listener: TcpListener, options: RuntimeOptions) -> Res
         endpoint = endpoint.as_str();
         "Daemon worker is ready"
     );
-    let heartbeat = tokio::spawn(monitor_control(
+    let control_task = tokio::spawn(monitor_control(
         Arc::clone(&state),
         daemon_origin,
         identity,
@@ -380,7 +380,7 @@ pub(super) async fn serve(listener: TcpListener, options: RuntimeOptions) -> Res
         _ = state.wait_until_stopped() => Ok(()),
     };
     state.request_exit();
-    heartbeat.abort();
+    control_task.abort();
     signal.abort();
     if let Some(managed) = state.managed.as_ref() {
         managed.close().await?;
@@ -436,7 +436,6 @@ async fn serve_tls(
 
 fn router(state: Arc<WorkerState>) -> Router {
     let control = Router::new()
-        .route(WORKER_DRAIN_PATH, post(drain))
         .route(WORKER_PROBE_PATH, get(readiness_probe))
         .layer(DefaultBodyLimit::max(MAX_CONTROL_BODY_BYTES));
     Router::new()
@@ -467,20 +466,6 @@ impl TestWorkerHandle {
 
     pub(crate) fn in_flight(&self) -> usize {
         self.state.in_flight.load(Ordering::Acquire)
-    }
-
-    pub(crate) fn is_draining(&self) -> bool {
-        self.state.draining.load(Ordering::Acquire)
-    }
-
-    pub(crate) fn stage_recovery_tokens(&self, data_token: &[u8], control_token: &[u8]) {
-        let mut auth = write_lock(&self.state.auth);
-        let data = TokenDigest::from_token(data_token);
-        auth.pending_data = Some(data);
-        auth.readiness_data = Some(data);
-        auth.control = TokenDigest::from_token(control_token);
-        auth.last_control_sequence = 0;
-        auth.last_control_request_id.clear();
     }
 }
 
@@ -554,6 +539,7 @@ async fn authenticate_daemon_request(
     next.run(request).await
 }
 
+#[cfg(test)]
 async fn drain(
     State(state): State<Arc<WorkerState>>,
     Json(request): Json<SessionRequest<WorkerDrainRequest>>,
@@ -754,96 +740,74 @@ async fn monitor_control(
     mut registration: Registration,
 ) {
     loop {
-        tokio::time::sleep(registration.heartbeat_interval()).await;
-        if state.draining.load(Ordering::Acquire) || state.exiting.load(Ordering::Acquire) {
+        match registration.next().await {
+            Ok(crate::daemon::common::socket::Event::Drain {
+                request_id,
+                request,
+            }) => {
+                // The daemon is authenticated by the socket handshake. Retain the first deadline
+                // so duplicate delivery can never extend a drain.
+                if !state.draining.load(Ordering::Acquire) {
+                    state.begin_drain(drain_timeout_ms(&request));
+                }
+                if registration.acknowledge(request_id).await.is_ok() {
+                    continue;
+                }
+            }
+            Ok(_) => {
+                state.control_lost();
+            }
+            Err(_) => {
+                state.control_lost();
+            }
+        }
+        if state.exiting.load(Ordering::Acquire) {
             return;
         }
-        if heartbeat_attempt(&mut registration, &daemon_origin, &worker_id).await {
-            continue;
-        }
-        state.control_lost();
-        log::error!(
-            target: "nemo_relay.daemon.worker",
-            event = "worker_control_lost",
-            worker_id = worker_id.as_str();
-            "Worker lost its authenticated daemon control relationship"
-        );
-        let recovery_deadline =
-            tokio::time::Instant::now() + Duration::from_millis(RECOVERY_LIFETIME_MS);
-        loop {
-            if state.draining.load(Ordering::Acquire) || state.exiting.load(Ordering::Acquire) {
-                return;
-            }
-            if heartbeat_attempt(&mut registration, &daemon_origin, &worker_id).await {
-                state.control_restored(&registration);
-                log::info!(
-                    target: "nemo_relay.daemon.worker",
-                    event = "worker_control_restored",
-                    worker_id = worker_id.as_str();
-                    "Worker restored its daemon control relationship"
-                );
-                break;
-            }
-            let recovered = tokio::time::timeout(
-                CONTROL_ATTEMPT_TIMEOUT,
-                control::recover(
-                    &daemon_origin,
-                    &identity,
-                    &worker_id,
-                    &endpoint,
-                    worker_tls_root.as_deref(),
-                    registration.generation_grant().clone(),
-                ),
+        log::warn!(target: "nemo_relay.daemon.worker", event = "worker_control_lost", worker_id = state.worker_id.as_str(); "Worker control disconnected; attempting recovery");
+        let deadline = registration.recovery_deadline().await;
+        let recovered = crate::daemon::common::socket::retry_until(deadline, || async {
+            let mut next = control::recover(
+                &daemon_origin,
+                &identity,
+                &worker_id,
+                &endpoint,
+                worker_tls_root.as_deref(),
+                registration.generation_grant().clone(),
             )
-            .await;
-            if let Ok(Ok(mut new_registration)) = recovered {
-                state.stage_recovery_data_token(&new_registration);
-                let ready = tokio::time::timeout(
-                    CONTROL_ATTEMPT_TIMEOUT,
-                    new_registration.ready(&daemon_origin, &worker_id),
-                )
-                .await;
-                if matches!(ready, Ok(Ok(()))) {
-                    registration = new_registration;
-                    state.control_restored(&registration);
-                    log::info!(
-                        target: "nemo_relay.daemon.worker",
-                        event = "worker_reregistered",
-                        worker_id = worker_id.as_str();
-                        "Worker re-registered with its daemon"
-                    );
-                    break;
+            .await?;
+            if let Some(crate::daemon::common::socket::Event::Drain {
+                request_id,
+                request,
+            }) = next.pending_event().await
+            {
+                if !state.draining.load(Ordering::Acquire) {
+                    state.begin_drain(drain_timeout_ms(&request));
                 }
-                state.discard_recovery_data_token();
+                next.acknowledge(request_id).await?;
             }
-            if tokio::time::Instant::now() >= recovery_deadline {
-                log::error!(
-                    target: "nemo_relay.daemon.worker",
-                    event = "worker_recovery_expired",
-                    worker_id = worker_id.as_str();
-                    "Worker could not restore daemon control before the recovery deadline"
-                );
+            if !state.draining.load(Ordering::Acquire) {
+                state.stage_recovery_data_token(&next);
+                if let Err(error) = next.ready(&daemon_origin, &worker_id).await {
+                    state.discard_recovery_data_token();
+                    return Err(error);
+                }
+                state.control_restored(&next);
+            }
+            Ok(next)
+        })
+        .await;
+        match recovered {
+            Ok(next) => {
+                registration = next;
+                log::info!(target: "nemo_relay.daemon.worker", event = "worker_control_restored", worker_id = state.worker_id.as_str(); "Worker control restored");
+            }
+            Err(_) => {
                 state.request_exit();
                 return;
             }
-            tokio::time::sleep(RECOVERY_RETRY_INTERVAL).await;
         }
     }
-}
-
-async fn heartbeat_attempt(
-    registration: &mut Registration,
-    daemon_origin: &str,
-    worker_id: &str,
-) -> bool {
-    matches!(
-        tokio::time::timeout(
-            CONTROL_ATTEMPT_TIMEOUT,
-            registration.heartbeat(daemon_origin, worker_id),
-        )
-        .await,
-        Ok(Ok(()))
-    )
 }
 
 fn message(status: StatusCode, text: &str) -> Response<Body> {

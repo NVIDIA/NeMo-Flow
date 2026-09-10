@@ -5,7 +5,13 @@ use super::*;
 
 #[test]
 fn daemon_target_requires_tls_away_from_loopback() {
-    assert!(daemon_url("http://127.0.0.1:47632").is_ok());
+    for origin in [
+        "http://127.0.0.1:47632",
+        "http://[::1]:47632",
+        "http://localhost:47632",
+    ] {
+        assert!(daemon_url(origin).is_ok(), "{origin}");
+    }
     assert!(daemon_url("https://relay.example.com:443").is_ok());
     assert!(daemon_url("http://relay.example.com:47632").is_err());
     assert!(daemon_url("https://0.0.0.0:47632").is_err());

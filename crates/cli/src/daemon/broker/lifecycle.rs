@@ -3,7 +3,7 @@
 
 use std::fmt;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -42,6 +42,7 @@ pub(crate) struct WorkerTarget {
     session_token: SensitiveString,
     client: Arc<PooledClient>,
     in_flight: AtomicUsize,
+    control_available: AtomicBool,
 }
 
 impl WorkerTarget {
@@ -85,7 +86,15 @@ impl WorkerTarget {
             session_token,
             client,
             in_flight: AtomicUsize::new(0),
+            control_available: AtomicBool::new(true),
         })
+    }
+
+    pub(crate) fn control_available(&self) -> bool {
+        self.control_available.load(Ordering::Acquire)
+    }
+    pub(crate) fn set_control_available(&self, available: bool) {
+        self.control_available.store(available, Ordering::Release);
     }
 
     /// Returns the worker generation identifier.
