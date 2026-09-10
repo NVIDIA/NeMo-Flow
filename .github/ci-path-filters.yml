@@ -14,9 +14,13 @@ installer:
   - '.github/workflows/ci_check.yml'
   - 'install.sh'
   - 'install.ps1'
+  - 'uninstall.sh'
+  - 'uninstall.ps1'
   - 'scripts/test-install.sh'
   - 'scripts/test-install-mocks.sh'
   - 'scripts/test-install.ps1'
+  - 'scripts/test-uninstall.sh'
+  - 'scripts/test-uninstall.ps1'
 
 shared:
   - 'crates/adaptive/Cargo.toml'

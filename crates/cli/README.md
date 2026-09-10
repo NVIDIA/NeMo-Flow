@@ -92,8 +92,8 @@ Windows PowerShell:
 irm https://raw.githubusercontent.com/NVIDIA/NeMo-Relay/main/install.ps1 | iex
 ```
 
-For version pinning, custom installation directories, verification,
-troubleshooting, and CLI usage, refer to the
+For version pinning, custom installation directories, uninstalling a
+script-installed CLI, verification, troubleshooting, and CLI usage, refer to the
 [NeMo Relay installation guide](https://docs.nvidia.com/nemo/relay/getting-started/installation).
 
 After installation, verify the binary with:
