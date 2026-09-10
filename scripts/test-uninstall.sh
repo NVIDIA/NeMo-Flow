@@ -312,7 +312,7 @@ EOF
     run_interactive_uninstaller n "$install_dir"
     assert_failure
     assert_contains "$run_output" "uninstall cancelled; process ${agent_pid} remains active"
-    prompt_count=$(printf '%s\n' "$run_output" | grep -c "Terminate PID ${agent_pid}:")
+    prompt_count=$(printf '%s\n' "$run_output" | grep -c "Terminate PID ${agent_pid}:" || true)
     [ "$prompt_count" -eq 1 ] || fail "expected one prompt for the shared MCP owner, got ${prompt_count}"
     kill -0 "$agent_pid" 2>/dev/null || fail 'rejected confirmation terminated the coding agent owner'
 
