@@ -19,6 +19,8 @@ pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
     hook_path: "/hooks/claude-code",
     version_product: "Claude Code",
     minimum_version: (2, 1, 121),
+    // Earlier releases cannot reliably apply Relay's final settings overlay and Agent View gate.
+    transparent_minimum_version: Some((2, 1, 169)),
     verified_through: None,
     hook_events: &[
         "SessionStart",

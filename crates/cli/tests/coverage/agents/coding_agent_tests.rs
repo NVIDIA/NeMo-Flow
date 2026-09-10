@@ -55,6 +55,27 @@ fn centralized_minimum_versions_accept_stable_boundaries() {
     }
 }
 
+#[test]
+fn transparent_version_policy_is_mode_specific() {
+    assert!(
+        CodingAgent::ClaudeCode
+            .validate_transparent_version(&semver::Version::new(2, 1, 168))
+            .is_err()
+    );
+    assert!(
+        CodingAgent::ClaudeCode
+            .validate_transparent_version(&semver::Version::new(2, 1, 169))
+            .is_ok()
+    );
+    for agent in [CodingAgent::Codex, CodingAgent::Pi] {
+        assert!(
+            agent
+                .validate_transparent_version(&agent.minimum_version())
+                .is_ok()
+        );
+    }
+}
+
 // The floor alone said "supported" for any stable version above it, which is right for a host
 // whose minors are additive and wrong for one that can move a hook shape in a minor. pi is the
 // second kind: above 0.84.x it is untested, and the symptom of a broken hook shape is missing

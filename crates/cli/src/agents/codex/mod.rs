@@ -20,6 +20,7 @@ pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
     hook_path: "/hooks/codex",
     version_product: "codex-cli",
     minimum_version: (0, 143, 0),
+    transparent_minimum_version: None,
     verified_through: None,
     hook_events: &[
         "SessionStart",

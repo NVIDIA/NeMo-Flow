@@ -10,6 +10,8 @@ use crate::error::CliError;
 use crate::hooks::{generated_policy_hooks, transparent_hook_forward_commands_with_config};
 use crate::process::{PreparedAgentLaunch, insert_after_host};
 
+const DISABLE_AGENT_VIEW_ENV: &str = "CLAUDE_CODE_DISABLE_AGENT_VIEW";
+
 pub(crate) fn prepare(
     launch: &mut PreparedAgentLaunch,
     gateway_url: &str,
@@ -29,6 +31,10 @@ pub(crate) fn prepare(
             |value| replace_custom_header(&value, &proxy_header),
         );
     launch.set_secret_env("ANTHROPIC_CUSTOM_HEADERS", custom_headers);
+
+    // Disable supervisor-backed sessions before Claude loads settings. The private
+    // settings overlay below keeps the gate active after settings are applied.
+    launch.env.push((DISABLE_AGENT_VIEW_ENV.into(), "1".into()));
     if dry_run {
         insert_after_host(
             &mut launch.argv,
@@ -142,6 +148,7 @@ pub(crate) fn settings_overlay(
     let object = settings.as_object_mut().ok_or_else(|| {
         CliError::Launch("Claude Code --settings must contain a JSON object".into())
     })?;
+    object.insert("disableAgentView".into(), Value::Bool(true));
     let environment = object.entry("env").or_insert_with(|| json!({}));
     let environment = environment.as_object_mut().ok_or_else(|| {
         CliError::Launch("Claude Code --settings field `env` must be a JSON object".into())
@@ -150,6 +157,8 @@ pub(crate) fn settings_overlay(
         "ANTHROPIC_BASE_URL".into(),
         Value::String(gateway_url.into()),
     );
+    // A matching settings `env` entry can override the inherited value and reaches child processes.
+    environment.insert(DISABLE_AGENT_VIEW_ENV.into(), Value::String("1".into()));
     Ok(settings)
 }
 

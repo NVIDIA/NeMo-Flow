@@ -31,6 +31,7 @@ pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
     // channel, so this floor is the version the integration was verified
     // against rather than a lower bound that is expected to keep holding.
     minimum_version: (0, 84, 0),
+    transparent_minimum_version: None,
     // Which is why the floor alone was a lie by omission: it accepted 0.85.0 as
     // "supported" for a host that can move a hook shape in a minor. Below the floor
     // is an error, above this is a warning -- untested, not broken, and blocking a

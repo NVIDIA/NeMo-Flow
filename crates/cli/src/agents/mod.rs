@@ -28,6 +28,8 @@ pub(super) struct AgentDescriptor {
     hook_path: &'static str,
     version_product: &'static str,
     minimum_version: (u64, u64, u64),
+    /// A stricter floor for transparent runs when the launcher needs newer host controls.
+    transparent_minimum_version: Option<(u64, u64, u64)>,
     /// The last `major.minor` this integration was actually verified against, for a
     /// host whose minor releases can break the hook contract.
     ///
@@ -125,6 +127,22 @@ impl CodingAgent {
     pub(crate) fn minimum_version(self) -> Version {
         let (major, minor, patch) = self.descriptor().minimum_version;
         Version::new(major, minor, patch)
+    }
+
+    pub(crate) fn validate_transparent_version(self, version: &Version) -> Result<(), String> {
+        let Some((major, minor, patch)) = self.descriptor().transparent_minimum_version else {
+            return Ok(());
+        };
+        let minimum = Version::new(major, minor, patch);
+        if version >= &minimum {
+            return Ok(());
+        }
+        Err(format!(
+            "{} {version} is unsupported for transparent runs; upgrade to {} {minimum} or use a \
+             persistent or managed Relay integration",
+            self.label(),
+            self.label(),
+        ))
     }
 
     pub(crate) fn version_requirement(self) -> String {

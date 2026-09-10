@@ -1019,6 +1019,35 @@ async fn wrapped_agent_version_probe_runs_through_the_wrapper() {
         .unwrap();
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn transparent_claude_requires_reliable_agent_view_controls() {
+    let temp = tempfile::tempdir().unwrap();
+    let claude = temp.path().join("claude");
+    std::fs::write(&claude, "#!/bin/sh\necho '2.1.168 (Claude Code)'\n").unwrap();
+    make_executable(&claude);
+
+    let probe = [claude.display().to_string(), "--version".into()];
+    let error = validate_agent_version(CodingAgent::ClaudeCode, &probe)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("unsupported for transparent runs"),
+        "{error}"
+    );
+    assert!(error.contains("Claude Code 2.1.169"), "{error}");
+    assert!(
+        error.contains("persistent or managed Relay integration"),
+        "{error}"
+    );
+
+    std::fs::write(&claude, "#!/bin/sh\necho '2.1.169 (Claude Code)'\n").unwrap();
+    validate_agent_version(CodingAgent::ClaudeCode, &probe)
+        .await
+        .unwrap();
+}
+
 #[test]
 fn prepares_claude_dry_run_without_writing_plugin() {
     let _env = EnvScope::set(&[("ANTHROPIC_CUSTOM_HEADERS", None)]);
@@ -1043,6 +1072,14 @@ fn prepares_claude_dry_run_without_writing_plugin() {
             .env
             .contains(&("ANTHROPIC_BASE_URL".into(), "http://127.0.0.1:1234".into()))
     );
+    let disable_agent_view = prepared
+        .env
+        .iter()
+        .filter_map(|(name, value)| {
+            (name == "CLAUDE_CODE_DISABLE_AGENT_VIEW").then_some(value.as_str())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(disable_agent_view, ["1"]);
     assert!(prepared.notes[0].contains("would generate"));
     let custom_headers = prepared
         .env
@@ -1226,6 +1263,8 @@ fn prepares_claude_temp_plugin() {
         settings["env"]["ANTHROPIC_BASE_URL"],
         "http://127.0.0.1:1234"
     );
+    assert_eq!(settings["disableAgentView"], true);
+    assert_eq!(settings["env"]["CLAUDE_CODE_DISABLE_AGENT_VIEW"], "1");
     let hooks: serde_json::Value =
         serde_json::from_slice(&std::fs::read(plugin_dir.join("hooks/hooks.json")).unwrap())
             .unwrap();
@@ -1246,6 +1285,11 @@ fn prepares_claude_temp_plugin() {
             .env
             .contains(&("ANTHROPIC_BASE_URL".into(), "http://127.0.0.1:1234".into()))
     );
+    assert!(
+        prepared
+            .env
+            .contains(&("CLAUDE_CODE_DISABLE_AGENT_VIEW".into(), "1".into()))
+    );
     prepared.restore().unwrap();
     assert!(!plugin_dir.exists());
 }
@@ -1254,7 +1298,7 @@ fn prepares_claude_temp_plugin() {
 fn claude_transparent_run_preserves_user_settings_and_prompt_boundary() {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("claude-settings.json");
-    let original = br#"{"model":"claude-user-setting-sentinel","enabledPlugins":{"other@market":true,"nemo-relay-plugin@nemo-relay-local":true},"env":{"PRIVATE":"kept"}}"#;
+    let original = br#"{"model":"claude-user-setting-sentinel","enabledPlugins":{"other@market":true,"nemo-relay-plugin@nemo-relay-local":true},"disableAgentView":false,"env":{"PRIVATE":"kept","CLAUDE_CODE_DISABLE_AGENT_VIEW":"0"}}"#;
     std::fs::write(&source, original).unwrap();
     let resolved = ResolvedConfig {
         gateway: GatewayConfig::default(),
@@ -1296,6 +1340,8 @@ fn claude_transparent_run_preserves_user_settings_and_prompt_boundary() {
         true
     );
     assert_eq!(overlay["env"]["PRIVATE"], "kept");
+    assert_eq!(overlay["disableAgentView"], true);
+    assert_eq!(overlay["env"]["CLAUDE_CODE_DISABLE_AGENT_VIEW"], "1");
     assert_eq!(
         overlay["env"]["ANTHROPIC_BASE_URL"],
         "http://127.0.0.1:1234"
@@ -1349,7 +1395,9 @@ fn claude_settings_overlay_handles_inline_json_and_rejects_malformed_sources() {
         "http://127.0.0.1:4321",
     )
     .unwrap();
-    assert_eq!(overlay.as_object().unwrap().len(), 1);
+    assert_eq!(overlay.as_object().unwrap().len(), 2);
+    assert_eq!(overlay["disableAgentView"], true);
+    assert_eq!(overlay["env"]["CLAUDE_CODE_DISABLE_AGENT_VIEW"], "1");
 
     let missing = vec!["claude".into(), "--settings".into(), "--".into()];
     assert!(
