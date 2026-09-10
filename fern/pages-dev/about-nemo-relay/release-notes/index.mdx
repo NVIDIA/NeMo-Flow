@@ -30,6 +30,17 @@ Relay](/about-nemo-relay/overview).
 NeMo Relay 0.9 is under development. This page will track its user-visible
 changes, compatibility updates, and fixed known issues.
 
+<Warning title="Breaking change: dynamic-plugin attestation">
+
+Dynamic-plugin attestation now runs in the core host for every embedding API.
+If `[plugins.policy.defaults]` omits its policy fields, Relay requires startup
+success and a trusted artifact signature. An unsigned plugin that activated on
+0.8 can be refused on 0.9. Sign the artifact and configure
+`trusted_public_keys`, or explicitly configure a less restrictive `attestation`
+mode. See the [0.9 migration guidance](/reference/migration-guides).
+
+</Warning>
+
 ## Known Issues in 0.9
 
 - OTLP collectors can return a successful response while rejecting individual
