@@ -53,9 +53,11 @@ function Test-RelayMcpProcess([string]$CommandLine) {
     return $CommandLine -match '(?i)(?:^|\s)mcp(?:\s|$)'
 }
 
-function Get-RelayCimInstance {
-    param([Parameter(ValueFromRemainingArguments = $true)]$Arguments)
-    return Get-CimInstance @Arguments
+function Get-RelayCimInstance([string]$ClassName, [string]$Filter) {
+    if ([string]::IsNullOrEmpty($Filter)) {
+        return Get-CimInstance -ClassName $ClassName
+    }
+    return Get-CimInstance -ClassName $ClassName -Filter $Filter
 }
 
 function Read-UninstallConfirmation([string]$Prompt) {
