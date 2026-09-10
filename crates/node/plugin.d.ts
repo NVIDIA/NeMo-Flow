@@ -100,6 +100,10 @@ export interface PluginHostActivation extends AsyncDisposable {
 export interface PluginHostReport {
   config: ConfigReport;
   dynamic_plugins: DynamicPluginValidationReport[];
+  /** Existing plugins.toml files that contributed to the resolved configuration. */
+  config_paths: string[];
+  /** Fully merged plugin configuration with sensitive values redacted. */
+  resolved_config: Json;
 }
 
 export type DynamicPluginCheckState = 'unknown' | 'valid' | 'invalid';

@@ -44,7 +44,7 @@ pub struct DynamicPluginValidationReport {
 }
 
 /// Combined static and dynamic host report.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct PluginHostReport {
     /// Static plugin initialization report.
@@ -52,6 +52,27 @@ pub struct PluginHostReport {
     /// Dynamic validation reports in discovery order.
     #[serde(default)]
     pub dynamic_plugins: Vec<DynamicPluginValidationReport>,
+    /// Existing `plugins.toml` files that contributed to the resolved configuration.
+    #[serde(default)]
+    pub config_paths: Vec<String>,
+    /// Fully merged plugin configuration with sensitive values redacted.
+    #[serde(default = "empty_resolved_config")]
+    pub resolved_config: Json,
+}
+
+impl Default for PluginHostReport {
+    fn default() -> Self {
+        Self {
+            config: crate::plugin::ConfigReport::default(),
+            dynamic_plugins: Vec::new(),
+            config_paths: Vec::new(),
+            resolved_config: empty_resolved_config(),
+        }
+    }
+}
+
+fn empty_resolved_config() -> Json {
+    Json::Object(Map::new())
 }
 
 /// Selects the scope of a standalone dynamic-plugin validation request.
@@ -134,6 +155,8 @@ pub(crate) struct ResolvedPluginHostConfig {
     pub(crate) dynamic_plugins: Vec<super::VerifiedDynamicPluginSpec>,
     pub(crate) dynamic_reports: Vec<DynamicPluginValidationReport>,
     pub(crate) diagnostics: Vec<crate::plugin::ConfigDiagnostic>,
+    pub(crate) config_paths: Vec<String>,
+    pub(crate) resolved_config: Json,
 }
 
 #[derive(Debug, Deserialize)]
@@ -213,6 +236,8 @@ pub fn validate_exact(config: PluginConfig) -> PluginHostReport {
     PluginHostReport {
         config: crate::plugin::validate_static_plugin_config(&config),
         dynamic_plugins: Vec::new(),
+        config_paths: Vec::new(),
+        resolved_config: sanitized_plugin_config(&config),
     }
 }
 
@@ -261,6 +286,8 @@ pub(crate) fn validate_request(request: PluginHostValidationRequest) -> Result<P
     Ok(PluginHostReport {
         config: config_report,
         dynamic_plugins,
+        config_paths: resolved.config_paths,
+        resolved_config: resolved.resolved_config,
     })
 }
 
@@ -342,12 +369,79 @@ fn resolve_plugin_host_config_inner(
         }
     }
     Ok(ResolvedPluginHostConfig {
+        config_paths: resolved.config_paths,
+        resolved_config: sanitize_resolved_config(resolved.resolved_config),
         config: resolved.config,
         policy,
         dynamic_plugins: active,
         dynamic_reports: reports,
         diagnostics: resolved.diagnostics,
     })
+}
+
+pub(crate) fn sanitized_plugin_config(config: &PluginConfig) -> Json {
+    let config = serde_json::to_value(config)
+        .expect("PluginConfig must serialize to a JSON value for diagnostics");
+    sanitize_resolved_config(config)
+}
+
+fn sanitize_resolved_config(mut config: Json) -> Json {
+    redact_config_value(&mut config, None);
+    config
+}
+
+fn redact_config_value(value: &mut Json, field_name: Option<&str>) {
+    if field_name.is_some_and(is_sensitive_field_name) {
+        *value = Json::String("[REDACTED]".to_string());
+        return;
+    }
+    if field_name.is_some_and(|name| matches!(name, "endpoint" | "url")) {
+        if let Some(endpoint) = value.as_str() {
+            *value = Json::String(diagnostic_endpoint(endpoint));
+        }
+        return;
+    }
+    match value {
+        Json::Object(values) => {
+            if field_name == Some("headers") {
+                for value in values.values_mut() {
+                    *value = Json::String("[REDACTED]".to_string());
+                }
+            } else {
+                for (name, value) in values {
+                    redact_config_value(value, Some(name));
+                }
+            }
+        }
+        Json::Array(values) => {
+            for value in values {
+                redact_config_value(value, None);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_sensitive_field_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    matches!(
+        name.as_str(),
+        "authorization" | "api_key" | "apikey" | "password" | "secret" | "token"
+    ) || name.contains("credential")
+        || name.contains("secret")
+        || name.contains("token")
+        || name.contains("password")
+}
+
+fn diagnostic_endpoint(endpoint: &str) -> String {
+    let Ok(mut endpoint) = reqwest::Url::parse(endpoint) else {
+        return endpoint.to_string();
+    };
+    let _ = endpoint.set_username("");
+    let _ = endpoint.set_password(None);
+    endpoint.set_query(None);
+    endpoint.set_fragment(None);
+    endpoint.into()
 }
 
 fn validate_declaration(

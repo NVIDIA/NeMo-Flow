@@ -83,6 +83,8 @@ class DynamicPluginValidationReport(_DynamicPluginValidationReportRequired, tota
 class PluginHostReport(TypedDict):
     config: ConfigReport
     dynamic_plugins: list[DynamicPluginValidationReport]
+    config_paths: list[str]
+    resolved_config: JsonObject
 
 class PluginContext(Protocol):
     def register_subscriber(self, name: str, callback: Callable[[Event], None]) -> None: ...

@@ -108,6 +108,44 @@ fn validation_request_deserializes_every_target_and_rejects_invalid_shapes() {
 }
 
 #[test]
+fn resolved_config_redacts_secrets_without_hiding_its_structure() {
+    let sanitized = sanitize_resolved_config(json!({
+        "components": [{
+            "kind": "observability",
+            "config": {
+                "opentelemetry": {
+                    "endpoints": [{
+                        "endpoint": "https://user:secret@collector.example/v1/traces?token=secret#fragment",
+                        "headers": {"authorization": "Bearer secret"},
+                        "header_env": {"x-api-key": "OTEL_API_KEY"}
+                    }]
+                },
+                "nested": {"api_token": "secret"}
+            }
+        }]
+    }));
+
+    assert_eq!(
+        sanitized,
+        json!({
+            "components": [{
+                "kind": "observability",
+                "config": {
+                    "opentelemetry": {
+                        "endpoints": [{
+                            "endpoint": "https://collector.example/v1/traces",
+                            "headers": {"authorization": "[REDACTED]"},
+                            "header_env": {"x-api-key": "OTEL_API_KEY"}
+                        }]
+                    },
+                    "nested": {"api_token": "[REDACTED]"}
+                }
+            }]
+        })
+    );
+}
+
+#[test]
 fn lifecycle_state_selection_covers_absent_disabled_and_enabled_records() {
     let temp = tempfile::tempdir().unwrap();
     let plugins_toml = temp.path().join("plugins.toml");

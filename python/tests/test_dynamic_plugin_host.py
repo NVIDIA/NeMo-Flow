@@ -298,6 +298,7 @@ async def test_discovered_configuration_layers_last(
         activation = await plugin.initialize(plugin.PluginConfig())
         codes = [item["code"] for item in activation.report["config"]["diagnostics"]]
         assert "plugin.configuration_inherited" in codes
+        assert str(plugins_toml) in activation.report["config_paths"]
         result = await tools.execute("python-file-static-base", {"input": True}, lambda args: ToolExecutionResult(args))
         assert result.result["file_static_base"] is True
         assert result.result["native_plugin_tool_execution"] is True
