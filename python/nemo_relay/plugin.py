@@ -458,6 +458,14 @@ async def initialize(
 
     Returns:
         An owned activation whose report includes static and dynamic results.
+
+    Raises:
+        ValueError: If the supplied configuration is malformed or fails plugin
+            validation.
+        FileNotFoundError: If a referenced plugin configuration or resource is
+            unavailable.
+        RuntimeError: If activation cannot acquire the host or a plugin cannot
+            be registered.
     """
     path = os.fspath(additional_plugins_toml) if additional_plugins_toml is not None else None
     return PluginHostActivation(await _initialize(_normalize_object(config), path))
@@ -479,6 +487,14 @@ async def activate(
 
     Returns:
         An async context manager that yields the owned activation.
+
+    Raises:
+        ValueError: If the supplied configuration is malformed or fails plugin
+            validation.
+        FileNotFoundError: If a referenced plugin configuration or resource is
+            unavailable.
+        RuntimeError: If activation cannot acquire the host or a plugin cannot
+            be registered.
     """
     activation = await initialize(config, additional_plugins_toml)
     try:
@@ -502,6 +518,18 @@ def validate(
 
     Returns:
         A static configuration report and selected dynamic validation reports.
+
+    Raises:
+        ValueError: If the supplied configuration or a resolved configuration
+            layer is malformed.
+        FileNotFoundError: If a referenced plugin configuration or resource is
+            unavailable.
+        RuntimeError: If validation encounters an internal host failure.
+
+    Notes:
+        Static plugin validation errors are returned in the report rather than
+        raised. Use :func:`validate_exact` when only the supplied static
+        configuration should be checked.
     """
     path = os.fspath(additional_plugins_toml) if additional_plugins_toml is not None else None
     return cast(PluginHostReport, _validate(_normalize_object(config), path))

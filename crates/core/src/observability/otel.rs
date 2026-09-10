@@ -2129,6 +2129,9 @@ impl OtelEventProcessor {
         let Some(parent_uuid) = event.parent_uuid() else {
             return Context::new();
         };
+        if event.propagation_parent_uuid() != Some(parent_uuid) {
+            return Context::new();
+        }
         let Some(root_uuid) = event.propagation_root_uuid() else {
             return Context::new();
         };

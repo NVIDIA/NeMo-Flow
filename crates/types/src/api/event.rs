@@ -983,6 +983,14 @@ pub struct BaseEvent {
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub propagation_root_uuid: Option<Uuid>,
+    /// Synthetic parent imported with the propagation context.
+    ///
+    /// This is runtime-only delivery state. It distinguishes an imported
+    /// parent from ordinary Relay scope parentage without extending the ATOF
+    /// wire format.
+    #[builder(default)]
+    #[serde(skip)]
+    pub propagation_parent_uuid: Option<Uuid>,
     /// Unique identifier for the event or span.
     #[builder(default = Uuid::now_v7())]
     pub uuid: Uuid,
@@ -1250,6 +1258,16 @@ impl Event {
     /// Attach the causal root captured at event emission.
     pub fn set_propagation_root_uuid(&mut self, root_uuid: Option<Uuid>) {
         self.base_mut().propagation_root_uuid = root_uuid;
+    }
+
+    /// Return the synthetic parent imported with the propagation context.
+    pub fn propagation_parent_uuid(&self) -> Option<Uuid> {
+        self.base().propagation_parent_uuid
+    }
+
+    /// Attach the synthetic parent captured at event emission.
+    pub fn set_propagation_parent_uuid(&mut self, parent_uuid: Option<Uuid>) {
+        self.base_mut().propagation_parent_uuid = parent_uuid;
     }
 
     /// Return the unique event or span UUID.

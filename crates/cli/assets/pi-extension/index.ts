@@ -730,8 +730,9 @@ function summarize(result: unknown, isError: boolean): unknown {
     const record = result as Record<string, unknown>;
     const content = record.content ?? record.output ?? record.text;
     const text = toolResultText(content);
+    const outcome = isError ? 'failed' : 'completed';
     return {
-      content: text === null ? `Tool ${isError ? 'failed' : 'completed'}.` : text,
+      content: text ?? `Tool ${outcome}.`,
       result_keys: Object.keys(record).slice(0, 20),
     };
   }
@@ -783,13 +784,17 @@ function toolResultText(content: unknown): string | null {
 /** Return at most limit UTF-16 units without splitting a surrogate pair. */
 function sliceAtCodePointBoundary(value: string, limit: number): string {
   let end = Math.min(value.length, limit);
+  const previousCodeUnit = value.slice(end - 1, end).codePointAt(0);
+  const nextCodeUnit = value.slice(end, end + 1).codePointAt(0);
   if (
     end > 0 &&
     end < value.length &&
-    value.charCodeAt(end - 1) >= 0xd800 &&
-    value.charCodeAt(end - 1) <= 0xdbff &&
-    value.charCodeAt(end) >= 0xdc00 &&
-    value.charCodeAt(end) <= 0xdfff
+    previousCodeUnit !== undefined &&
+    previousCodeUnit >= 0xd800 &&
+    previousCodeUnit <= 0xdbff &&
+    nextCodeUnit !== undefined &&
+    nextCodeUnit >= 0xdc00 &&
+    nextCodeUnit <= 0xdfff
   ) {
     end -= 1;
   }

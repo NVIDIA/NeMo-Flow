@@ -14,6 +14,10 @@ navigation:
     title: "NVIDIA NeMo Relay CLI"
     slug: nemo-relay-cli
     title-source: frontmatter
+  - folder: ./daemon
+    title: "Daemon"
+    slug: daemon
+    title-source: frontmatter
   - folder: ./supported-integrations
     title: "Supported Integrations"
     slug: supported-integrations

@@ -29,6 +29,19 @@ fn allow_unsigned_test_plugins(resolved: &mut ResolvedConfig) {
         Some(nemo_relay::plugin::dynamic::DynamicPluginAttestationMode::IntegrityOnly);
 }
 
+#[cfg(unix)]
+#[test]
+fn process_python_environment_runner_reports_launch_success_and_exit_failures() {
+    let runner = ProcessPythonEnvironmentCommandRunner;
+    assert!(runner.run(OsStr::new("true"), &[]).is_ok());
+    let failure = runner.run(OsStr::new("false"), &[]).unwrap_err();
+    assert!(failure.contains("exited with status"), "{failure}");
+    let missing = runner
+        .run(OsStr::new("/definitely/missing/nemo-relay-python"), &[])
+        .unwrap_err();
+    assert!(missing.contains("failed to start"), "{missing}");
+}
+
 #[test]
 fn activation_snapshots_use_a_short_directory_prefix() {
     let _env = EnvScope::set(&[(ACTIVATION_SNAPSHOT_DIR_ENV, None)]);

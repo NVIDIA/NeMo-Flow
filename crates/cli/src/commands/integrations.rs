@@ -41,6 +41,13 @@ pub(crate) fn execute(command: IntegrationsCommand) -> Result<ExitCode, CliError
 }
 
 fn refresh(command: RefreshCommand) -> Result<ExitCode, CliError> {
+    refresh_with_installer(command, crate::agents::install_integration)
+}
+
+fn refresh_with_installer(
+    command: RefreshCommand,
+    mut install: impl FnMut(CodingAgent, InstallRequest) -> Result<ExitCode, CliError>,
+) -> Result<ExitCode, CliError> {
     let targets = refresh_targets(command.install_dir.as_deref())?;
     let managed_targets = targets
         .iter()
@@ -79,7 +86,7 @@ fn refresh(command: RefreshCommand) -> Result<ExitCode, CliError> {
             dry_run: command.dry_run,
             skip_doctor: false,
         };
-        let result = match crate::agents::install_integration(agent, request) {
+        let result = match install(agent, request) {
             Ok(status) if status == ExitCode::SUCCESS => Ok(()),
             Ok(_) => Err(format!(
                 "{} at {} returned a nonzero status",
@@ -171,3 +178,7 @@ fn refresh_targets(
 
     Ok(targets)
 }
+
+#[cfg(test)]
+#[path = "../../tests/coverage/commands/integrations_tests.rs"]
+mod tests;
