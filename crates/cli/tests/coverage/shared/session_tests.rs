@@ -1021,8 +1021,21 @@ async fn nests_agent_subagent_and_tool_lifecycle() {
 
 #[tokio::test]
 async fn claude_tool_start_carries_gen_ai_execution_metadata() {
-    let session_id = "claude-gen-ai-tool-metadata";
-    let subscriber_name = "claude-gen-ai-tool-metadata-test";
+    assert_claude_tool_execution_metadata(false).await;
+}
+
+#[tokio::test]
+async fn claude_post_only_tool_carries_gen_ai_execution_metadata() {
+    assert_claude_tool_execution_metadata(true).await;
+}
+
+async fn assert_claude_tool_execution_metadata(post_only: bool) {
+    let session_id = if post_only {
+        "claude-gen-ai-post-only"
+    } else {
+        "claude-gen-ai-tool-metadata"
+    };
+    let subscriber_name = session_id;
     let captured = Arc::new(StdMutex::new(Vec::<Event>::new()));
     let events = Arc::clone(&captured);
     register_filtered_session_subscriber(
@@ -1069,7 +1082,10 @@ async fn claude_tool_start_carries_gen_ai_execution_metadata() {
                     payload: json!({}),
                     metadata: json!({}),
                 }),
-            ],
+            ]
+            .into_iter()
+            .filter(|event| !post_only || !matches!(event, NormalizedEvent::ToolStarted(_)))
+            .collect(),
         )
         .await
         .unwrap();

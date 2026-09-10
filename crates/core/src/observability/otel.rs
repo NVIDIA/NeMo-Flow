@@ -231,6 +231,30 @@ fn trace_endpoint_log_identity(endpoint: &str) -> String {
     format!("{}://{host}:{port}", endpoint.scheme())
 }
 
+/// Require protected transport for remote GenAI content exports.
+pub(super) fn validate_gen_ai_endpoint(otel_type: OpenTelemetryType, endpoint: &str) -> Result<()> {
+    if otel_type != OpenTelemetryType::GenAi {
+        return Ok(());
+    }
+    let protected = reqwest::Url::parse(endpoint).is_ok_and(|url| {
+        let host = url.host_str().unwrap_or_default();
+        let loopback = host.eq_ignore_ascii_case("localhost")
+            || host
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback());
+        url.scheme() == "https" || (url.scheme() == "http" && loopback)
+    });
+    if !protected {
+        return Err(OpenTelemetryError::ExporterBuild(
+            "GenAI endpoints require HTTPS; HTTP is allowed only for localhost or loopback IP addresses"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Configuration for the OpenTelemetry subscriber.
 #[derive(Debug, Clone)]
 pub struct OpenTelemetryConfig {
@@ -574,6 +598,7 @@ impl OpenTelemetrySubscriber {
                 "endpoint must be a nonblank string".to_string(),
             ));
         }
+        validate_gen_ai_endpoint(config.otel_type, &config.endpoint)?;
         if config.completed_span_context_ttl.is_zero() {
             return Err(OpenTelemetryError::ExporterBuild(
                 "completed_span_context_ttl must be greater than 0".to_string(),

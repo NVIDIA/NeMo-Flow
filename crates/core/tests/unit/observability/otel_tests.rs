@@ -2521,6 +2521,43 @@ fn gen_ai_projection_emits_only_span_specific_attributes() {
 }
 
 #[test]
+fn gen_ai_endpoints_require_protected_remote_transport() {
+    for endpoint in [
+        "https://collector.example/v1/traces",
+        "http://localhost:4318/v1/traces",
+        "http://127.0.0.1:4318/v1/traces",
+        "http://127.0.0.2:4318/v1/traces",
+        "http://[::1]:4318/v1/traces",
+    ] {
+        assert!(
+            validate_gen_ai_endpoint(OpenTelemetryType::GenAi, endpoint).is_ok(),
+            "{endpoint}"
+        );
+    }
+    for endpoint in [
+        "http://collector.example/v1/traces",
+        "http://10.0.0.1:4318",
+        "http://[::]:4318",
+        "http://localhost.example:4318",
+        "http://localhost@collector.example:4318",
+        "ftp://localhost/traces",
+        "not a URL",
+    ] {
+        for transport in [OtlpTransport::HttpBinary, OtlpTransport::Grpc] {
+            let result = OpenTelemetrySubscriber::new(
+                OpenTelemetryConfig::new(OpenTelemetryType::GenAi, endpoint)
+                    .with_transport(transport),
+            );
+            assert!(
+                result.err().unwrap().to_string().contains("require HTTPS"),
+                "{endpoint}"
+            );
+        }
+    }
+    assert!(validate_gen_ai_endpoint(OpenTelemetryType::Full, "http://collector.example").is_ok());
+}
+
+#[test]
 fn gen_ai_tool_content_is_captured_by_default_and_object_shaped() {
     use crate::observability::otel_genai::{end_attributes, start_attributes};
     for (payload, expected) in [

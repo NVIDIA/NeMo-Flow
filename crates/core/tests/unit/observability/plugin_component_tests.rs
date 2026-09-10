@@ -1077,6 +1077,21 @@ fn test_opentelemetry_endpoint() -> OpenTelemetryEndpointConfig {
 }
 
 #[test]
+fn gen_ai_plugin_endpoint_rejects_remote_plaintext() {
+    for (endpoint, allowed) in [
+        ("http://collector.example:4318", false),
+        ("https://collector.example:4318", true),
+        ("http://127.0.0.1:4318", true),
+        ("http://[::1]:4318", true),
+    ] {
+        let mut section = test_opentelemetry_endpoint();
+        section.otel_type = OpenTelemetryType::GenAi;
+        section.endpoint = endpoint.to_string();
+        assert_eq!(build_otel_config(0, section).is_ok(), allowed, "{endpoint}");
+    }
+}
+
+#[test]
 fn trace_endpoint_completed_context_ttl_is_applied_and_must_be_positive() {
     let mut endpoint = test_opentelemetry_endpoint();
     endpoint.completed_span_context_ttl_millis = Some(750);

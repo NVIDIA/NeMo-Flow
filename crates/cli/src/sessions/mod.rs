@@ -1861,23 +1861,7 @@ impl Session {
             owner.subagent_id.as_deref(),
             owner.hint.as_ref(),
         );
-        if self.agent_kind == AgentKind::ClaudeCode {
-            // Claude proposes arguments and the local harness executes the
-            // function (including dispatch to MCP). Do not infer descriptions
-            // from a tool argument such as Bash's per-invocation description.
-            if let Some(metadata) = metadata.as_object_mut() {
-                metadata
-                    .entry("gen_ai.tool.type")
-                    .or_insert(json!("function"));
-                let agent_name = owner.subagent_id.as_ref().map_or_else(
-                    || self.agent_kind.as_str().to_string(),
-                    |id| format!("subagent:{id}"),
-                );
-                metadata
-                    .entry("gen_ai.agent.name")
-                    .or_insert(json!(agent_name));
-            }
-        }
+        self.apply_tool_execution_metadata(&mut metadata, owner.subagent_id.as_deref());
         self.set_last_tool_owner(owner.subagent_id.clone());
         let handle = tool_call(
             ToolCallParams::builder()
@@ -1910,6 +1894,27 @@ impl Session {
         Ok(())
     }
 
+    // Apply execution defaults equally to pre-hook and synthesized post-only starts.
+    fn apply_tool_execution_metadata(&self, metadata: &mut Value, subagent_id: Option<&str>) {
+        if self.agent_kind == AgentKind::ClaudeCode {
+            // Claude proposes arguments and the local harness executes the
+            // function (including dispatch to MCP). Do not infer descriptions
+            // from a tool argument such as Bash's per-invocation description.
+            if let Some(metadata) = metadata.as_object_mut() {
+                metadata
+                    .entry("gen_ai.tool.type")
+                    .or_insert(json!("function"));
+                let agent_name = subagent_id.map_or_else(
+                    || self.agent_kind.as_str().to_string(),
+                    |id| format!("subagent:{id}"),
+                );
+                metadata
+                    .entry("gen_ai.agent.name")
+                    .or_insert(json!(agent_name));
+            }
+        }
+    }
+
     // Ends a tool call, synthesizing a start if no matching handle exists. This keeps post-only
     // hooks observable and preserves the final result/status instead of dropping orphaned endings.
     async fn end_tool(&mut self, event: ToolEvent) -> Result<Option<SubscriberDelivery>, CliError> {
@@ -1933,13 +1938,14 @@ impl Session {
                 } else {
                     event.arguments
                 };
-                let metadata = tool_correlation_metadata(
+                let mut metadata = tool_correlation_metadata(
                     event_metadata.clone(),
                     owner.status,
                     owner.source.as_deref(),
                     owner.subagent_id.as_deref(),
                     owner.hint.as_ref(),
                 );
+                self.apply_tool_execution_metadata(&mut metadata, owner.subagent_id.as_deref());
                 self.set_last_tool_owner(owner.subagent_id.clone());
                 tool_call(
                     ToolCallParams::builder()
