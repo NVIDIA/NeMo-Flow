@@ -212,20 +212,25 @@ async fn worker_ready_is_pushed_recovery_reprobes_and_drain_survives_disconnect(
     )
     .await
     .unwrap();
+    let mut register = WorkerRegisterRequest {
+        proof: handshake.proof,
+        worker_id: "worker".into(),
+        endpoint: endpoint.clone(),
+        activation_id,
+        activation_token,
+        tls_root_certificate: None,
+    };
     let registration: WorkerRegisterResponse = worker
-        .request(Command::RegisterWorker(WorkerRegisterRequest {
-            proof: handshake.proof,
-            worker_id: "worker".into(),
-            endpoint: endpoint.clone(),
-            activation_id,
-            activation_token,
-            tls_root_certificate: None,
-        }))
+        .request(Command::RegisterWorker(register.clone()))
         .await
         .unwrap();
     let data = registration.data_token.clone();
     let probe_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let count = probe_count.clone();
+    let probe_started = Arc::new(Notify::new());
+    let probe_release = Arc::new(Notify::new());
+    let started = probe_started.clone();
+    let release = probe_release.clone();
     let server = tokio::spawn(async move {
         axum::serve(
             listener,
@@ -234,9 +239,14 @@ async fn worker_ready_is_pushed_recovery_reprobes_and_drain_survives_disconnect(
                 axum::routing::get(move |headers: HeaderMap| {
                     let data = data.clone();
                     let count = count.clone();
+                    let started = started.clone();
+                    let release = release.clone();
                     async move {
                         assert_eq!(headers[WORKER_TOKEN_HEADER], data.expose());
-                        count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 {
+                            started.notify_one();
+                            release.notified().await;
+                        }
                         StatusCode::NO_CONTENT
                     }
                 }),
@@ -254,10 +264,53 @@ async fn worker_ready_is_pushed_recovery_reprobes_and_drain_survives_disconnect(
         },
     )
     .unwrap();
-    worker
+    let first_worker = worker.clone();
+    let first_ready = ready.clone();
+    let first_probe = tokio::spawn(async move {
+        first_worker
+            .request::<()>(Command::Ready(first_ready))
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), probe_started.notified())
+        .await
+        .unwrap();
+    assert!(!lock(&state.worker_sessions)["worker"].published);
+
+    // Retry the identical command on a replacement connection while the original probe waits.
+    // Only the replacement may publish, even when the stale probe later succeeds.
+    let replacement = Client::default();
+    register.proof = begin_handshake(
+        &replacement,
+        &origin,
+        ComponentRole::Worker,
+        &identity,
+        "worker",
+        None,
+    )
+    .await
+    .unwrap()
+    .proof;
+    let replay: WorkerRegisterResponse = replacement
+        .request(Command::RegisterWorker(register))
+        .await
+        .unwrap();
+    assert_eq!(
+        replay.session_token.expose(),
+        registration.session_token.expose()
+    );
+    replacement
         .request::<()>(Command::Ready(ready.clone()))
         .await
         .unwrap();
+    probe_release.notify_one();
+    assert!(first_probe.await.unwrap().is_err());
+    assert!(lock(&state.worker_sessions)["worker"].published);
+    assert!(
+        lock(&state.worker_sessions)["worker"]
+            .pending_target
+            .control_available()
+    );
+    let worker = replacement;
     worker.request::<()>(Command::Ready(ready)).await.unwrap();
     loop {
         if matches!(
