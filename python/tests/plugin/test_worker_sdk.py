@@ -606,7 +606,7 @@ class AllSurfacesPlugin(WorkerPlugin):
             return _tag(value, f"request_{name}")
 
         async def tool_execution(context: ToolExecutionContext, next_call: ToolNext) -> ToolExecutionInterceptOutcome:
-            result = await next_call.call(_tag(context.arguments, f"execute_{context.tool_name}"))
+            result = await next_call.call(_tag(context.args, f"execute_{context.tool_name}"))
             return ToolExecutionInterceptOutcome(
                 result=_tag(result.result, "tool_execution"),
                 annotation=result.annotation,
@@ -3470,9 +3470,9 @@ async def test_tool_execution_intercept_receives_tool_call_id():
 
             async def tool_execution(context: ToolExecutionContext, next_call: ToolNext):
                 seen["tool_name"] = context.tool_name
-                seen["arguments"] = context.arguments
+                seen["arguments"] = context.args
                 seen["tool_call_id"] = context.tool_call_id
-                downstream = await next_call.call(context.arguments)
+                downstream = await next_call.call(context.args)
                 return ToolExecutionInterceptOutcome(result=downstream.result)
 
             ctx.register_tool_execution_intercept("context", tool_execution)
@@ -3510,7 +3510,7 @@ async def test_tool_execution_intercept_tool_call_id_is_none_when_absent():
 
             async def tool_execution(context: ToolExecutionContext, next_call: ToolNext):
                 seen["tool_call_id"] = context.tool_call_id
-                downstream = await next_call.call(context.arguments)
+                downstream = await next_call.call(context.args)
                 return ToolExecutionInterceptOutcome(result=downstream.result)
 
             ctx.register_tool_execution_intercept("context_none", tool_execution)

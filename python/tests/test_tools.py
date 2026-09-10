@@ -485,8 +485,8 @@ class TestToolIntercepts:
         async def context_intercept(context, next_call):
             seen["tool_name"] = context.tool_name
             seen["tool_call_id"] = context.tool_call_id
-            seen["arguments"] = context.arguments
-            downstream = await next_call(context.arguments)
+            seen["arguments"] = context.args
+            downstream = await next_call(context.args)
             return ToolExecutionInterceptOutcome(downstream.result)
 
         intercepts.register_tool_execution("py_exec_ctx", 1, context_intercept)
@@ -510,7 +510,7 @@ class TestToolIntercepts:
 
         async def context_intercept(context, next_call):
             seen["tool_call_id"] = context.tool_call_id
-            downstream = await next_call(context.arguments)
+            downstream = await next_call(context.args)
             return ToolExecutionInterceptOutcome(downstream.result)
 
         intercepts.register_tool_execution("py_exec_ctx_none", 1, context_intercept)
@@ -654,7 +654,7 @@ class TestToolInterceptsAsync:
             started.set()
             try:
                 await release.wait()
-                downstream = await next_call(context.arguments)
+                downstream = await next_call(context.args)
                 return ToolExecutionInterceptOutcome(
                     downstream.result,
                     annotation=downstream.annotation,
@@ -711,7 +711,7 @@ class TestToolInterceptsAsync:
 
         def execution_intercept(context, _next_call):
             observed.append(("execution", request_id.get()))
-            return ToolExecutionInterceptOutcome(context.arguments)
+            return ToolExecutionInterceptOutcome(context.args)
 
         guardrails.register_tool_conditional_execution("py_tool_context_conditional", 1, conditional)
         intercepts.register_tool_request("py_tool_context_request", 1, False, request_intercept)
@@ -790,7 +790,7 @@ class TestToolInterceptsAsync:
         events = []
 
         async def middleware(context, next_call):
-            downstream = await next_call({"value": context.arguments["value"] + 1})
+            downstream = await next_call({"value": context.args["value"] + 1})
             result = dict(downstream.result)
             result["from_intercept"] = True
             return ToolExecutionInterceptOutcome(
@@ -834,7 +834,7 @@ class TestToolInterceptsAsync:
 
             async def invoke_late():
                 await release_late_next.wait()
-                return await next_call(context.arguments)
+                return await next_call(context.args)
 
             late_task = asyncio.create_task(invoke_late())
             return ToolExecutionInterceptOutcome({"source": "intercept"})
@@ -946,7 +946,7 @@ class TestToolInterceptsAsync:
                 both_entered.set()
             await both_entered.wait()
             await asyncio.sleep(0)
-            downstream = await next_call(context.arguments)
+            downstream = await next_call(context.args)
             return ToolExecutionInterceptOutcome(
                 downstream.result,
                 annotation=downstream.annotation,
@@ -993,7 +993,7 @@ class TestToolInterceptsAsync:
 
     async def test_execution_intercept_rejects_downstream_result_without_unwrapping(self):
         async def leftover(context, next_call):
-            downstream = await next_call(context.arguments)
+            downstream = await next_call(context.args)
             return ToolExecutionInterceptOutcome(downstream)  # type: ignore[arg-type]
 
         intercepts.register_tool_execution("py_exec_leftover", 1, leftover)
@@ -1007,7 +1007,7 @@ class TestToolInterceptsAsync:
 
     async def test_execution_intercept_rejects_downstream_result_as_its_outcome(self):
         async def leftover_return(context, next_call):
-            return await next_call(context.arguments)  # type: ignore[return-value]
+            return await next_call(context.args)  # type: ignore[return-value]
 
         intercepts.register_tool_execution("py_exec_leftover_return", 1, leftover_return)
         try:

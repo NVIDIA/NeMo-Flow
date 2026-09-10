@@ -2111,7 +2111,7 @@ impl WorkerPlugin for SurfacePlugin {
         ctx.register_tool_execution_intercept("tool-exec", 1, move |context, next: ToolNext| {
             let runtime = tool_runtime.clone();
             async move {
-                let value = context.into_arguments();
+                let value = context.into_args();
                 let registrations = runtime
                     .list_runtime_registrations(Some(BTreeSet::from([
                         RuntimeRegistrationKind::Subscriber,

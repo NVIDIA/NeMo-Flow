@@ -153,7 +153,7 @@ func TestToolExecutionInterceptReceivesToolCallID(t *testing.T) {
 			seenMu.Lock()
 			seen = ctx
 			seenMu.Unlock()
-			downstream, err := next(ctx.Arguments)
+			downstream, err := next(ctx.Args)
 			if err != nil {
 				return ToolExecutionInterceptOutcome{}, err
 			}
@@ -185,11 +185,11 @@ func TestToolExecutionInterceptReceivesToolCallID(t *testing.T) {
 		t.Fatalf("tool call id did not reach the intercept: %v", seen.ToolCallID)
 	}
 	var args map[string]any
-	if err := json.Unmarshal(seen.Arguments, &args); err != nil {
+	if err := json.Unmarshal(seen.Args, &args); err != nil {
 		t.Fatalf("decode context arguments: %v", err)
 	}
 	if args["value"] != float64(7) {
-		t.Fatalf("unexpected context arguments: %s", seen.Arguments)
+		t.Fatalf("unexpected context arguments: %s", seen.Args)
 	}
 	var payload map[string]any
 	if err := json.Unmarshal(result.Result, &payload); err != nil {
@@ -206,7 +206,7 @@ func TestToolExecutionInterceptReceivesNilToolCallIDWhenOmitted(t *testing.T) {
 	if err := RegisterToolExecutionIntercept(interceptName, 1,
 		func(context ToolExecutionContext, next func(json.RawMessage) (ToolExecutionResult, error)) (ToolExecutionInterceptOutcome, error) {
 			seenToolCallID = context.ToolCallID
-			return toolExecutionOutcome(next(context.Arguments))
+			return toolExecutionOutcome(next(context.Args))
 		},
 	); err != nil {
 		t.Fatalf(registerFailed, err)
@@ -231,7 +231,7 @@ func TestToolExecutionInterceptPreservesExplicitEmptyToolCallID(t *testing.T) {
 	if err := RegisterToolExecutionIntercept(interceptName, 1,
 		func(context ToolExecutionContext, next func(json.RawMessage) (ToolExecutionResult, error)) (ToolExecutionInterceptOutcome, error) {
 			seenToolCallID = context.ToolCallID
-			return toolExecutionOutcome(next(context.Arguments))
+			return toolExecutionOutcome(next(context.Args))
 		},
 	); err != nil {
 		t.Fatalf(registerFailed, err)
@@ -255,7 +255,7 @@ func TestToolExecutionResultAnnotationRoundTrip(t *testing.T) {
 	const interceptName = "go_tool_result_annotation"
 	if err := RegisterToolExecutionIntercept(interceptName, 1,
 		func(context ToolExecutionContext, next func(json.RawMessage) (ToolExecutionResult, error)) (ToolExecutionInterceptOutcome, error) {
-			downstream, err := next(context.Arguments)
+			downstream, err := next(context.Args)
 			if err != nil {
 				return ToolExecutionInterceptOutcome{}, err
 			}
@@ -343,7 +343,7 @@ func TestToolExecutionNullAnnotationsNormalizeToAbsent(t *testing.T) {
 	var nextAnnotation json.RawMessage
 	if err := RegisterToolExecutionIntercept(interceptName, 1,
 		func(context ToolExecutionContext, next func(json.RawMessage) (ToolExecutionResult, error)) (ToolExecutionInterceptOutcome, error) {
-			downstream, err := next(context.Arguments)
+			downstream, err := next(context.Args)
 			if err != nil {
 				return ToolExecutionInterceptOutcome{}, err
 			}
@@ -587,7 +587,7 @@ func TestToolRequestInterceptRegisterDeregister(t *testing.T) {
 func TestToolExecutionInterceptRegisterDeregister(t *testing.T) {
 	err := RegisterToolExecutionIntercept("go_exec_int", 1,
 		func(context ToolExecutionContext, next func(json.RawMessage) (ToolExecutionResult, error)) (ToolExecutionInterceptOutcome, error) {
-			return toolExecutionOutcome(next(context.Arguments))
+			return toolExecutionOutcome(next(context.Args))
 		},
 	)
 	if err != nil {
@@ -738,7 +738,7 @@ func TestToolFullPipelineInterceptsAndExecute(t *testing.T) {
 	// Register an execution intercept that wraps the callable
 	RegisterToolExecutionIntercept("go_pipe_exec_int", 1,
 		func(context ToolExecutionContext, next func(json.RawMessage) (ToolExecutionResult, error)) (ToolExecutionInterceptOutcome, error) {
-			result, err := next(context.Arguments)
+			result, err := next(context.Args)
 			if err != nil {
 				return ToolExecutionInterceptOutcome{}, err
 			}
@@ -957,7 +957,7 @@ func TestToolExecutionInterceptWrapsCallable(t *testing.T) {
 		func(context ToolExecutionContext, next func(json.RawMessage) (ToolExecutionResult, error)) (ToolExecutionInterceptOutcome, error) {
 			// Before: modify args
 			var m map[string]interface{}
-			json.Unmarshal(context.Arguments, &m)
+			json.Unmarshal(context.Args, &m)
 			m["before_exec"] = true
 			modifiedArgs, _ := json.Marshal(m)
 
@@ -1028,7 +1028,7 @@ func TestToolExecutionInterceptEmitsPendingMarks(t *testing.T) {
 		interceptName,
 		1,
 		func(context ToolExecutionContext, next func(json.RawMessage) (ToolExecutionResult, error)) (ToolExecutionInterceptOutcome, error) {
-			result, err := next(context.Arguments)
+			result, err := next(context.Args)
 			if err != nil {
 				return ToolExecutionInterceptOutcome{}, err
 			}
@@ -1135,7 +1135,7 @@ func toolExecutionLifecycleEvents(events []Event, toolName, markName string) too
 func TestToolExecutionInterceptSeesNextError(t *testing.T) {
 	RegisterToolExecutionIntercept("go_wrap_exec_err", 1,
 		func(context ToolExecutionContext, next func(json.RawMessage) (ToolExecutionResult, error)) (ToolExecutionInterceptOutcome, error) {
-			return toolExecutionOutcome(next(context.Arguments))
+			return toolExecutionOutcome(next(context.Args))
 		},
 	)
 	defer DeregisterToolExecutionIntercept("go_wrap_exec_err")

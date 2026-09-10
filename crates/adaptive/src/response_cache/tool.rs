@@ -213,7 +213,7 @@ pub(crate) fn make_tool_intercept(
         let response_cache = Arc::clone(&response_cache);
         let tools = Arc::clone(&tools);
         let name = context.tool_name().to_string();
-        let args = context.into_arguments();
+        let args = context.into_args();
         Box::pin(run_tool_cache(
             name,
             args,

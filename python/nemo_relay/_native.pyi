@@ -595,7 +595,7 @@ class ToolExecutionContext:
     @property
     def tool_name(self) -> str: ...
     @property
-    def arguments(self) -> _Json: ...
+    def args(self) -> _Json: ...
     @property
     def tool_call_id(self) -> str | None: ...
 
@@ -2202,7 +2202,7 @@ def register_tool_execution_intercept(name: str, priority: int, callable: _ToolE
         name: Unique intercept name.
         priority: Execution order; lower values run first.
         callable: Middleware callback invoked as ``callable(context, next)``.
-            The context carries ``tool_name``, ``arguments``, and
+            The context carries ``tool_name``, ``args``, and
             ``tool_call_id``.
 
     Returns:

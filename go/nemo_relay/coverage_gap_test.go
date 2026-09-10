@@ -472,7 +472,7 @@ func assertCallbackSerializationFailures(t *testing.T) {
 	t.Helper()
 	const toolName = "coverage_tool_intercept_serialize_failure"
 	if err := RegisterToolExecutionIntercept(toolName, 1, func(context ToolExecutionContext, _ func(json.RawMessage) (ToolExecutionResult, error)) (ToolExecutionInterceptOutcome, error) {
-		return ToolExecutionInterceptOutcome{Result: context.Arguments}, nil
+		return ToolExecutionInterceptOutcome{Result: context.Args}, nil
 	}); err != nil {
 		t.Fatalf("RegisterToolExecutionIntercept failed: %v", err)
 	}

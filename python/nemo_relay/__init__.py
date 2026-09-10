@@ -240,7 +240,7 @@ LlmConditionalExecutionGuardrail: TypeAlias = Callable[[LLMRequest], Optional[st
 ToolRequestIntercept: TypeAlias = AbcCallable[[str, Json], Json | Awaitable[Json]]
 #: Execution intercept callback that wraps tool execution with middleware
 #: behavior. The callback receives a ``ToolExecutionContext`` and the next
-#: callable. It may await ``next(context.arguments)`` or short-circuit.
+#: callable. It may await ``next(context.args)`` or short-circuit.
 ToolExecutionIntercept: TypeAlias = Callable[
     [ToolExecutionContext, Callable[[Json], Awaitable[ToolExecutionResult[Json]]]],
     ToolExecutionInterceptOutcome | Awaitable[ToolExecutionInterceptOutcome],

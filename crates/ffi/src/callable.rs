@@ -148,7 +148,7 @@ pub type NemoRelayToolExecNextFn =
 /// not free or reuse the string afterward, and Relay frees it exactly once.
 /// Tool execution intercept callback receiving the full call context.
 ///
-/// `context_json` is a JSON object with `tool_name`, `arguments`, and
+/// `context_json` is a JSON object with `tool_name`, `args`, and
 /// `tool_call_id` fields. `tool_call_id` is `null` when the managed tool call
 /// did not record one. New context fields may be added to this object without
 /// another ABI change, so callbacks must ignore unknown fields.
@@ -512,7 +512,7 @@ pub fn wrap_tool_exec_intercept_fn(
             let ud = ud.clone();
             let context_json = serde_json::json!({
                 "tool_name": context.tool_name(),
-                "arguments": context.arguments(),
+                "args": context.args(),
                 "tool_call_id": context.tool_call_id(),
             });
             Box::pin(call_tool_exec_intercept_cb(cb, ud, context_json, next))

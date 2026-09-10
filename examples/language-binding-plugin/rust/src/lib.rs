@@ -259,7 +259,7 @@ impl Plugin for DocumentationPlugin {
                             Box::pin(async move {
                                 emit_runtime_events(&tag, &runtime)?;
                                 Ok(ToolExecutionInterceptOutcome::from(
-                                    next(context.into_arguments()).await?,
+                                    next(context.into_args()).await?,
                                 ))
                             })
                         }
@@ -274,7 +274,7 @@ impl Plugin for DocumentationPlugin {
                         let emit_pending_marks = settings.execution.emit_pending_marks;
                         move |context, next| {
                             Box::pin(async move {
-                                let result = next(context.into_arguments()).await?;
+                                let result = next(context.into_args()).await?;
                                 let outcome = ToolExecutionInterceptOutcome::from(result);
                                 Ok(if emit_pending_marks {
                                     outcome.with_pending_mark(

@@ -150,7 +150,7 @@ pub type ToolExecutionNextFn = Arc<
 #[derive(Clone, Default)]
 pub struct ToolExecutionContext {
     tool_name: String,
-    arguments: Json,
+    args: Json,
     tool_call_id: Option<String>,
 }
 
@@ -167,10 +167,10 @@ impl std::fmt::Debug for ToolExecutionContext {
 impl ToolExecutionContext {
     /// Construct a context for a tool name and argument payload.
     #[must_use]
-    pub fn new(tool_name: impl Into<String>, arguments: Json) -> Self {
+    pub fn new(tool_name: impl Into<String>, args: Json) -> Self {
         Self {
             tool_name: tool_name.into(),
-            arguments,
+            args,
             tool_call_id: None,
         }
     }
@@ -184,8 +184,8 @@ impl ToolExecutionContext {
 
     /// Replace the argument payload, preserving the remaining fields.
     #[must_use]
-    pub(crate) fn with_arguments(mut self, arguments: Json) -> Self {
-        self.arguments = arguments;
+    pub(crate) fn with_args(mut self, args: Json) -> Self {
+        self.args = args;
         self
     }
 
@@ -197,14 +197,14 @@ impl ToolExecutionContext {
 
     /// Return the JSON argument payload entering this intercept.
     #[must_use]
-    pub fn arguments(&self) -> &Json {
-        &self.arguments
+    pub fn args(&self) -> &Json {
+        &self.args
     }
 
     /// Consume the context and return its JSON argument payload.
     #[must_use]
-    pub fn into_arguments(self) -> Json {
-        self.arguments
+    pub fn into_args(self) -> Json {
+        self.args
     }
 
     /// Return the provider-issued tool-call correlation identifier, when the

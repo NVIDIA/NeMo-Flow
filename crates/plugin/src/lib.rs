@@ -487,7 +487,7 @@ pub type NemoRelayNativeToolExecutionCb = unsafe extern "C" fn(
 
 /// Native tool execution intercept callback receiving canonical context JSON.
 ///
-/// `context_json` contains `tool_name`, `arguments`, and nullable
+/// `context_json` contains `tool_name`, `args`, and nullable
 /// `tool_call_id` fields. A successful callback must set `out_outcome_json` to
 /// canonical [`ToolExecutionInterceptOutcome`] JSON allocated through the host.
 pub type NemoRelayNativeToolExecutionContextCb = unsafe extern "C" fn(

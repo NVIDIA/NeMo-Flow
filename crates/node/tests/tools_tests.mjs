@@ -840,7 +840,7 @@ describe('Tool intercepts', () => {
 
   it('execution intercept register/deregister', () => {
     registerToolExecutionIntercept('node_tool_exec_int', 10, async (context, next) => {
-      const downstream = await next(context.arguments);
+      const downstream = await next(context.args);
       return {
         result: downstream.result,
         ...(downstream.annotation == null ? {} : { annotation: downstream.annotation }),
@@ -853,7 +853,7 @@ describe('Tool intercepts', () => {
     let seen = null;
     registerToolExecutionIntercept('node_tool_exec_ctx', 10, async (context, next) => {
       seen = context;
-      const downstream = await next(context.arguments);
+      const downstream = await next(context.args);
       return { result: downstream.result };
     });
     try {
@@ -880,7 +880,7 @@ describe('Tool intercepts', () => {
     let seen = null;
     registerToolExecutionIntercept('node_tool_exec_ctx_none', 10, async (context, next) => {
       seen = context;
-      const downstream = await next(context.arguments);
+      const downstream = await next(context.args);
       return { result: downstream.result };
     });
     try {
@@ -896,7 +896,7 @@ describe('Tool intercepts', () => {
     let seenToolCallId = null;
     registerToolExecutionIntercept('node_tool_exec_terminal_context', 10, async (context, _next) => {
       seenToolCallId = context.toolCallId;
-      return { result: { source: 'intercept', arguments: context.arguments } };
+      return { result: { source: 'intercept', arguments: context.args } };
     });
     try {
       const result = await toolCallExecute(
@@ -926,12 +926,12 @@ describe('Tool intercepts', () => {
     const order = [];
     registerToolExecutionIntercept('node_exec_context_first', 1, async (context, next) => {
       order.push('first');
-      const downstream = await next(context.arguments);
+      const downstream = await next(context.args);
       return { result: downstream.result };
     });
     registerToolExecutionIntercept('node_exec_context_second', 2, async (context, next) => {
       order.push('second');
-      const downstream = await next(context.arguments);
+      const downstream = await next(context.args);
       return { result: downstream.result };
     });
     try {
@@ -1059,7 +1059,7 @@ describe('Tool intercepts', () => {
     registerSubscriber('node_tool_exec_mark_sub', (event) => events.push(event));
     registerToolExecutionIntercept('node_tool_exec_repl', 10, async (context, next) => {
       const downstream = await next({
-        ...context.arguments,
+        ...context.args,
         intercepted: true,
       });
       return {
@@ -1123,7 +1123,7 @@ describe('Tool intercepts', () => {
     const events = [];
     registerSubscriber('node_tool_exec_annotation_removal_sub', (event) => events.push(event));
     registerToolExecutionIntercept('node_tool_exec_annotation_removal', 10, async (context, next) => {
-      const downstream = await next(context.arguments);
+      const downstream = await next(context.args);
       return { result: downstream.result };
     });
     try {
@@ -1175,7 +1175,7 @@ describe('Tool intercepts', () => {
       observed.push(['intercept-before', lib.capturePropagationContext().parentUuid]);
       await new Promise((resolve) => setImmediate(resolve));
       observed.push(['intercept-after', lib.capturePropagationContext().parentUuid]);
-      const downstream = await next(context.arguments);
+      const downstream = await next(context.args);
       return {
         result: downstream.result,
         ...(downstream.annotation == null ? {} : { annotation: downstream.annotation }),
@@ -1241,7 +1241,7 @@ describe('Tool intercepts', () => {
     let lateNext;
     let providerCalls = 0;
     registerToolExecutionIntercept('node_tool_exec_late_next', 10, async (context, next) => {
-      lateNext = lateGate.then(() => next(context.arguments));
+      lateNext = lateGate.then(() => next(context.args));
       return { result: { source: 'intercept' } };
     });
     try {
@@ -1276,7 +1276,7 @@ describe('Tool intercepts', () => {
     let downstream;
     let providerSideEffects = 0;
     registerToolExecutionIntercept('node_tool_exec_abort_started_provider', 10, async (context, next) => {
-      downstream = next(context.arguments);
+      downstream = next(context.args);
       downstream.catch(() => undefined);
       await started;
       return { result: { source: 'intercept' } };
@@ -1367,16 +1367,16 @@ describe('Tool intercepts', () => {
       const first = lib.withScopeStack(firstStack, async () => {
         firstStackInstalled();
         await secondInstalled;
-        return next({ ...context.arguments, branch: 'first' });
+        return next({ ...context.args, branch: 'first' });
       });
       const second = lib.withScopeStack(secondStack, async () => {
         await firstInstalled;
         secondStackInstalled();
-        return next({ ...context.arguments, branch: 'second' });
+        return next({ ...context.args, branch: 'second' });
       });
       const branches = await Promise.all([first, second]);
       assert.equal(lib.getHandle().uuid, parentScope);
-      const parent = await next({ ...context.arguments, branch: 'parent' });
+      const parent = await next({ ...context.args, branch: 'parent' });
       return { result: [...branches.map((branch) => branch.result), parent.result] };
     });
     try {
@@ -1420,7 +1420,7 @@ describe('Tool intercepts', () => {
     const intercept = (label) => async (context, next) => {
       observed.push([label, 'before', lib.getHandle().uuid]);
       await new Promise((resolve) => setImmediate(resolve));
-      const result = await next(context.arguments);
+      const result = await next(context.args);
       observed.push([label, 'after', lib.getHandle().uuid]);
       return {
         result: result.result,
@@ -1463,14 +1463,14 @@ describe('Tool intercepts', () => {
 
     registerToolExecutionIntercept('node_tool_exec_snapshot_target', 100, async (context, next) => ({
       result: {
-        ...(await next(context.arguments)).result,
+        ...(await next(context.args)).result,
         snapshotted: true,
       },
     }));
     registerToolExecutionIntercept('node_tool_exec_snapshot_blocker', -100, async (context, next) => {
       blockerEntered();
       await release;
-      const downstream = await next(context.arguments);
+      const downstream = await next(context.args);
       return {
         result: downstream.result,
         ...(downstream.annotation == null ? {} : { annotation: downstream.annotation }),
@@ -1545,7 +1545,7 @@ describe('Tool intercepts', () => {
 
   it('execution intercept may directly forward the canonical Node result', async () => {
     registerToolExecutionIntercept('node_tool_exec_forward_result', 10, async (context, next) =>
-      next(context.arguments),
+      next(context.args),
     );
     try {
       const result = await toolCallExecute('forward_result_tool', { ok: true }, (args) => toolResult(args));

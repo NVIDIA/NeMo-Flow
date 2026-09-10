@@ -262,7 +262,7 @@ Relay does not expose its result to the application. Its failure is deliberately
 A worker registers a tool execution intercept through
 `register_tool_execution_intercept`, whose callback receives
 `(context, next_call)`. The `ToolExecutionContext` carries `tool_name`,
-`arguments`, and the managed `tool_call_id`, which the host sends in the
+`args`, and the managed `tool_call_id`, which the host sends in the
 existing `ToolInvocation.tool_call_id` protobuf field. Use it when a worker
 completes execution itself and must still correlate its result with the
 originating tool call.

@@ -238,7 +238,7 @@ export interface ToolExecutionInterceptOutcome {
  */
 export interface ToolExecutionContext {
   toolName: string;
-  arguments: Json;
+  args: Json;
   toolCallId: string | null;
 }
 

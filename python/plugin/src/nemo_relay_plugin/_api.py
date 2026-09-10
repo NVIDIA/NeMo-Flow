@@ -832,7 +832,7 @@ class ToolExecutionContext:
     """
 
     tool_name: str
-    arguments: Json
+    args: Json
     tool_call_id: str | None = None
 
 
@@ -2518,7 +2518,7 @@ class _WorkerService(pb_grpc.PluginWorkerServicer):
             if request.surface == pb.TOOL_EXECUTION_INTERCEPT:
                 context = ToolExecutionContext(
                     tool_name=request.tool.tool_name,
-                    arguments=_decode_required_envelope(request.tool.value, "tool value"),
+                    args=_decode_required_envelope(request.tool.value, "tool value"),
                     tool_call_id=(request.tool.tool_call_id if request.tool.HasField("tool_call_id") else None),
                 )
                 result = await _maybe_await(

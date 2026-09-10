@@ -185,7 +185,7 @@ impl NativePlugin for FixtureNativePlugin {
             move |context, next| {
                 let runtime = runtime.clone();
                 async move {
-                    let args = context.arguments;
+                    let args = context.args;
                     let args = mark_json(args, "native_plugin_tool_execution_request");
                     let result = if args
                         .get("use_isolated_next")

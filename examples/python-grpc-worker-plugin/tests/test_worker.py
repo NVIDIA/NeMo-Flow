@@ -380,7 +380,7 @@ async def test_runtime_helpers_clean_up_successful_request(example: Any) -> None
     next_call.call = AsyncMock(return_value=ToolExecutionResult({"ok": True}))
 
     await intercept(
-        ToolExecutionContext(tool_name="safe_tool", arguments={"value": 1}, tool_call_id="call-runtime"),
+        ToolExecutionContext(tool_name="safe_tool", args={"value": 1}, tool_call_id="call-runtime"),
         next_call,
     )
 
@@ -398,7 +398,7 @@ async def test_runtime_helpers_close_failed_request(example: Any) -> None:
 
     with pytest.raises(RuntimeError, match="mark failed"):
         await intercept(
-            ToolExecutionContext(tool_name="safe_tool", arguments={"value": 1}, tool_call_id="call-runtime"),
+            ToolExecutionContext(tool_name="safe_tool", args={"value": 1}, tool_call_id="call-runtime"),
             next_call,
         )
 
@@ -416,7 +416,7 @@ async def test_runtime_cleanup_preserves_the_callback_error(example: Any) -> Non
 
     with pytest.raises(RuntimeError, match="mark failed"):
         await intercept(
-            ToolExecutionContext(tool_name="safe_tool", arguments={"value": 1}, tool_call_id="call-runtime"),
+            ToolExecutionContext(tool_name="safe_tool", args={"value": 1}, tool_call_id="call-runtime"),
             next_call,
         )
 
@@ -443,7 +443,7 @@ async def test_tool_execution_returns_pending_mark(example: Any) -> None:
     next_call.call = AsyncMock(return_value=ToolExecutionResult({"ok": True}, annotation={"source": "application"}))
 
     outcome = await intercept(
-        ToolExecutionContext(tool_name="safe_tool", arguments={"value": 1}, tool_call_id="call-execution"),
+        ToolExecutionContext(tool_name="safe_tool", args={"value": 1}, tool_call_id="call-execution"),
         next_call,
     )
 

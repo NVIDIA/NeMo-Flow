@@ -133,7 +133,7 @@ context.register_tool_execution_intercept(
     execution_priority,
     move |context, next| async move {
         Ok(ToolExecutionInterceptOutcome::from(
-            next.call(context.into_arguments()).await?,
+            next.call(context.into_args()).await?,
         )
             .with_pending_mark(
                 PendingMarkSpec::builder()

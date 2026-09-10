@@ -318,7 +318,7 @@ class DocumentationPlugin:
                     with nemo_relay.use_scope_stack(nemo_relay.create_scope_stack()):
                         with scope.scope("documentation-plugin.isolated", nemo_relay.ScopeType.Custom):
                             pass
-                downstream = await next_call(context.arguments)
+                downstream = await next_call(context.args)
                 return nemo_relay.ToolExecutionInterceptOutcome(
                     downstream.result,
                     annotation=downstream.annotation,
@@ -333,7 +333,7 @@ class DocumentationPlugin:
         if execution["enabled"]:
 
             async def tool_execution(context, next_call):
-                result = await next_call(context.arguments)
+                result = await next_call(context.args)
                 marks = (
                     [nemo_relay.PendingMarkSpec("documentation-plugin.tool-complete")]
                     if execution["emit_pending_marks"]

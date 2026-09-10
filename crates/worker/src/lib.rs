@@ -221,7 +221,7 @@ type LlmSanitizeResponseFn =
 #[derive(Debug, Clone)]
 pub struct ToolExecutionContext {
     tool_name: String,
-    arguments: Json,
+    args: Json,
     tool_call_id: Option<String>,
 }
 
@@ -234,14 +234,14 @@ impl ToolExecutionContext {
 
     /// Returns the JSON argument payload entering this intercept.
     #[must_use]
-    pub fn arguments(&self) -> &Json {
-        &self.arguments
+    pub fn args(&self) -> &Json {
+        &self.args
     }
 
     /// Consumes the context and returns its JSON argument payload.
     #[must_use]
-    pub fn into_arguments(self) -> Json {
-        self.arguments
+    pub fn into_args(self) -> Json {
+        self.args
     }
 
     /// Returns the provider-issued tool-call correlation identifier.
@@ -2414,7 +2414,7 @@ impl WorkerService {
         let handler = self.tool_execution(&request.registration_name)?;
         let context = ToolExecutionContext {
             tool_name: payload.tool_name,
-            arguments: payload.value,
+            args: payload.value,
             tool_call_id: payload.tool_call_id,
         };
         let future = with_thread_scope(scope, || handler(context, next));

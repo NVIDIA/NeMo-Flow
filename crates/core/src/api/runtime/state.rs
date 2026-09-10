@@ -1395,7 +1395,7 @@ impl NemoRelayContextState {
                     })
                 };
                 Box::pin(async move {
-                    let outcome = callable(current_context.with_arguments(args), raw_next).await;
+                    let outcome = callable(current_context.with_args(args), raw_next).await;
                     drop(continuation_guard);
                     let mut outcome = outcome?;
                     let mut downstream_batches = std::mem::take(

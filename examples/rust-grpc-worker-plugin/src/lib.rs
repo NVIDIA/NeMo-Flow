@@ -275,7 +275,7 @@ fn register_execution(context: &mut PluginContext, config: &ExampleConfig) {
                 async move {
                     emit_runtime_events(&runtime, &tag, &runtime_config).await?;
                     Ok(ToolExecutionInterceptOutcome::from(
-                        next.call(context.into_arguments()).await?,
+                        next.call(context.into_args()).await?,
                     ))
                 }
             }
@@ -292,7 +292,7 @@ fn register_execution(context: &mut PluginContext, config: &ExampleConfig) {
         {
             let emit_marks = config.execution.emit_pending_marks;
             move |context, next| async move {
-                let result = next.call(context.into_arguments()).await?;
+                let result = next.call(context.into_args()).await?;
                 let mut outcome = ToolExecutionInterceptOutcome::from(result);
                 if emit_marks {
                     outcome = outcome.with_pending_mark(

@@ -1338,7 +1338,7 @@ impl WorkerPluginInstance {
                     let callback_name = callback_name.clone();
                     let tool_name = context.tool_name().to_owned();
                     let tool_call_id = context.tool_call_id().map(str::to_owned);
-                    let value = context.into_arguments();
+                    let value = context.into_args();
                     Box::pin(async move {
                         instance
                             .invoke_tool_execution(

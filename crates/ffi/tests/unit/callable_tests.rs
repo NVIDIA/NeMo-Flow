@@ -106,7 +106,7 @@ unsafe extern "C" fn tool_exec_intercept_cb(
             .unwrap_or("null"),
     )
     .unwrap();
-    let arguments = CString::new(context["arguments"].to_string()).unwrap();
+    let arguments = CString::new(context["args"].to_string()).unwrap();
     let result_ptr = unsafe { next_fn(arguments.as_ptr(), next_ctx) };
     if result_ptr.is_null() {
         return std::ptr::null_mut();

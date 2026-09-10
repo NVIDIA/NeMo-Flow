@@ -292,7 +292,7 @@ describe('typedToolExecute', () => {
     const annotation = { provider: 'typed-node' };
     let interceptAnnotation;
     registerToolExecutionIntercept('typed_node_annotation', 10, async (context, next) => {
-      const downstream = await next(context.arguments);
+      const downstream = await next(context.args);
       interceptAnnotation = downstream.annotation;
       return downstream;
     });
@@ -494,7 +494,7 @@ describe('typedToolExecute', () => {
     let downstream;
     let providerSideEffects = 0;
     registerToolExecutionIntercept('typed_tool_abort_started_provider', 10, async (context, next) => {
-      downstream = next(context.arguments);
+      downstream = next(context.args);
       downstream.catch(() => undefined);
       await started;
       return { result: { source: 'intercept' } };

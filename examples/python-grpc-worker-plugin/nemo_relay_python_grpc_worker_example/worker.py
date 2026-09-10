@@ -256,7 +256,7 @@ class ExamplePythonWorker(WorkerPlugin):
 
         async def runtime_events(context: ToolExecutionContext, next_call: Any) -> ToolExecutionInterceptOutcome:
             await _emit_runtime_events(ctx, tag, settings)
-            downstream = await next_call.call(context.arguments)
+            downstream = await next_call.call(context.args)
             return ToolExecutionInterceptOutcome(
                 result=downstream.result,
                 annotation=downstream.annotation,
@@ -270,7 +270,7 @@ class ExamplePythonWorker(WorkerPlugin):
         emit_pending_marks = cast(bool, execution["emit_pending_marks"])
 
         async def tool_execution(context: ToolExecutionContext, next_call: Any) -> ToolExecutionInterceptOutcome:
-            result: ToolExecutionResult = await next_call.call(context.arguments)
+            result: ToolExecutionResult = await next_call.call(context.args)
             marks = (
                 [
                     PendingMarkSpec(

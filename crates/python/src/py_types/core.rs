@@ -1228,7 +1228,7 @@ impl PyToolExecutionResult {
 #[pyclass(name = "ToolExecutionContext", frozen)]
 pub struct PyToolExecutionContext {
     tool_name: String,
-    arguments: Arc<Py<PyAny>>,
+    args: Arc<Py<PyAny>>,
     tool_call_id: Option<String>,
 }
 
@@ -1242,8 +1242,8 @@ impl PyToolExecutionContext {
 
     /// JSON argument payload entering this intercept.
     #[getter]
-    fn arguments(&self, py: Python<'_>) -> Py<PyAny> {
-        self.arguments.as_ref().clone_ref(py)
+    fn args(&self, py: Python<'_>) -> Py<PyAny> {
+        self.args.as_ref().clone_ref(py)
     }
 
     /// Provider-issued tool-call correlation identifier, or `None` when the
@@ -1265,7 +1265,7 @@ impl PyToolExecutionContext {
     pub(crate) fn from_inner(py: Python<'_>, inner: &ToolExecutionContext) -> PyResult<Self> {
         Ok(Self {
             tool_name: inner.tool_name().to_string(),
-            arguments: Arc::new(json_to_py(py, inner.arguments())?),
+            args: Arc::new(json_to_py(py, inner.args())?),
             tool_call_id: inner.tool_call_id().map(str::to_string),
         })
     }

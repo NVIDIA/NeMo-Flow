@@ -264,7 +264,7 @@ fn register_fixture_tool_hooks(
         |context, next: ToolNext| async move {
             let result = next
                 .call(mark_json(
-                    context.into_arguments(),
+                    context.into_args(),
                     "worker_plugin_tool_execution_request",
                 ))
                 .await?;

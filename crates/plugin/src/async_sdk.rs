@@ -808,7 +808,7 @@ pub struct ToolExecutionContext {
     /// Tool name associated with the execution.
     pub tool_name: String,
     /// JSON argument payload entering this intercept.
-    pub arguments: Json,
+    pub args: Json,
     /// Provider-issued tool-call correlation identifier, when supplied.
     pub tool_call_id: Option<String>,
 }
@@ -1386,7 +1386,7 @@ impl PluginContext<'_> {
                     );
                     let context = ToolExecutionContext {
                         tool_name: invocation.name,
-                        arguments: invocation.value,
+                        args: invocation.value,
                         tool_call_id: invocation.tool_call_id,
                     };
                     serde_json::to_value(callback(context, next).await?)

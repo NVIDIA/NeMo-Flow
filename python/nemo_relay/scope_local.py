@@ -453,7 +453,7 @@ def register_tool_execution(scope_handle: ScopeHandle, name: str, priority: int,
         name: Unique intercept name within the owning scope.
         priority: Execution order for the intercept. Lower values run first.
         fn: Callable invoked as ``fn(context, next_call)``. It may call
-            ``next_call(context.arguments)`` to continue execution, modify the result, or
+            ``next_call(context.args)`` to continue execution, modify the result, or
             short-circuit the tool call entirely. It must return
             ``ToolExecutionInterceptOutcome``.
 

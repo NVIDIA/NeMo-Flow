@@ -725,7 +725,7 @@ func TestScopeLocalToolExecutionIntercept(t *testing.T) {
 		var seen ToolExecutionContext
 		err := ScopeRegisterToolExecutionIntercept(handle.UUID(), "scope_exec_int", 1, func(context ToolExecutionContext, next func(json.RawMessage) (ToolExecutionResult, error)) (ToolExecutionInterceptOutcome, error) {
 			seen = context
-			result, err := next(context.Arguments)
+			result, err := next(context.Args)
 			if err != nil {
 				return ToolExecutionInterceptOutcome{}, err
 			}
@@ -1081,7 +1081,7 @@ func assertScopeLocalToolWrappersDeregister(t *testing.T, scopeUUID string) {
 			return ScopeRegisterToolExecutionIntercept(scopeUUID, "tool_scope_exec_int", 1,
 				func(context ToolExecutionContext, next func(json.RawMessage) (ToolExecutionResult, error)) (ToolExecutionInterceptOutcome, error) {
 					executionInterceptCalls++
-					return toolExecutionOutcome(next(context.Arguments))
+					return toolExecutionOutcome(next(context.Args))
 				},
 			)
 		},

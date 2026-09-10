@@ -455,7 +455,7 @@ typedef char *(*NemoRelayToolExecNextFn)(const char *args_json, void *next_ctx);
  * not free or reuse the string afterward, and Relay frees it exactly once.
  * Tool execution intercept callback receiving the full call context.
  *
- * `context_json` is a JSON object with `tool_name`, `arguments`, and
+ * `context_json` is a JSON object with `tool_name`, `args`, and
  * `tool_call_id` fields. `tool_call_id` is `null` when the managed tool call
  * did not record one. New context fields may be added to this object without
  * another ABI change, so callbacks must ignore unknown fields.
@@ -3271,7 +3271,7 @@ NemoRelayStatus nemo_relay_deregister_tool_conditional_execution_guardrail(const
 /**
  * Register a tool execution intercept following the middleware chain pattern.
  * The callback receives `(context_json, next_fn, next_ctx)`, where
- * `context_json` contains `tool_name`, `arguments`, and `tool_call_id`.
+ * `context_json` contains `tool_name`, `args`, and `tool_call_id`.
  *
  * # Parameters
  * - `name`: Unique intercept name.

@@ -258,7 +258,7 @@ class TestTypedToolExecute:
         seen_annotations = []
 
         async def intercept(context, next_call):
-            downstream = await next_call(context.arguments)
+            downstream = await next_call(context.args)
             seen_annotations.append(downstream.annotation)
             return ToolExecutionInterceptOutcome(
                 downstream.result,

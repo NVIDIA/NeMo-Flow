@@ -125,7 +125,7 @@ pub(crate) fn create_tool_execution_intercept_with_mode(
         let registry = cohort_registry.clone();
         let mode = mode.clone();
         let name = context.tool_name().to_string();
-        let args = context.into_arguments();
+        let args = context.into_args();
         Box::pin(async move {
             let Some(cohort_key) = resolve_warm_first_cohort_key(&name, &mode, &cache) else {
                 return next(args).await.map(Into::into);

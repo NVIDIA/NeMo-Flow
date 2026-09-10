@@ -4114,7 +4114,7 @@ fn typed_async_middleware_registers_and_round_trips_every_surface() {
     ctx.register_tool_execution_intercept("tool-execution-async", 8, |context, next| async move {
         assert_eq!(context.tool_name, "calculator");
         assert_eq!(context.tool_call_id.as_deref(), Some("call-calculator"));
-        let result = next.call(context.arguments).await?;
+        let result = next.call(context.args).await?;
         Ok(ToolExecutionInterceptOutcome::from(result))
     })
     .unwrap();

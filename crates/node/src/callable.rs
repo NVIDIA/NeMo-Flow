@@ -1578,7 +1578,7 @@ pub fn wrap_js_response_codec(
 
 /// Wrap a JS function `(context, next) => outcome` for tool execution intercepts.
 ///
-/// The JS callback receives a plain object carrying `toolName`, `arguments`,
+/// The JS callback receives a plain object carrying `toolName`, `args`,
 /// and `toolCallId`, so it can correlate a result it produces itself with the
 /// originating tool call.
 pub fn wrap_js_tool_exec_intercept_fn(
@@ -1589,7 +1589,7 @@ pub fn wrap_js_tool_exec_intercept_fn(
             let func = func.clone();
             let js_context = serde_json::json!({
                 "toolName": context.tool_name(),
-                "arguments": context.arguments(),
+                "args": context.args(),
                 "toolCallId": context.tool_call_id(),
             });
             Box::pin(call_js_tool_exec_intercept(func, js_context, next))

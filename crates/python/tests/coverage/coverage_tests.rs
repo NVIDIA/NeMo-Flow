@@ -461,7 +461,7 @@ def tool_request_intercept(name, value):
     return value
 
 async def tool_execution_intercept(context, next):
-    downstream = await next(context.arguments)
+    downstream = await next(context.args)
     return ToolOutcome(downstream.result, annotation=downstream.annotation)
 
 class CoveragePlugin:
@@ -809,7 +809,7 @@ async def tool_exec(args):
     return ToolResult({"tool": args["x"] + 1}, {"source": "python-exec"})
 
 async def tool_intercept(context, next):
-    downstream = await next({"x": context.arguments["x"] + 1})
+    downstream = await next({"x": context.args["x"] + 1})
     result = dict(downstream.result)
     result["wrapped"] = True
     return ToolOutcome(result, annotation=downstream.annotation)

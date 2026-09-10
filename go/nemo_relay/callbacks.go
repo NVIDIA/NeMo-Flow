@@ -198,7 +198,7 @@ type ToolExecutionFunc func(args json.RawMessage) (ToolExecutionResult, error)
 // exhaustive.
 type ToolExecutionContext struct {
 	ToolName   string          `json:"tool_name"`
-	Arguments  json.RawMessage `json:"arguments"`
+	Args       json.RawMessage `json:"args"`
 	ToolCallID *string         `json:"tool_call_id,omitempty"`
 }
 

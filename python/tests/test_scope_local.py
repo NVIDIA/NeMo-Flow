@@ -522,7 +522,7 @@ class TestScopeLocalExecutionIntercept:
 
         def intercept_fn(context, next_call):
             # Cannot call next_call here — it returns a Future.
-            arguments = {**context.arguments, "x": context.arguments["x"] + 1}
+            arguments = {**context.args, "x": context.args["x"] + 1}
             return ToolExecutionInterceptOutcome({"value": arguments["x"] * 2, "intercepted": True})
 
         with scope.scope("exec_next_scope", ScopeType.Agent) as handle:
@@ -539,8 +539,8 @@ class TestScopeLocalExecutionIntercept:
         async def context_intercept(context, next_call):
             seen["tool_name"] = context.tool_name
             seen["tool_call_id"] = context.tool_call_id
-            seen["arguments"] = context.arguments
-            downstream = await next_call(context.arguments)
+            seen["arguments"] = context.args
+            downstream = await next_call(context.args)
             return ToolExecutionInterceptOutcome(downstream.result)
 
         with scope.scope("exec_ctx_scope", ScopeType.Agent) as handle:
@@ -642,7 +642,7 @@ class TestScopeLocalLlmWrappers:
                 handle,
                 "sl_tool_exec_cov",
                 1,
-                lambda context, next_call: ToolExecutionInterceptOutcome(context.arguments),
+                lambda context, next_call: ToolExecutionInterceptOutcome(context.args),
             )
             assert scope_local.deregister_tool_execution(handle, "sl_tool_exec_cov") is True
 

@@ -1004,7 +1004,7 @@ pub(super) fn register_remote_backend(
         let tool_execution: ToolExecutionFn = Arc::new(move |context, next| {
             let runtime = Arc::clone(&tool_runtime);
             let tool_name = context.tool_name().to_string();
-            let args = context.into_arguments();
+            let args = context.into_args();
             Box::pin(async move {
                 let current_args = if enable_tool_input {
                     runtime.check_tool_input(&tool_name, &args).await?

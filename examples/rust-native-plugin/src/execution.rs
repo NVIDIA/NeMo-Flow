@@ -28,7 +28,7 @@ pub(crate) fn register(
                 async move {
                     emit_configured_runtime_events(&runtime, &tag, &runtime_config)?;
                     Ok(ToolExecutionInterceptOutcome::from(
-                        next.call(context.arguments).await?,
+                        next.call(context.args).await?,
                     ))
                 }
             }
@@ -45,7 +45,7 @@ pub(crate) fn register(
         {
             let emit_pending_marks = config.execution.emit_pending_marks;
             move |context, next| async move {
-                let result = next.call(context.arguments).await?;
+                let result = next.call(context.args).await?;
                 let mut outcome = ToolExecutionInterceptOutcome::from(result);
                 if emit_pending_marks {
                     outcome = outcome.with_pending_mark(

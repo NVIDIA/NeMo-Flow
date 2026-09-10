@@ -3607,7 +3607,7 @@ fn wrap_native_async_tool_execution(
         // plugins built before it existed ignore it.
         let invocation = serde_json::json!({
             "name": context.tool_name(),
-            "value": context.arguments(),
+            "value": context.args(),
             "tool_call_id": context.tool_call_id(),
         });
         Box::pin(async move {
@@ -5032,7 +5032,7 @@ fn wrap_tool_execution_fn(
     let user_data = make_user_data(instance, user_data, free_fn);
     Arc::new(move |context, next| {
         let name = context.tool_name().to_owned();
-        let args = context.into_arguments();
+        let args = context.into_args();
         let user_data = user_data.clone();
         Box::pin(async move {
             clear_native_last_error();
@@ -5088,7 +5088,7 @@ fn wrap_tool_execution_context_fn(
         let user_data = user_data.clone();
         let context = serde_json::json!({
             "tool_name": context.tool_name(),
-            "arguments": context.arguments(),
+            "args": context.args(),
             "tool_call_id": context.tool_call_id(),
         });
         Box::pin(async move {

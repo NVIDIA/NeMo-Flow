@@ -254,7 +254,7 @@ fn assert_tool_execution_intercept_registered(name: &str) {
             name,
             i32::MAX,
             Arc::new(|context, next| {
-                Box::pin(async move { next(context.into_arguments()).await.map(Into::into) })
+                Box::pin(async move { next(context.into_args()).await.map(Into::into) })
             }),
         ),
         name,
@@ -266,7 +266,7 @@ fn assert_tool_execution_intercept_absent(name: &str) {
         name,
         i32::MAX,
         Arc::new(|context, next| {
-            Box::pin(async move { next(context.into_arguments()).await.map(Into::into) })
+            Box::pin(async move { next(context.into_args()).await.map(Into::into) })
         }),
     )
     .unwrap();
@@ -825,7 +825,7 @@ async fn registration_context_registers_all_supported_callback_types() {
     ctx.register_tool_execution_intercept(
         "adaptive_test_tool",
         8,
-        Arc::new(|context, _next| Box::pin(async move { Ok(context.into_arguments().into()) })),
+        Arc::new(|context, _next| Box::pin(async move { Ok(context.into_args().into()) })),
     )
     .unwrap();
 
@@ -1222,7 +1222,7 @@ async fn response_cache_feature_cleans_up_when_tool_registration_conflicts() {
         &tool_name,
         1,
         Arc::new(|context, next| {
-            Box::pin(async move { next(context.into_arguments()).await.map(Into::into) })
+            Box::pin(async move { next(context.into_args()).await.map(Into::into) })
         }),
     )
     .unwrap();

@@ -121,7 +121,7 @@ def sync_tool_exec(args):
     return ToolResult({"sync_tool": args["x"] + 1})
 
 def sync_tool_intercept(context, next):
-    return ToolOutcome({"name": context.tool_name, "value": context.arguments["x"] + 2})
+    return ToolOutcome({"name": context.tool_name, "value": context.args["x"] + 2})
 
 def sync_llm_exec(request):
     return {"model": request.content["model"], "mode": "sync"}

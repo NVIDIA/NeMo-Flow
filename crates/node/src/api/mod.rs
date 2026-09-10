@@ -3906,7 +3906,7 @@ napi_intercept_tool_api!(
 /// Register a tool execution intercept following the middleware chain pattern.
 ///
 /// The `callable` receives a `ToolExecutionContext` and a `next` function.
-/// Call `next(context.arguments)` to invoke the remaining chain.
+/// Call `next(context.args)` to invoke the remaining chain.
 #[napi]
 pub fn register_tool_execution_intercept(
     env: Env,

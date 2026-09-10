@@ -238,7 +238,7 @@ ffi_intercept_tool_api!(
 
 /// Register a tool execution intercept following the middleware chain pattern.
 /// The callback receives `(context_json, next_fn, next_ctx)`, where
-/// `context_json` contains `tool_name`, `arguments`, and `tool_call_id`.
+/// `context_json` contains `tool_name`, `args`, and `tool_call_id`.
 ///
 /// # Parameters
 /// - `name`: Unique intercept name.

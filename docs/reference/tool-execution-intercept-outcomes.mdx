@@ -98,7 +98,7 @@ context carries three fields:
 | Field | Description |
 | --- | --- |
 | `tool_name` | Name of the tool being executed. |
-| `arguments` | JSON argument payload entering this intercept. |
+| `args` | JSON argument payload entering this intercept. |
 | `tool_call_id` | Provider-issued correlation identifier recorded on the managed tool call, or absent when the call did not record one. |
 
 `tool_call_id` is the same identifier that Relay records on tool lifecycle
@@ -123,7 +123,7 @@ onto the context:
 
 ```python
 async def measure(context, next_call):
-    downstream = await next_call(context.arguments)
+    downstream = await next_call(context.args)
     record(context.tool_call_id, context.tool_name, downstream.result)
     return ToolExecutionInterceptOutcome(result=downstream.result)
 
@@ -132,7 +132,7 @@ nemo_relay.intercepts.register_tool_execution("measure", 10, measure)
 
 ```javascript
 registerToolExecutionIntercept('measure', 10, async (context, next) => {
-  const downstream = await next(context.arguments);
+  const downstream = await next(context.args);
   record(context.toolCallId, context.toolName, downstream.result);
   return { result: downstream.result };
 });
@@ -141,9 +141,9 @@ registerToolExecutionIntercept('measure', 10, async (context, next) => {
 This is a breaking callback change: migrate Rust, Python, and Go callbacks from
 `(tool_name, arguments, next)` to `(context, next)`, and migrate Node.js and C
 callbacks from their argument-only shape to the context shape. In Node.js the
-context object uses `toolName`, `arguments`, and `toolCallId`, where
+context object uses `toolName`, `args`, and `toolCallId`, where
 `toolCallId` is `string | null`. The public C callback receives a single
-`context_json` string carrying `tool_name`, `arguments`, and `tool_call_id`;
+`context_json` string carrying `tool_name`, `args`, and `tool_call_id`;
 callbacks must ignore unknown fields. The `grpc-v1` `ToolInvocation` message
 and its optional `tool_call_id` field are unchanged.
 

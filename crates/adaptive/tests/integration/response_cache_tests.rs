@@ -2309,7 +2309,7 @@ async fn execution_intercepts_outside_the_cache_run_on_hits() {
                 let outer_runs = Arc::clone(&outer_runs);
                 Box::pin(async move {
                     outer_runs.fetch_add(1, Ordering::SeqCst);
-                    next(context.into_arguments()).await.map(Into::into)
+                    next(context.into_args()).await.map(Into::into)
                 })
             }
         }),
