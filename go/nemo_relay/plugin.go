@@ -414,8 +414,8 @@ func marshalPluginHostActivationConfig(config PluginConfig) ([]byte, error) {
 }
 
 // Initialize activates the core-owned static and dynamic plugin host.
-// Programmatic config is lowest precedence. An optional explicit file replaces
-// user-file discovery, and the system file overlays either source.
+// An optional explicit file replaces user-file discovery. Relay merges the
+// selected file with the system file, then applies programmatic config.
 func Initialize(config PluginConfig, additionalPluginsTOML *string) (*PluginHostActivation, PluginHostReport, error) {
 	configPayload, err := marshalPluginHostActivationConfig(config)
 	if err != nil {

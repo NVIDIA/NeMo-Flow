@@ -116,7 +116,7 @@ impl Plugin for AuditPlugin {
 Rust carries the kind on the `Plugin` implementation. Python and Node.js supply it when
 the application calls `plugin.register("audit", implementation)`. In all three cases,
 `events` is a local registration name. Relay qualifies that name with the component
-owner, records it during activation, and removes it during clear or rollback.
+owner, records it during activation, and removes it when the activation closes or rolls back.
 
 One component can install several kinds of middleware when the configuration tells a
 coherent story. For example, a policy component can observe calls, block configured
@@ -148,12 +148,11 @@ Registrations should be created only through the supplied context. Direct proces
 registration escapes component ownership and prevents reliable rollback. The same rule
 applies to external resources: create clients, tasks, and file handles during
 registration only when their lifetime is tied to the component and they can be stopped
-when activation fails or configuration is cleared.
+when activation fails or the owning activation closes.
 
-Language-binding applications remove active plugin configuration with the binding's
-[clear API](/build-plugins/language-binding/register-behavior) and can deregister a
-plugin kind when the implementation itself is no longer available. Dynamic hosts
-clear component registrations before unloading a native library or stopping a
+Language-binding applications close the owning activation to remove active plugin
+configuration. They can deregister a plugin kind when the implementation itself
+is no longer available. Dynamic hosts remove component registrations before unloading a native library or stopping a
 worker. Worker shutdown also ends in-flight callback service,
 closes the authenticated endpoint, and terminates the managed process.
 
@@ -169,7 +168,7 @@ Use the following sequence to verify validation, activation, ownership, and tear
    before sending application traffic.
 5. Execute a representative managed call and observe the registration's effect rather
    than treating successful initialization as sufficient proof.
-6. Clear configuration and verify that the same call no longer observes the plugin.
+6. Close the activation and verify that the same call no longer observes the plugin.
 7. For a dynamic plugin, unload or stop the implementation only after registrations are
    gone.
 

@@ -93,7 +93,7 @@ pub(crate) enum PluginHostValidationTarget {
 #[derive(Debug, Clone, serde::Serialize, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub(crate) struct PluginHostValidationRequest {
-    /// Programmatic static-plugin configuration at the lowest precedence.
+    /// Programmatic static-plugin configuration applied after file layers.
     #[serde(default)]
     pub config: PluginConfig,
     /// Optional explicit `plugins.toml` layer.
