@@ -27,8 +27,9 @@ This removes only the installed CLI binary. It does not remove PATH entries,
 Relay configuration, observability output, or coding-agent integrations. It
 refuses removal while this CLI has active Relay processes unless --force is used.
 Active managed daemon processes always block removal, including with --force.
-Stop managed deployments through their administrative lifecycle first. Managed
-bundles, daemon identity/trust state, and deployment services are preserved.
+Close affected coding-agent sessions, allow shared workers to drain, then stop
+the managed deployment through its service manager. Managed bundles, daemon
+identity/trust state, and deployment services are preserved.
 EOF
 }
 
@@ -251,9 +252,9 @@ check_managed_relay_processes() {
             *" daemon "*)
                 describe_process "$relay_pid" >&2
                 if [ "$dry_run" -eq 1 ]; then
-                    error 'dry run would refuse removal: active managed daemon deployment; stop it through its administrative lifecycle first. --force cannot override this restriction'
+                    error 'dry run would refuse removal: active managed daemon deployment; close affected coding-agent sessions, allow shared workers to drain, then stop it through its service manager. --force cannot override this restriction'
                 fi
-                error 'active managed daemon deployment; stop it through its administrative lifecycle first. --force cannot override this restriction'
+                error 'active managed daemon deployment; close affected coding-agent sessions, allow shared workers to drain, then stop it through its service manager. --force cannot override this restriction'
                 ;;
         esac
     done

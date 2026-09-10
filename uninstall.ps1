@@ -35,8 +35,9 @@ This removes only the installed CLI binary. It does not remove PATH entries,
 Relay configuration, observability output, or coding-agent integrations. It
 refuses removal while this CLI has active Relay processes unless -Force is used.
 Active managed daemon processes always block removal, including with -Force.
-Stop managed deployments through their administrative lifecycle first. Managed
-bundles, daemon identity/trust state, and deployment services are preserved.
+Close affected coding-agent sessions, allow shared workers to drain, then stop
+the managed deployment through its service manager. Managed bundles, daemon
+identity/trust state, and deployment services are preserved.
 '@ | Write-Output
 }
 
@@ -181,7 +182,7 @@ function Assert-NoManagedRelayProcesses([string]$Destination) {
         foreach ($process in $managedProcesses) {
             [Console]::Error.WriteLine((Format-ProcessDescription $process))
         }
-        $message = 'active managed daemon deployment; stop it through its administrative lifecycle first. -Force cannot override this restriction'
+        $message = 'active managed daemon deployment; close affected coding-agent sessions, allow shared workers to drain, then stop it through its service manager. -Force cannot override this restriction'
         if ($DryRun) {
             Fail "dry run would refuse removal: $message"
         }

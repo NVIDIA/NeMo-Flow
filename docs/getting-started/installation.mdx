@@ -216,8 +216,9 @@ are active.
 Active managed daemon processes using the selected binary block removal even
 with `--force` or `-Force`. This includes the broker, `daemon mcp`,
 `daemon worker`, and `daemon hook`. Stop the managed deployment through its
-administrative lifecycle before retrying. Workers can serve multiple sessions,
-and a local process tree cannot identify every affected client.
+service manager after closing affected coding-agent sessions and allowing shared
+workers to drain. A worker can serve multiple sessions, and its local process
+tree cannot identify every affected client.
 
 The scripts preserve administrator-managed bundles, daemon identity and trust
 state, and deployment services. Removing the binary does not tear down a managed
