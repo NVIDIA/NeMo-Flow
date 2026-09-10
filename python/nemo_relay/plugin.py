@@ -140,6 +140,8 @@ class PluginHostReport(TypedDict):
 
     config: ConfigReport
     dynamic_plugins: list[DynamicPluginValidationReport]
+    config_paths: list[str]
+    resolved_config: JsonObject
 
 
 DynamicPluginKind = Literal["rust_dynamic", "worker"]

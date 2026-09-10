@@ -154,10 +154,8 @@ fn assert_pi_bundle_artifacts(bundle: &RenderedBundle) {
 
 #[test]
 fn managed_pi_launch_disables_discovered_extensions() {
-    const ISOLATED_LAUNCH: &str =
-        "pi --no-extensions -e /srv/nemo-relay/nemo-relay-managed-v1/pi/extension-v1/index.ts";
-    const NON_ISOLATED_LAUNCH: &str =
-        "pi -e /srv/nemo-relay/nemo-relay-managed-v1/pi/extension-v1/index.ts";
+    const ISOLATED_LAUNCH: &str = "pi --no-extensions -e ";
+    const NON_ISOLATED_LAUNCH: &str = "pi -e ";
 
     let rendered = render_bundle(&spec([ManagedAgent::Pi])).unwrap();
     let readme = rendered

@@ -1862,20 +1862,28 @@ pub(crate) fn resolve_plugin_config_documents(
     let explicit_path = explicit_path.map(Path::to_path_buf);
     let (file_value, mut sources) = merge_plugin_config_documents(documents)?
         .unwrap_or_else(|| (Json::Object(Map::new()), Vec::new()));
+    let config_paths = sources
+        .iter()
+        .map(|source| source.display().to_string())
+        .collect();
     let mut value = file_value;
     layer_config(&mut value, plugin_config_overlay_value(&config)?);
     if let Some(explicit_path) = explicit_path {
         sources.retain(|source| source != &explicit_path);
     }
     Ok(ResolvedPluginConfig {
+        resolved_config: value.clone(),
         config: serde_json::from_value(value)?,
         diagnostics: inherited_plugin_config_diagnostics(&sources),
+        config_paths,
     })
 }
 
 pub(crate) struct ResolvedPluginConfig {
     pub(crate) config: PluginConfig,
+    pub(crate) resolved_config: Json,
     pub(crate) diagnostics: Vec<ConfigDiagnostic>,
+    pub(crate) config_paths: Vec<String>,
 }
 
 /// Serializes a typed configuration as a discovery overlay.
@@ -2030,8 +2038,14 @@ fn resolve_programmatic_plugin_config(
     let mut base = discovered.value;
     layer_config(&mut base, plugin_config_overlay_value(&config)?);
     Ok(ResolvedPluginConfig {
+        resolved_config: base.clone(),
         config: serde_json::from_value(base)?,
         diagnostics,
+        config_paths: discovered
+            .sources
+            .iter()
+            .map(|source| source.display().to_string())
+            .collect(),
     })
 }
 

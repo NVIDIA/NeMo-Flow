@@ -899,6 +899,8 @@ function createModules(
         return {
           config: { diagnostics: params.validateDiagnostics ?? [] },
           dynamic_plugins: [],
+          config_paths: [],
+          resolved_config: {},
         };
       },
       initialize: async (config) => {
@@ -907,6 +909,8 @@ function createModules(
           report: {
             config: { diagnostics: params.initializeDiagnostics ?? [] },
             dynamic_plugins: [],
+            config_paths: [],
+            resolved_config: {},
           },
           isActive: true,
           close: async () => {

@@ -5900,7 +5900,7 @@ pub struct PluginHostActivation {
 type DynamicPluginTeardownResult = std::result::Result<(), String>;
 
 enum DynamicPluginCloseStatus {
-    Active(Option<CorePluginHostActivation>),
+    Active(Box<Option<CorePluginHostActivation>>),
     Closing,
     Closed,
 }
@@ -5916,7 +5916,7 @@ impl DynamicPluginCloseState {
         let (completion, _) = tokio::sync::watch::channel(None);
         let report = activation.report();
         Self {
-            status: StdMutex::new(DynamicPluginCloseStatus::Active(Some(activation))),
+            status: StdMutex::new(DynamicPluginCloseStatus::Active(Box::new(Some(activation)))),
             report: StdMutex::new(report),
             completion,
         }
@@ -5929,10 +5929,11 @@ impl DynamicPluginCloseState {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             match &*status {
-                DynamicPluginCloseStatus::Active(Some(activation)) => Some(activation.report()),
-                DynamicPluginCloseStatus::Active(None)
-                | DynamicPluginCloseStatus::Closing
-                | DynamicPluginCloseStatus::Closed => None,
+                DynamicPluginCloseStatus::Active(activation) => activation
+                    .as_ref()
+                    .as_ref()
+                    .map(CorePluginHostActivation::report),
+                DynamicPluginCloseStatus::Closing | DynamicPluginCloseStatus::Closed => None,
             }
         };
         let mut report = self
@@ -5951,7 +5952,7 @@ impl DynamicPluginCloseState {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         match &*status {
-            DynamicPluginCloseStatus::Active(activation) => activation.is_some(),
+            DynamicPluginCloseStatus::Active(activation) => activation.as_ref().is_some(),
             DynamicPluginCloseStatus::Closing | DynamicPluginCloseStatus::Closed => false,
         }
     }
@@ -5964,13 +5965,13 @@ impl DynamicPluginCloseState {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             match &mut *status {
                 DynamicPluginCloseStatus::Active(activation) => {
-                    if let Some(current) = activation.as_ref() {
+                    if let Some(current) = activation.as_ref().as_ref() {
                         *self
                             .report
                             .lock()
                             .unwrap_or_else(|poisoned| poisoned.into_inner()) = current.report();
                     }
-                    let activation = activation.take();
+                    let activation = activation.as_mut().take();
                     if activation.is_some() {
                         self.completion.send_replace(None);
                     }
@@ -6063,7 +6064,7 @@ impl DynamicPluginCloseState {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         *status = if retryable {
-            DynamicPluginCloseStatus::Active(activation)
+            DynamicPluginCloseStatus::Active(Box::new(activation))
         } else {
             DynamicPluginCloseStatus::Closed
         };

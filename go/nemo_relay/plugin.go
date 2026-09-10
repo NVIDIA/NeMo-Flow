@@ -276,6 +276,8 @@ type PluginHostActivation struct {
 type PluginHostReport struct {
 	Config         ConfigReport                    `json:"config"`
 	DynamicPlugins []DynamicPluginValidationReport `json:"dynamic_plugins"`
+	ConfigPaths    []string                        `json:"config_paths"`
+	ResolvedConfig map[string]any                  `json:"resolved_config"`
 }
 
 // DynamicPluginCheckState is the result of one validation check.
