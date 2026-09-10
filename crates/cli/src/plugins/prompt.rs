@@ -1500,3 +1500,7 @@ pub(super) fn editor_error(err: dialoguer::Error) -> CliError {
         other => CliError::Config(format!("plugin edit error: {other}")),
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/coverage/shared/plugin_prompt_tests.rs"]
+mod tests;

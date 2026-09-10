@@ -628,6 +628,9 @@ impl ScopeLineage {
         if let Some(context) = self.completed.get(&parent_uuid) {
             return Some(context.span_context.clone());
         }
+        if event.propagation_parent_uuid() != Some(parent_uuid) {
+            return None;
+        }
         event.propagation_root_uuid().map(|root_uuid| {
             SpanContext::new(
                 relay_trace_id(root_uuid),

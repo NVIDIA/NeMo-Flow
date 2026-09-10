@@ -522,6 +522,12 @@ mod native {
                 .ok()
                 .and_then(|stack| stack.event_propagation_root_uuid()),
         );
+        event.set_propagation_parent_uuid(
+            scope_stack
+                .read()
+                .ok()
+                .and_then(|stack| stack.event_propagation_parent_uuid()),
+        );
         let message = DispatcherMessage::Deliver {
             event: Box::new(event),
             transform: None,
@@ -553,6 +559,12 @@ mod native {
                 .read()
                 .ok()
                 .and_then(|stack| stack.event_propagation_root_uuid()),
+        );
+        event.set_propagation_parent_uuid(
+            scope_stack
+                .read()
+                .ok()
+                .and_then(|stack| stack.event_propagation_parent_uuid()),
         );
         let injectors = snapshot_event_metadata_injectors(&scope_stack);
         let message = DispatcherMessage::Deliver {
@@ -588,6 +600,12 @@ mod native {
                 .read()
                 .ok()
                 .and_then(|stack| stack.event_propagation_root_uuid()),
+        );
+        event.set_propagation_parent_uuid(
+            scope_stack
+                .read()
+                .ok()
+                .and_then(|stack| stack.event_propagation_parent_uuid()),
         );
         let injectors = snapshot_event_metadata_injectors(&scope_stack);
         let (completion_tx, completion) = tokio::sync::oneshot::channel();
@@ -628,6 +646,12 @@ mod native {
                 .ok()
                 .and_then(|stack| stack.event_propagation_root_uuid()),
         );
+        event.set_propagation_parent_uuid(
+            scope_stack
+                .read()
+                .ok()
+                .and_then(|stack| stack.event_propagation_parent_uuid()),
+        );
         let injectors = snapshot_event_metadata_injectors(&scope_stack);
         let message = DispatcherMessage::Deliver {
             event: Box::new(event),
@@ -658,6 +682,12 @@ mod native {
                 .read()
                 .ok()
                 .and_then(|stack| stack.event_propagation_root_uuid()),
+        );
+        event.set_propagation_parent_uuid(
+            scope_stack
+                .read()
+                .ok()
+                .and_then(|stack| stack.event_propagation_parent_uuid()),
         );
         let injectors = snapshot_event_metadata_injectors(&scope_stack);
         let message = DispatcherMessage::Deliver {
@@ -1156,6 +1186,7 @@ mod native {
     ) -> (Option<Event>, Vec<DispatcherMessage>) {
         let state = process_state();
         let propagation_root_uuid = event.propagation_root_uuid();
+        let propagation_parent_uuid = event.propagation_parent_uuid();
         let (mut transformed, mut nested_publications) = match transform {
             Some(transform) => {
                 let runtime = match build_sanitizer_invocation_runtime() {
@@ -1200,6 +1231,7 @@ mod native {
             None => (event, Vec::new()),
         };
         transformed.set_propagation_root_uuid(propagation_root_uuid);
+        transformed.set_propagation_parent_uuid(propagation_parent_uuid);
         let (injected, injector_publications) =
             inject_event_metadata_snapshot(transformed, injectors, publication_context.clone());
         nested_publications.extend(injector_publications);

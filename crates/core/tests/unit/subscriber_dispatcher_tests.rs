@@ -922,10 +922,12 @@ fn synchronous_transform_panics_drop_only_the_current_event() {
 #[test]
 fn transforms_preserve_the_captured_propagation_root() {
     let root_uuid = Uuid::now_v7();
+    let parent_uuid = Uuid::now_v7();
     let event = Event::Mark(MarkEvent::new(
         BaseEvent::builder()
             .name("transformed-propagation-root")
             .propagation_root_uuid(root_uuid)
+            .propagation_parent_uuid(parent_uuid)
             .build(),
         None,
         None,
@@ -943,7 +945,9 @@ fn transforms_preserve_the_captured_propagation_root() {
     let (published, nested) =
         sanitize_event_snapshot(event, Some(transform), Vec::new(), Vec::new(), None);
 
-    assert_eq!(published.unwrap().propagation_root_uuid(), Some(root_uuid));
+    let published = published.unwrap();
+    assert_eq!(published.propagation_root_uuid(), Some(root_uuid));
+    assert_eq!(published.propagation_parent_uuid(), Some(parent_uuid));
     assert!(nested.is_empty());
 }
 

@@ -660,12 +660,66 @@ fn propagated_root_parent_projects_as_a_remote_otel_parent() {
         None,
     );
     event.set_propagation_root_uuid(Some(root_uuid));
+    event.set_propagation_parent_uuid(Some(parent_uuid));
     let parent_context = processor.parent_context(&event);
     let parent_span = parent_context.span();
     let span_context = parent_span.span_context();
     assert!(span_context.is_remote());
     assert_eq!(span_context.trace_id(), relay_trace_id(root_uuid));
     assert_eq!(span_context.span_id(), relay_span_id(parent_uuid));
+}
+
+#[test]
+fn local_unexported_parent_starts_a_root_trace() {
+    let parent_uuid = Uuid::now_v7();
+    let agent_uuid = Uuid::now_v7();
+    let (provider, exporter) = make_provider();
+    let mut processor = OtelEventProcessor::new(provider, "test".into());
+    let mut start = make_start_event(
+        agent_uuid,
+        Some(parent_uuid),
+        "receiver-agent",
+        ScopeType::Agent,
+        None,
+    );
+    start.set_propagation_root_uuid(Some(agent_uuid));
+
+    processor.process(&start);
+    processor.process(&make_end_event(
+        agent_uuid,
+        Some(parent_uuid),
+        "receiver-agent",
+        ScopeType::Agent,
+        None,
+    ));
+    processor.force_flush().unwrap();
+
+    let spans = exporter.get_finished_spans().unwrap();
+    assert_eq!(spans.len(), 1);
+    let span = &spans[0];
+    assert_eq!(span.span_context.trace_id(), relay_trace_id(agent_uuid));
+    assert_eq!(span.parent_span_id, SpanId::INVALID);
+    assert!(!span.parent_span_is_remote);
+}
+
+#[test]
+fn orphan_mark_with_a_local_unexported_parent_starts_a_new_trace() {
+    let parent_uuid = Uuid::now_v7();
+    let (provider, exporter) = make_provider();
+    let mut processor = OtelEventProcessor::new(provider, "test".into());
+    let mut mark = make_mark_event(Some(parent_uuid), "detached", None);
+    let mark_uuid = mark.uuid();
+    mark.set_propagation_root_uuid(Some(Uuid::now_v7()));
+
+    processor.process(&mark);
+    processor.force_flush().unwrap();
+
+    let spans = exporter.get_finished_spans().unwrap();
+    assert_eq!(spans.len(), 1);
+    let span = &spans[0];
+    assert_eq!(span.span_context.trace_id(), relay_trace_id(mark_uuid));
+    assert_eq!(span.parent_span_id, SpanId::INVALID);
+    assert!(!span.parent_span_is_remote);
 }
 
 #[test]
