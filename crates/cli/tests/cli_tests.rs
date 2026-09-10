@@ -1487,6 +1487,14 @@ impl ChildGuard {
         let mut child = self.0.take().unwrap();
         wait_child(&mut child)
     }
+
+    fn child_mut(&mut self) -> &mut Child {
+        self.0.as_mut().unwrap()
+    }
+
+    fn release(mut self) -> Child {
+        self.0.take().unwrap()
+    }
 }
 
 impl Drop for ChildGuard {
@@ -1498,7 +1506,11 @@ impl Drop for ChildGuard {
     }
 }
 
-fn wait_child_with_output(mut child: Child) -> Output {
+fn wait_child_with_output(child: Child) -> Output {
+    wait_child_with_output_timeout(child, Duration::from_secs(CHILD_PROCESS_TIMEOUT_SECONDS))
+}
+
+fn wait_child_with_output_timeout(mut child: Child, timeout: Duration) -> Output {
     fn read_pipe(
         pipe: Option<impl Read + Send + 'static>,
     ) -> mpsc::Receiver<std::io::Result<Vec<u8>>> {
@@ -1518,7 +1530,7 @@ fn wait_child_with_output(mut child: Child) -> Output {
 
     let stdout = read_pipe(child.stdout.take());
     let stderr = read_pipe(child.stderr.take());
-    let deadline = Instant::now() + Duration::from_secs(CHILD_PROCESS_TIMEOUT_SECONDS);
+    let deadline = Instant::now() + timeout;
     let status = loop {
         if let Some(status) = child.try_wait().unwrap() {
             break status;
@@ -1526,7 +1538,7 @@ fn wait_child_with_output(mut child: Child) -> Output {
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            panic!("child process did not exit within {CHILD_PROCESS_TIMEOUT_SECONDS} seconds");
+            panic!("child process did not exit within {timeout:?}");
         }
         thread::sleep(Duration::from_millis(20));
     };
@@ -1616,7 +1628,10 @@ fn wait_for_port_closed(address: SocketAddr) {
 }
 
 fn wait_for_port_open(address: SocketAddr) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    // Coverage-instrumented Windows and macOS binaries can spend several seconds flushing or
+    // merging profiles while sibling process tests start. Keep the readiness bound deterministic
+    // without treating that CI-only startup cost as a daemon failure.
+    let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         if TcpStream::connect_timeout(&address, Duration::from_millis(100)).is_ok() {
             return;
@@ -5386,4 +5401,342 @@ fn cli_install_pi_refuses_to_add_a_copy_beside_a_project_scoped_one() {
         !pi_home.join("extensions").join("nemo-relay").exists(),
         "nothing should have been written at user scope"
     );
+}
+
+/// Exercises the deployed daemon topology through the real CLI processes. The MCP must complete
+/// authenticated registration, launch its same-machine worker, wait for broker publication, and
+/// expose the no-tools protocol only after the route is usable. A Pi hook then traverses the
+/// daemon and worker using the same immutable managed command contract.
+#[test]
+fn cli_daemon_mcp_launches_worker_and_forwards_pi_hook() {
+    let temp = tempfile::tempdir().unwrap();
+    let probe = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = probe.local_addr().unwrap();
+    drop(probe);
+    let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0x6c_u8; 32]);
+    let config_home = temp.path().join("xdg");
+
+    let daemon = ChildGuard::new(
+        Command::new(gateway_bin())
+            .current_dir(temp.path())
+            .env("HOME", temp.path())
+            .env("XDG_CONFIG_HOME", &config_home)
+            .env("NEMO_RELAY_TEST_SKIP_IMPLICIT_CONFIG", "1")
+            .env_remove("NEMO_RELAY_CLIENT_TOKEN")
+            .args(["daemon", "--port", &address.port().to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    wait_for_port_open(address);
+
+    let daemon_origin = format!("http://{address}");
+    let mcp_stderr_path = temp.path().join("daemon-mcp.stderr");
+    let mut mcp = ChildGuard::new(
+        Command::new(gateway_bin())
+            .current_dir(temp.path())
+            .env("HOME", temp.path())
+            .env("XDG_CONFIG_HOME", &config_home)
+            .env("NEMO_RELAY_TEST_SKIP_IMPLICIT_CONFIG", "1")
+            .env("NEMO_RELAY_CLIENT_TOKEN", &token)
+            .args(["daemon", "mcp", "--daemon-address", &daemon_origin])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::from(
+                std::fs::File::create(&mcp_stderr_path).unwrap(),
+            ))
+            .spawn()
+            .unwrap(),
+    );
+    mcp.child_mut().stdin
+        .as_mut()
+        .unwrap()
+        .write_all(
+            b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\"}}\n",
+        )
+        .unwrap();
+    let stdout = mcp.child_mut().stdout.take().unwrap();
+    let (response_sender, response_receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let mut response = String::new();
+        let result = BufReader::new(stdout)
+            .read_line(&mut response)
+            .map(|_| response);
+        let _ = response_sender.send(result);
+    });
+    let response = match response_receiver.recv_timeout(Duration::from_secs(20)) {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => panic!("failed reading daemon MCP initialization response: {error}"),
+        Err(_) => {
+            let output = mcp.finish();
+            panic!(
+                "daemon MCP did not initialize after worker activation:\n{}",
+                std::fs::read_to_string(&mcp_stderr_path)
+                    .unwrap_or_else(|_| { String::from_utf8_lossy(&output.stderr).into_owned() })
+            );
+        }
+    };
+    let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+    assert_eq!(response["result"]["serverInfo"]["name"], "nemo-relay");
+
+    let (provider_origin, provider_request) = spawn_single_request_server(
+        200,
+        r#"{"id":"pi-managed","choices":[{"message":{"role":"assistant","content":"ok"}}]}"#,
+    );
+    let llm_body = r#"{"model":"test-model","stream":true,"messages":[]}"#;
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(2)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    stream
+        .write_all(
+            format!(
+                "POST /v1/chat/completions HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nAuthorization: Bearer provider-token\r\nx-nemo-relay-client-token: {token}\r\nx-nemo-relay-upstream-base-url: {provider_origin}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{llm_body}",
+                llm_body.len()
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    let mut llm_response = String::new();
+    stream.read_to_string(&mut llm_response).unwrap();
+    assert!(
+        llm_response.starts_with("HTTP/1.1 200"),
+        "Pi-selected LLM request did not traverse the daemon worker: {llm_response}"
+    );
+    let provider_request = provider_request
+        .recv_timeout(Duration::from_secs(5))
+        .expect("provider received Pi-selected request");
+    assert!(provider_request.starts_with("POST /v1/chat/completions "));
+    assert!(
+        !provider_request
+            .to_ascii_lowercase()
+            .contains("x-nemo-relay-client-token")
+    );
+    assert!(
+        !provider_request
+            .to_ascii_lowercase()
+            .contains("x-nemo-relay-upstream-base-url")
+    );
+
+    let body = "{}";
+    for (agent, path) in [
+        ("codex", "/hooks/codex"),
+        ("claude", "/hooks/claude-code"),
+        ("pi", "/hooks/pi"),
+    ] {
+        let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(2)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .write_all(
+                format!(
+                    "POST {path} HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nx-nemo-relay-client-token: {token}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        let mut hook_response = String::new();
+        stream.read_to_string(&mut hook_response).unwrap();
+        assert!(
+            hook_response.starts_with("HTTP/1.1 200"),
+            "{agent} hook did not traverse the daemon worker: {hook_response}"
+        );
+    }
+
+    drop(daemon);
+    wait_for_port_closed(address);
+    let daemon = ChildGuard::new(
+        Command::new(gateway_bin())
+            .current_dir(temp.path())
+            .env("HOME", temp.path())
+            .env("XDG_CONFIG_HOME", &config_home)
+            .env("NEMO_RELAY_TEST_SKIP_IMPLICIT_CONFIG", "1")
+            .env_remove("NEMO_RELAY_CLIENT_TOKEN")
+            .args(["daemon", "--port", &address.port().to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    wait_for_port_open(address);
+    let recovery_deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let recovered = TcpStream::connect_timeout(&address, Duration::from_secs(1))
+            .and_then(|mut stream| {
+                stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+                stream.write_all(
+                    format!(
+                        "POST /hooks/pi HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nx-nemo-relay-client-token: {token}\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+                    )
+                    .as_bytes(),
+                )?;
+                let mut response = String::new();
+                stream.read_to_string(&mut response)?;
+                Ok(response.starts_with("HTTP/1.1 200"))
+            })
+            .unwrap_or(false);
+        if recovered {
+            break;
+        }
+        assert!(
+            Instant::now() < recovery_deadline,
+            "MCP and worker did not reattach after daemon restart"
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    drop(mcp.child_mut().stdin.take());
+    let output = wait_child_with_output_timeout(mcp.release(), Duration::from_secs(30));
+    assert!(
+        output.status.success(),
+        "daemon MCP shutdown failed:\n{}",
+        std::fs::read_to_string(&mcp_stderr_path)
+            .unwrap_or_else(|_| { String::from_utf8_lossy(&output.stderr).into_owned() })
+    );
+    drop(daemon);
+}
+
+#[test]
+fn cli_pass_through_daemon_serves_managed_hooks_and_pi_provider_routing() {
+    let temp = tempfile::tempdir().unwrap();
+    let probe = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = probe.local_addr().unwrap();
+    drop(probe);
+    let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0x3d_u8; 32]);
+    let daemon_origin = format!("http://{address}");
+    let daemon = ChildGuard::new(
+        Command::new(gateway_bin())
+            .current_dir(temp.path())
+            .env("HOME", temp.path())
+            .env("XDG_CONFIG_HOME", temp.path().join("xdg"))
+            .env("NEMO_RELAY_TEST_SKIP_IMPLICIT_CONFIG", "1")
+            .env_remove("NEMO_RELAY_CLIENT_TOKEN")
+            .args([
+                "daemon",
+                "--port",
+                &address.port().to_string(),
+                "--pass-through",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    wait_for_port_open(address);
+
+    let mut mcp = ChildGuard::new(
+        Command::new(gateway_bin())
+            .current_dir(temp.path())
+            .env("HOME", temp.path())
+            .env("XDG_CONFIG_HOME", temp.path().join("xdg"))
+            .env("NEMO_RELAY_CLIENT_TOKEN", &token)
+            .args(["daemon", "mcp", "--daemon-address", &daemon_origin])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    mcp.child_mut().stdin.as_mut().unwrap().write_all(
+        b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\"}}\n",
+    ).unwrap();
+    let stdout = mcp.child_mut().stdout.take().unwrap();
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let mut response = String::new();
+        let result = BufReader::new(stdout)
+            .read_line(&mut response)
+            .map(|_| response);
+        let _ = sender.send(result);
+    });
+    let response = receiver
+        .recv_timeout(Duration::from_secs(20))
+        .unwrap()
+        .unwrap();
+    let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+    assert_eq!(response["result"]["serverInfo"]["name"], "nemo-relay");
+
+    for (agent, expected) in [
+        ("codex", "{}"),
+        ("claude", r#"{"continue":true}"#),
+        ("pi", "{}"),
+    ] {
+        let mut hook = Command::new(gateway_bin())
+            .current_dir(temp.path())
+            .env("HOME", temp.path())
+            .env("XDG_CONFIG_HOME", temp.path().join("xdg"))
+            .env("NEMO_RELAY_CLIENT_TOKEN", &token)
+            .args([
+                "daemon",
+                "hook",
+                agent,
+                "--daemon-address",
+                &daemon_origin,
+                "--fail-closed",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        hook.stdin.as_mut().unwrap().write_all(b"{}").unwrap();
+        drop(hook.stdin.take());
+        let output = wait_child_with_output(hook);
+        assert!(
+            output.status.success(),
+            "managed {agent} hook failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), expected);
+    }
+
+    let unattached_worker = Command::new(gateway_bin())
+        .current_dir(temp.path())
+        .env("HOME", temp.path())
+        .env("XDG_CONFIG_HOME", temp.path().join("xdg"))
+        .args(["daemon", "worker", "--daemon-address", &daemon_origin])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let unattached_worker = wait_child_with_output(unattached_worker);
+    assert!(!unattached_worker.status.success());
+    assert!(
+        String::from_utf8_lossy(&unattached_worker.stderr)
+            .contains("requires a protected activation grant")
+    );
+
+    let (provider_origin, provider_request) =
+        spawn_single_request_server(200, r#"{"id":"pass-through"}"#);
+    let body = r#"{"model":"test-model","stream":true,"messages":[]}"#;
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(2)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    stream
+        .write_all(
+            format!(
+                "POST /v1/chat/completions HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nAuthorization: Bearer provider-token\r\nx-nemo-relay-client-token: {token}\r\nx-nemo-relay-upstream-base-url: {provider_origin}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    let provider_request = provider_request
+        .recv_timeout(Duration::from_secs(5))
+        .expect("pass-through provider request");
+    assert!(provider_request.starts_with("POST /v1/chat/completions "));
+    assert!(
+        !provider_request
+            .to_ascii_lowercase()
+            .contains("x-nemo-relay-client-token")
+    );
+    drop(daemon);
 }

@@ -462,3 +462,7 @@ pub(super) fn remove_path(path: &Path, options: &PluginInstallOptions) -> Result
             }
         })
 }
+
+#[cfg(test)]
+#[path = "../../../tests/coverage/shared/marketplace_state_tests.rs"]
+mod tests;

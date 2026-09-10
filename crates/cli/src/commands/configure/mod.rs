@@ -69,3 +69,7 @@ pub(super) async fn execute(
     }
     Ok(ExitCode::SUCCESS)
 }
+
+#[cfg(test)]
+#[path = "../../../tests/coverage/commands/configure_command_tests.rs"]
+mod tests;
