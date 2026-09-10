@@ -666,6 +666,10 @@ impl CompiledBuiltinBackend {
                 .matching_json_pointer_paths(&sanitized),
         );
 
+        let mut target_paths = target_paths.into_iter().collect::<Vec<_>>();
+        target_paths
+            .sort_by(|left, right| right.len().cmp(&left.len()).then_with(|| left.cmp(right)));
+
         for target_segments in target_paths {
             let current_annotated = codec.decode(&sanitized_request).ok()?;
             let mut current = serde_json::to_value(&current_annotated).ok()?;
