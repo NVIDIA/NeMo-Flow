@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import functools
+import importlib
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -439,6 +441,38 @@ def _chat_nvidia_with_relay_headers(model: Any, headers: dict[str, Any]) -> Any 
     return model.model_copy(update={"default_headers": {**default_headers, **relay_headers}})
 
 
+_EXTRA_HEADERS_MODEL_CLASSES: tuple[tuple[str, str], ...] = (
+    # OpenAI and Anthropic Python SDKs accept ``extra_headers`` as a per-request option.
+    ("langchain_openai.chat_models.base", "BaseChatOpenAI"),
+    ("langchain_anthropic.chat_models", "ChatAnthropic"),
+)
+
+
+@functools.cache
+def _optional_class(module_name: str, class_name: str) -> type | None:
+    try:
+        module = importlib.import_module(module_name)
+    except ImportError:
+        return None
+    return getattr(module, class_name, None)
+
+
+def _model_accepts_extra_headers(model: Any, model_settings: dict[str, Any]) -> bool:
+    """Return whether ``model`` sends the ``extra_headers`` model setting as HTTP headers.
+
+    ``extra_headers`` is an OpenAI and Anthropic SDK request option. Other provider SDKs
+    treat unknown model settings as request-body fields and reject them, so Relay
+    headers only travel this way when the SDK is known to accept the option or the
+    caller already configures ``extra_headers`` for the model.
+    """
+    if isinstance(model_settings.get("extra_headers"), dict):
+        return True
+    return any(
+        (model_class := _optional_class(module_name, class_name)) is not None and isinstance(model, model_class)
+        for module_name, class_name in _EXTRA_HEADERS_MODEL_CLASSES
+    )
+
+
 def payload_to_model_request(
     original: ModelRequest[Any],
     llm_request: LLMRequest,
@@ -460,8 +494,7 @@ def payload_to_model_request(
         # Using dict() to ensure we have a copy
         model_settings_copy = dict(model_settings)
         extra_headers = model_settings_copy.get("extra_headers")
-        if not isinstance(extra_headers, dict):
-            extra_headers = {}
+        extra_headers = dict(extra_headers) if isinstance(extra_headers, dict) else {}
         overrides["model_settings"] = model_settings_copy
     else:
         overrides["model_settings"] = {}
@@ -471,9 +504,11 @@ def payload_to_model_request(
         model_with_headers = _chat_nvidia_with_relay_headers(original.model, llm_request.headers)
         if model_with_headers is not None:
             overrides["model"] = model_with_headers
-        else:
+        elif _model_accepts_extra_headers(original.model, overrides["model_settings"]):
             extra_headers.update(llm_request.headers)
             overrides["model_settings"]["extra_headers"] = extra_headers
+        # Other providers get no Relay headers: their SDKs reject unknown request fields,
+        # and failing the model call is worse than dropping observability headers.
 
     if "tool_choice" in llm_request.content:
         overrides["tool_choice"] = llm_request.content["tool_choice"]

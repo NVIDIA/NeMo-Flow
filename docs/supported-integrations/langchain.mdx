@@ -90,7 +90,13 @@ print(f"Final response: {final_message.content}")
 
 When the agent uses `ChatNVIDIA`, NeMo Relay forwards request headers, including
 Dynamo session lineage, as HTTP headers. They are not added to the NIM request
-body.
+body. For chat models built on the OpenAI or Anthropic Python SDKs, such as
+`langchain-openai` and `langchain-anthropic`, the headers travel in the
+per-request `extra_headers` model setting, which those SDKs send as HTTP headers.
+NeMo Relay also uses `extra_headers` when your `model_settings` already configure
+it. Other providers, such as `ChatOCIGenAI` from `langchain-oci`, receive no Relay
+headers because their SDKs reject unknown request fields; the model call proceeds
+without them.
 
 ## Verify the Integration
 
