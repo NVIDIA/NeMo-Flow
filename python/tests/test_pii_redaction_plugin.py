@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from plugin_host_test_helper import validate_plugin_config
 
 from nemo_relay import plugin
@@ -84,6 +85,34 @@ class TestPiiRedactionConfigHelpers:
             )
         )
         assert report["diagnostics"] == []
+
+    async def test_initialize_and_activate_reject_no_enabled_surfaces_with_value_error(self):
+        config = plugin.PluginConfig(
+            components=[
+                ComponentSpec(
+                    PiiRedactionConfig(
+                        input=False,
+                        output=False,
+                        mark=False,
+                        tool_input=False,
+                        tool_output=False,
+                    )
+                )
+            ]
+        )
+
+        report = validate_plugin_config(config)
+        assert any(
+            diagnostic["message"] == "at least one redaction surface must be enabled"
+            for diagnostic in report["diagnostics"]
+        )
+
+        with pytest.raises(ValueError, match="at least one redaction surface must be enabled"):
+            await plugin.initialize(config)
+
+        with pytest.raises(ValueError, match="at least one redaction surface must be enabled"):
+            async with plugin.activate(config):
+                pass
 
     def test_list_kinds_includes_builtin_pii_redaction(self):
         assert PII_REDACTION_PLUGIN_KIND in plugin.list_kinds()
