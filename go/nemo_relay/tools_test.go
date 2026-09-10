@@ -181,8 +181,8 @@ func TestToolExecutionInterceptReceivesToolCallID(t *testing.T) {
 	if seen.ToolName != "context_tool" {
 		t.Fatalf("unexpected tool name: %q", seen.ToolName)
 	}
-	if seen.ToolCallID != "go-call-abc" {
-		t.Fatalf("tool call id did not reach the intercept: %q", seen.ToolCallID)
+	if seen.ToolCallID == nil || *seen.ToolCallID != "go-call-abc" {
+		t.Fatalf("tool call id did not reach the intercept: %v", seen.ToolCallID)
 	}
 	var args map[string]any
 	if err := json.Unmarshal(seen.Arguments, &args); err != nil {
@@ -200,9 +200,9 @@ func TestToolExecutionInterceptReceivesToolCallID(t *testing.T) {
 	}
 }
 
-func TestToolExecutionInterceptReceivesEmptyToolCallIDWhenOmitted(t *testing.T) {
+func TestToolExecutionInterceptReceivesNilToolCallIDWhenOmitted(t *testing.T) {
 	const interceptName = "go_tool_exec_context_without_id"
-	var seenToolCallID string
+	var seenToolCallID *string
 	if err := RegisterToolExecutionIntercept(interceptName, 1,
 		func(context ToolExecutionContext, next func(json.RawMessage) (ToolExecutionResult, error)) (ToolExecutionInterceptOutcome, error) {
 			seenToolCallID = context.ToolCallID
@@ -220,8 +220,34 @@ func TestToolExecutionInterceptReceivesEmptyToolCallIDWhenOmitted(t *testing.T) 
 	); err != nil {
 		t.Fatalf(toolCallExecuteFailed, err)
 	}
-	if seenToolCallID != "" {
-		t.Fatalf("expected omitted tool call id to be empty, got %q", seenToolCallID)
+	if seenToolCallID != nil {
+		t.Fatalf("expected omitted tool call id to be nil, got %q", *seenToolCallID)
+	}
+}
+
+func TestToolExecutionInterceptPreservesExplicitEmptyToolCallID(t *testing.T) {
+	const interceptName = "go_tool_exec_context_with_empty_id"
+	var seenToolCallID *string
+	if err := RegisterToolExecutionIntercept(interceptName, 1,
+		func(context ToolExecutionContext, next func(json.RawMessage) (ToolExecutionResult, error)) (ToolExecutionInterceptOutcome, error) {
+			seenToolCallID = context.ToolCallID
+			return toolExecutionOutcome(next(context.Arguments))
+		},
+	); err != nil {
+		t.Fatalf(registerFailed, err)
+	}
+	t.Cleanup(func() { _ = DeregisterToolExecutionIntercept(interceptName) })
+
+	if _, err := ToolCallExecute("context_tool_with_empty_id", json.RawMessage(`{}`),
+		func(args json.RawMessage) (ToolExecutionResult, error) {
+			return ToolExecutionResult{Result: args}, nil
+		},
+		WithToolCallID(""),
+	); err != nil {
+		t.Fatalf(toolCallExecuteFailed, err)
+	}
+	if seenToolCallID == nil || *seenToolCallID != "" {
+		t.Fatalf("expected explicit empty tool call id, got %v", seenToolCallID)
 	}
 }
 
@@ -614,7 +640,7 @@ func TestToolRequestInterceptModifiesArgs(t *testing.T) {
 
 func TestToolExecutionInterceptReplacesFunc(t *testing.T) {
 	var providerCalls int
-	var seenToolCallID string
+	var seenToolCallID *string
 	RegisterToolExecutionIntercept("go_exec_replace", 1,
 		func(context ToolExecutionContext, _ func(json.RawMessage) (ToolExecutionResult, error)) (ToolExecutionInterceptOutcome, error) {
 			// Short-circuit: don't call next, return directly
@@ -642,8 +668,8 @@ func TestToolExecutionInterceptReplacesFunc(t *testing.T) {
 	if _, ok := output["from_original"]; ok {
 		t.Fatal("should not contain from_original")
 	}
-	if seenToolCallID != "go-terminal-call-42" {
-		t.Fatalf("terminal intercept saw unexpected tool call id: %q", seenToolCallID)
+	if seenToolCallID == nil || *seenToolCallID != "go-terminal-call-42" {
+		t.Fatalf("terminal intercept saw unexpected tool call id: %v", seenToolCallID)
 	}
 	if providerCalls != 0 {
 		t.Fatalf("terminal intercept should skip the provider, got %d calls", providerCalls)

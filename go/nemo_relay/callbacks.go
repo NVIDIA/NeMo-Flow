@@ -189,16 +189,17 @@ type ToolExecutionFunc func(args json.RawMessage) (ToolExecutionResult, error)
 // any pending marks.
 // ToolExecutionContext is the per-call context delivered to a tool execution
 // intercept. ToolCallID is the provider-issued correlation identifier recorded
-// on the managed tool call, and is empty when the call did not record one. It
-// lets an intercept that completes execution without invoking the remaining
-// chain associate its result with the originating tool call.
+// on the managed tool call. It is nil when the call did not record one and may
+// point to an empty string when the caller explicitly supplied one. It lets an
+// intercept that completes execution without invoking the remaining chain
+// associate its result with the originating tool call.
 //
 // New fields may be added, so callers must not rely on this struct being
 // exhaustive.
 type ToolExecutionContext struct {
 	ToolName   string          `json:"tool_name"`
 	Arguments  json.RawMessage `json:"arguments"`
-	ToolCallID string          `json:"tool_call_id,omitempty"`
+	ToolCallID *string         `json:"tool_call_id,omitempty"`
 }
 
 // ToolExecutionInterceptFunc is a callback for tool execution intercepts

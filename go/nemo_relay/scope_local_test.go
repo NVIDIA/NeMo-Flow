@@ -758,8 +758,8 @@ func TestScopeLocalToolExecutionIntercept(t *testing.T) {
 		if seen.ToolName != "exec_int_tool" {
 			t.Fatalf("scope-local intercept saw unexpected tool name: %q", seen.ToolName)
 		}
-		if seen.ToolCallID != expectedToolCallID {
-			t.Fatalf("scope-local intercept saw unexpected tool call id: %q", seen.ToolCallID)
+		if seen.ToolCallID == nil || *seen.ToolCallID != expectedToolCallID {
+			t.Fatalf("scope-local intercept saw unexpected tool call id: %v", seen.ToolCallID)
 		}
 		var annotation map[string]any
 		if err := json.Unmarshal(result.Annotation, &annotation); err != nil {
