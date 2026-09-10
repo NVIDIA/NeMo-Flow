@@ -170,7 +170,8 @@ try {
                     Invoke-Uninstaller -Arguments $arguments -InputText 'y'
                     Assert-Failure
                     Assert-Contains $RunOutput 'active managed daemon deployment'
-                    Assert-Contains $RunOutput '-Force cannot override'
+                    Assert-Contains $RunOutput '-Force cannot'
+                    Assert-Contains $RunOutput 'override this restriction'
                     Assert-NotContains $RunOutput 'Would remove NeMo Relay CLI'
                     Assert-True (-not $ManagedProcess.HasExited) 'managed process was terminated'
                     Assert-True (Test-Path -LiteralPath $ManagedDestination) 'managed binary was removed'
