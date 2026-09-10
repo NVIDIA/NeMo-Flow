@@ -705,6 +705,12 @@ the `tool_type` and `agent_name` aliases. Generic gateway sessions
 do not infer a tool type or root executing-agent name. Invocation arguments
 are never used to infer tool descriptions.
 
+Harness defaults carry internal provenance. Explicit completion metadata may
+refine inferred tool type and agent name, including through their aliases.
+Explicit start metadata and typed tool-call IDs remain authoritative; later
+inferred values cannot replace them. This provenance is not exported as a GenAI
+attribute.
+
 ```toml
 [[components.config.opentelemetry.endpoints]]
 type = "gen_ai"

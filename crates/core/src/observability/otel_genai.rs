@@ -600,19 +600,51 @@ fn push_tool_metadata(attributes: &mut Vec<KeyValue>, event: &Event) {
 // Tool data is arbitrary user content: a payload's `description`, `tool_type`,
 // or even a dotted semantic key must not masquerade as instrumentation metadata.
 fn tool_metadata_string(event: &Event, keys: &[&str]) -> Option<String> {
-    keys.iter().find_map(|key| {
-        [
-            event
-                .category_profile()
-                .and_then(|profile| profile.extra.get(*key)),
-            event.metadata().and_then(|metadata| metadata.get(*key)),
-        ]
-        .into_iter()
-        .flatten()
-        .filter_map(Json::as_str)
-        .find(|value| !value.trim().is_empty())
-        .map(ToOwned::to_owned)
+    tool_metadata_with_origin(event, keys).map(|(value, _)| value)
+}
+
+// Explicit aliases and typed profile metadata outrank inferred canonical keys.
+fn tool_metadata_with_origin(event: &Event, keys: &[&str]) -> Option<(String, bool)> {
+    let mut fallback = None;
+    for key in keys {
+        let profile = event
+            .category_profile()
+            .and_then(|profile| profile.extra.get(*key));
+        let metadata = event.metadata().and_then(|metadata| metadata.get(*key));
+        let inferred = event
+            .metadata()
+            .and_then(|metadata| metadata.get("nemo_relay.tool.execution.defaults"))
+            .and_then(|defaults| defaults.get(*key));
+        for (value, is_inferred) in [
+            (profile, false),
+            (metadata, metadata.is_some() && metadata == inferred),
+        ] {
+            let Some(value) = value
+                .and_then(Json::as_str)
+                .filter(|value| !value.trim().is_empty())
+            else {
+                continue;
+            };
+            if !is_inferred {
+                return Some((value.to_string(), false));
+            }
+            fallback.get_or_insert_with(|| (value.to_string(), true));
+        }
+    }
+    fallback
+}
+
+pub(super) fn inferred_tool_attribute_keys(event: &Event) -> std::collections::HashSet<String> {
+    [
+        ("gen_ai.tool.type", ["gen_ai.tool.type", "tool_type"]),
+        ("gen_ai.agent.name", ["gen_ai.agent.name", "agent_name"]),
+    ]
+    .into_iter()
+    .filter_map(|(key, aliases)| {
+        tool_metadata_with_origin(event, &aliases)
+            .and_then(|(_, inferred)| inferred.then(|| key.to_string()))
     })
+    .collect()
 }
 
 fn push_tool_content(attributes: &mut Vec<KeyValue>, key: &'static str, value: Option<&Json>) {

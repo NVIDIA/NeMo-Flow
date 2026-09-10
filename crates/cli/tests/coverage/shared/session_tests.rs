@@ -1145,6 +1145,14 @@ async fn assert_harness_tool_execution_metadata(kind: AgentKind, post_only: bool
         kind.as_str()
     );
     assert_eq!(metadata["gen_ai.agent.name"], kind.as_str());
+    assert_eq!(
+        metadata["nemo_relay.tool.execution.defaults"]["gen_ai.tool.type"],
+        "function"
+    );
+    assert_eq!(
+        metadata["nemo_relay.tool.execution.defaults"]["gen_ai.agent.name"],
+        kind.as_str()
+    );
     assert!(metadata.get("gen_ai.tool.description").is_none());
     assert_harness_genai_tool_span(kind, &events);
     drop(events);

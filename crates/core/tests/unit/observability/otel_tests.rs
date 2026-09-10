@@ -2788,6 +2788,76 @@ fn gen_ai_tool_completion_fills_missing_metadata_without_replacing_start_identit
 }
 
 #[test]
+fn gen_ai_tool_completion_refines_only_inferred_identity() {
+    for inferred_start in [false, true] {
+        for completion in ["canonical", "alias", "inferred", "absent"] {
+            let (provider, exporter) = make_provider();
+            let subscriber = OpenTelemetrySubscriber::from_tracer_provider_with_type(
+                provider,
+                "identity-origin",
+                OpenTelemetryType::GenAi,
+            );
+            let id = Uuid::now_v7();
+            let mut start = make_scope_event_with_profile(
+                ScopeCategory::Start,
+                id,
+                None,
+                "search",
+                ScopeType::Tool,
+                None,
+                Some(CategoryProfile::builder().tool_call_id("typed-id").build()),
+            );
+            let mut metadata =
+                json!({"gen_ai.tool.type": "function", "gen_ai.agent.name": "codex"});
+            if inferred_start {
+                metadata["nemo_relay.tool.execution.defaults"] = metadata.clone();
+            }
+            if let Event::Scope(scope) = &mut start {
+                scope.base.metadata = Some(metadata.clone());
+            }
+            let mut end = make_end_event(id, None, "end-label", ScopeType::Tool, None);
+            match completion {
+                "canonical" => {
+                    metadata["gen_ai.tool.type"] = json!("extension");
+                    metadata["gen_ai.agent.name"] = json!("researcher");
+                }
+                "alias" => {
+                    metadata["tool_type"] = json!("extension");
+                    metadata["agent_name"] = json!("researcher");
+                }
+                "inferred" => {
+                    metadata = json!({"gen_ai.tool.type": "extension", "gen_ai.agent.name": "researcher",
+                        "nemo_relay.tool.execution.defaults": {"gen_ai.tool.type": "extension", "gen_ai.agent.name": "researcher"}});
+                }
+                _ => {}
+            }
+            metadata["tool_call_id"] = json!("late-id");
+            if let Event::Scope(scope) = &mut end {
+                scope.base.metadata = Some(metadata);
+            }
+            subscriber.subscriber()(&start);
+            subscriber.subscriber()(&end);
+            subscriber.force_flush().unwrap();
+            let spans = exporter.get_finished_spans().unwrap();
+            let attrs = attr_map(&spans[0].attributes);
+            let refined = inferred_start && matches!(completion, "canonical" | "alias");
+            assert_eq!(
+                attrs["gen_ai.tool.type"],
+                if refined { "extension" } else { "function" },
+                "{inferred_start}/{completion}"
+            );
+            assert_eq!(
+                attrs["gen_ai.agent.name"],
+                if refined { "researcher" } else { "codex" }
+            );
+            assert_eq!(attrs["gen_ai.tool.call.id"], "typed-id");
+            assert!(!attrs.keys().any(|key| key.starts_with("nemo_relay.")));
+            subscriber.shutdown().unwrap();
+        }
+    }
+}
+
+#[test]
 fn gen_ai_projection_emits_normalized_response_attributes() {
     let event = make_scope_event_with_profile(
         ScopeCategory::End,

@@ -1350,6 +1350,7 @@ pub(super) struct ActiveSpan {
     start_model_name: Option<String>,
     projected_attributes: Vec<KeyValue>,
     projection_attribute_keys: HashSet<String>,
+    inferred_tool_attribute_keys: HashSet<String>,
     start_promoted_metadata: Vec<KeyValue>,
     descendant_error_type: Option<String>,
     descendant_exception_type: Option<String>,
@@ -1816,6 +1817,13 @@ impl OtelEventProcessor {
                 start_model_name,
                 projected_attributes,
                 projection_attribute_keys,
+                inferred_tool_attribute_keys: if self.otel_type == OpenTelemetryType::GenAi
+                    && event.scope_type() == Some(ScopeType::Tool)
+                {
+                    super::otel_genai::inferred_tool_attribute_keys(event)
+                } else {
+                    HashSet::new()
+                },
                 start_promoted_metadata,
                 descendant_error_type: None,
                 descendant_exception_type: None,
@@ -1843,8 +1851,10 @@ impl OtelEventProcessor {
         let is_error = metadata_string(event, "otel.status_code") == Some("ERROR");
         if self.otel_type == OpenTelemetryType::GenAi && event.scope_type() == Some(ScopeType::Tool)
         {
-            // Fill metadata discovered at completion, but preserve identity
-            // already selected at start (especially a typed tool-call ID).
+            // Explicit start identity (especially a typed call ID) remains
+            // authoritative. Only inferred defaults can be refined by explicit
+            // completion metadata, never by another inferred default.
+            let inferred_end_keys = super::otel_genai::inferred_tool_attribute_keys(event);
             attributes.retain(|attribute| {
                 !matches!(
                     attribute.key.as_str(),
@@ -1855,6 +1865,10 @@ impl OtelEventProcessor {
                 ) || !active_span
                     .projection_attribute_keys
                     .contains(attribute.key.as_str())
+                    || (active_span
+                        .inferred_tool_attribute_keys
+                        .contains(attribute.key.as_str())
+                        && !inferred_end_keys.contains(attribute.key.as_str()))
             });
         }
         let explicit_error_type = metadata_string(event, "error.type");
