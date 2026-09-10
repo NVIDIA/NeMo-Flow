@@ -74,11 +74,12 @@ the daemon, and its port is automatically allocated. For predictable firewall
 rules, write the administrator-assigned values as the target user:
 
 ```bash
-mkdir -p "$HOME/.config/nemo-relay-network"
-chmod 700 "$HOME/.config/nemo-relay-network"
-printf '%s\n' '10.30.0.21' > "$HOME/.config/nemo-relay-network/worker-address"
-printf '%s\n' '9443' > "$HOME/.config/nemo-relay-network/worker-port"
-chmod 600 "$HOME/.config/nemo-relay-network/worker-address" "$HOME/.config/nemo-relay-network/worker-port"
+relay_network_dir="${XDG_CONFIG_HOME:-$HOME/.config}/nemo-relay-network"
+mkdir -p "$relay_network_dir"
+chmod 700 "$relay_network_dir"
+printf '%s\n' '10.30.0.21' > "$relay_network_dir/worker-address"
+printf '%s\n' '9443' > "$relay_network_dir/worker-port"
+chmod 600 "$relay_network_dir/worker-address" "$relay_network_dir/worker-port"
 ```
 
 The address is a concrete hostname or IPv4 address reachable **from the daemon**,

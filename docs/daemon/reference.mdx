@@ -95,7 +95,7 @@ responses:
 Every managed MCP process must name its daemon explicitly:
 
 ```bash
-nemo-relay daemon mcp --daemon-address https://relay.example.com:443
+nemo-relay daemon mcp --daemon-address https://relay.example.com:8443
 ```
 
 The address must be an HTTP or HTTPS origin with an explicit port. It cannot
@@ -125,9 +125,9 @@ Use the agent-specific subcommand in immutable managed hook settings. The
 supported command shapes are:
 
 ```bash
-nemo-relay daemon hook codex --daemon-address https://relay.example.com:443 --fail-closed
-nemo-relay daemon hook claude --daemon-address https://relay.example.com:443 --fail-open
-nemo-relay daemon hook pi --daemon-address https://relay.example.com:443 --fail-open
+nemo-relay daemon hook codex --daemon-address https://relay.example.com:8443 --fail-closed
+nemo-relay daemon hook claude --daemon-address https://relay.example.com:8443 --fail-open
+nemo-relay daemon hook pi --daemon-address https://relay.example.com:8443 --fail-open
 ```
 
 The hook process performs the following actions:

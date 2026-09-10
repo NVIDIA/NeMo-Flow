@@ -350,6 +350,9 @@ On Windows, create the corresponding directories in an elevated PowerShell windo
 
 ```powershell
 $RelayMarket = 'C:\ProgramData\NVIDIA\NeMoRelay\codex-marketplace-v1'
+if (Test-Path "$RelayMarket\plugins\nemo-relay-managed-v1") {
+    throw 'The plugin destination already exists; compare it with the validated bundle instead of copying again.'
+}
 New-Item -ItemType Directory -Force "$RelayMarket\.agents\plugins", "$RelayMarket\plugins" | Out-Null
 Copy-Item -Recurse -Force 'C:\ProgramData\NVIDIA\NeMoRelay\nemo-relay-managed-v1\codex\plugin-v1' "$RelayMarket\plugins\nemo-relay-managed-v1"
 ```
