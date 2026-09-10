@@ -1237,6 +1237,36 @@ fn tool_execution_metadata_preserves_explicit_values_and_subagent_identity() {
 }
 
 #[test]
+fn tool_execution_metadata_normalizes_default_provenance() {
+    for kind in [AgentKind::ClaudeCode, AgentKind::Codex, AgentKind::Pi] {
+        let session = Session::new("provenance-policy".into(), kind, SessionConfig::default());
+        for provenance in [
+            Value::Null,
+            json!(true),
+            json!(42),
+            json!("invalid"),
+            json!([]),
+            json!({"existing": "retained"}),
+        ] {
+            let mut metadata = json!({"nemo_relay.tool.execution.defaults": provenance});
+            session.apply_tool_execution_metadata(&mut metadata, None);
+            let defaults = &metadata["nemo_relay.tool.execution.defaults"];
+            assert_eq!(defaults["gen_ai.tool.type"], "function");
+            assert_eq!(defaults["gen_ai.agent.name"], kind.as_str());
+            if provenance.is_object() {
+                assert_eq!(defaults["existing"], "retained");
+            }
+        }
+        // Explicit values equal to the harness defaults must not gain provenance.
+        let mut explicit =
+            json!({"gen_ai.tool.type": "function", "gen_ai.agent.name": kind.as_str()});
+        let expected = explicit.clone();
+        session.apply_tool_execution_metadata(&mut explicit, None);
+        assert_eq!(explicit, expected);
+    }
+}
+
+#[test]
 fn tool_execution_metadata_respects_aliases_and_ignores_invalid_strings() {
     for kind in [AgentKind::ClaudeCode, AgentKind::Codex, AgentKind::Pi] {
         let session = Session::new("alias-policy".into(), kind, SessionConfig::default());

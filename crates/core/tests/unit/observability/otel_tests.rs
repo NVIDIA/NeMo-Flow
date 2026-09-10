@@ -2829,7 +2829,8 @@ fn gen_ai_tool_completion_refines_only_inferred_identity() {
                     metadata = json!({"gen_ai.tool.type": "extension", "gen_ai.agent.name": "researcher",
                         "nemo_relay.tool.execution.defaults": {"gen_ai.tool.type": "extension", "gen_ai.agent.name": "researcher"}});
                 }
-                _ => {}
+                "absent" => metadata = json!({}),
+                _ => unreachable!("unknown completion case"),
             }
             metadata["tool_call_id"] = json!("late-id");
             if let Event::Scope(scope) = &mut end {

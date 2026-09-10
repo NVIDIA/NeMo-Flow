@@ -923,13 +923,16 @@ fn set_tool_metadata_default(
     metadata.insert(canonical.to_string(), json!(default));
     // The exporter uses value-matched provenance to distinguish fallbacks from
     // explicit instrumentation when completion brings better information.
-    if let Some(defaults) = metadata
+    let defaults = metadata
         .entry("nemo_relay.tool.execution.defaults")
-        .or_insert_with(|| json!({}))
-        .as_object_mut()
-    {
-        defaults.insert(canonical.to_string(), json!(default));
+        .or_insert_with(|| json!({}));
+    if !defaults.is_object() {
+        *defaults = json!({});
     }
+    defaults
+        .as_object_mut()
+        .expect("defaults was normalized to an object")
+        .insert(canonical.to_string(), json!(default));
 }
 
 impl Session {
