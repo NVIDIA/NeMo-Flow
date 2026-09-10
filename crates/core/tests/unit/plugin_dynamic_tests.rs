@@ -1932,12 +1932,14 @@ fn annotated_request_consumers_must_exclude_relay_zero_five() {
 
 #[test]
 fn context_aware_tool_execution_plugins_must_exclude_relay_zero_eight() {
-    let error = validate_tool_execution_context_compatibility(
-        ">=0.8,<1.0",
-        "example.tool_execution_interceptor",
-    )
-    .unwrap_err();
-    assert!(error.to_string().contains(">=0.9,<1.0"));
+    for requirement in [">=0.8,<1.0", ">=0.8.0,<0.8.1", ">=0.8.1,<0.8.2"] {
+        let error = validate_tool_execution_context_compatibility(
+            requirement,
+            "example.tool_execution_interceptor",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains(">=0.9,<1.0"));
+    }
 
     validate_tool_execution_context_compatibility(
         ">=0.9,<1.0",
