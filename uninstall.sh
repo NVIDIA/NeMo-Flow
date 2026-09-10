@@ -43,14 +43,32 @@ require_command() {
 }
 
 process_command() {
+    if [ "$is_windows_shell" -eq 1 ]; then
+        powershell.exe -NoProfile -NonInteractive -Command \
+            '$process = Get-CimInstance -ClassName Win32_Process -Filter ("ProcessId = {0}" -f [int]$args[0]); if ($null -ne $process) { $process.CommandLine }' \
+            "$1" 2>/dev/null | sed -n '1p'
+        return
+    fi
     ps -p "$1" -o command= 2>/dev/null | sed -n '1p'
 }
 
 process_name() {
+    if [ "$is_windows_shell" -eq 1 ]; then
+        powershell.exe -NoProfile -NonInteractive -Command \
+            '$process = Get-CimInstance -ClassName Win32_Process -Filter ("ProcessId = {0}" -f [int]$args[0]); if ($null -ne $process) { $process.Name }' \
+            "$1" 2>/dev/null | sed -n '1p'
+        return
+    fi
     ps -p "$1" -o comm= 2>/dev/null | sed -n '1p' | awk '{ print $1 }'
 }
 
 process_executable_path() {
+    if [ "$is_windows_shell" -eq 1 ]; then
+        powershell.exe -NoProfile -NonInteractive -Command \
+            '$process = Get-CimInstance -ClassName Win32_Process -Filter ("ProcessId = {0}" -f [int]$args[0]); if ($null -ne $process) { $process.ExecutablePath }' \
+            "$1" 2>/dev/null | sed -n '1p'
+        return
+    fi
     if [ -L "/proc/$1/exe" ]; then
         readlink "/proc/$1/exe" 2>/dev/null
         return
@@ -93,6 +111,12 @@ is_installed_relay_process() {
 }
 
 process_parent_pid() {
+    if [ "$is_windows_shell" -eq 1 ]; then
+        powershell.exe -NoProfile -NonInteractive -Command \
+            '$process = Get-CimInstance -ClassName Win32_Process -Filter ("ProcessId = {0}" -f [int]$args[0]); if ($null -ne $process) { $process.ParentProcessId }' \
+            "$1" 2>/dev/null | sed -n '1p'
+        return
+    fi
     ps -p "$1" -o ppid= 2>/dev/null | awk 'NR == 1 { gsub(/[[:space:]]/, ""); print }'
 }
 
@@ -122,7 +146,12 @@ is_mcp_command() {
 }
 
 active_relay_process_pids() {
-    process_snapshot=$(ps -axww -o pid=,command=) || return 1
+    if [ "$is_windows_shell" -eq 1 ]; then
+        process_snapshot=$(powershell.exe -NoProfile -NonInteractive -Command \
+            'Get-CimInstance -ClassName Win32_Process | ForEach-Object { "{0}`t{1}" -f $_.ProcessId, $_.CommandLine }') || return 1
+    else
+        process_snapshot=$(ps -axww -o pid=,command=) || return 1
+    fi
     for process_pid in $(printf '%s\n' "$process_snapshot" | awk -v name="$binary_name" '
         # Inspect the full command: an executable path may contain spaces.
         $0 ~ ("(^|[[:space:]]|/)" name "([[:space:]]|$)") { print $1 }
@@ -172,6 +201,12 @@ active_shutdown_target_exists() {
 }
 
 process_identity() {
+    if [ "$is_windows_shell" -eq 1 ]; then
+        powershell.exe -NoProfile -NonInteractive -Command \
+            '$process = Get-CimInstance -ClassName Win32_Process -Filter ("ProcessId = {0}" -f [int]$args[0]); if ($null -ne $process) { "{0} {1}" -f $process.ParentProcessId, $process.CreationDate }' \
+            "$1" 2>/dev/null | sed -n '1p'
+        return
+    fi
     ps -p "$1" -o ppid= -o lstart= 2>/dev/null | sed -n '1p' | awk '{$1 = $1; print}'
 }
 
@@ -200,6 +235,12 @@ confirm_shutdown() {
 }
 
 child_pids() {
+    if [ "$is_windows_shell" -eq 1 ]; then
+        powershell.exe -NoProfile -NonInteractive -Command \
+            'Get-CimInstance -ClassName Win32_Process | Where-Object { $_.ParentProcessId -eq [int]$args[0] } | ForEach-Object { $_.ProcessId }' \
+            "$1" 2>/dev/null
+        return
+    fi
     ps -ax -o pid=,ppid= | awk -v parent="$1" '$2 == parent { print $1 }'
 }
 
@@ -220,7 +261,11 @@ terminate_process_tree() {
     for child_pid in $(child_pids "$1"); do
         terminate_process_tree "$child_pid"
     done
-    kill -TERM "$1" 2>/dev/null || true
+    if [ "$is_windows_shell" -eq 1 ]; then
+        powershell.exe -NoProfile -NonInteractive -Command 'Stop-Process -Id ([int]$args[0]) -Force' "$1" >/dev/null 2>&1 || true
+    else
+        kill -TERM "$1" 2>/dev/null || true
+    fi
 }
 
 wait_for_process_exit() {
@@ -236,6 +281,13 @@ wait_for_process_exit() {
 }
 
 process_is_running() {
+    if [ "$is_windows_shell" -eq 1 ]; then
+        process_state=$(powershell.exe -NoProfile -NonInteractive -Command \
+            '$process = Get-CimInstance -ClassName Win32_Process -Filter ("ProcessId = {0}" -f [int]$args[0]); if ($null -ne $process) { $process.ProcessId }' \
+            "$1" 2>/dev/null) || return 1
+        [ -n "$process_state" ]
+        return
+    fi
     process_state=$(ps -p "$1" -o stat= 2>/dev/null | sed -n '1p' | awk '{$1 = $1; print}')
     case "$process_state" in
         ""|Z*) return 1 ;;
@@ -343,7 +395,6 @@ while [ "$#" -gt 0 ]; do
 done
 
 require_command uname
-require_command ps
 require_command awk
 require_command sed
 require_command sleep
@@ -358,6 +409,12 @@ case "$os" in
         is_windows_shell=1
         ;;
 esac
+
+if [ "$is_windows_shell" -eq 1 ]; then
+    require_command powershell.exe
+else
+    require_command ps
+fi
 
 if [ "$install_dir_set" -eq 1 ]; then
     [ -n "$install_dir" ] || error "install directory must not be empty"

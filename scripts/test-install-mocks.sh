@@ -122,8 +122,14 @@ EOF
 
     cat >"${mock_commands_dir}/powershell.exe" <<'EOF'
 #!/bin/sh
-[ -n "${NEMO_RELAY_INSTALL_DIR:-}" ] || exit 99
-printf '%s\n' "$NEMO_RELAY_INSTALL_DIR" >>"$MOCK_POWERSHELL_LOG"
+if [ -n "${NEMO_RELAY_INSTALL_DIR:-}" ]; then
+    printf '%s\n' "$NEMO_RELAY_INSTALL_DIR" >>"$MOCK_POWERSHELL_LOG"
+    exit 0
+fi
+case "$*" in
+    *Win32_Process*) printf '%s\n' "${MOCK_WINDOWS_PROCESS_SNAPSHOT:-}" ;;
+    *) exit 99 ;;
+esac
 EOF
 
     chmod +x "${mock_commands_dir}/uname" "${mock_commands_dir}/curl" "${mock_commands_dir}/sha256sum" \
