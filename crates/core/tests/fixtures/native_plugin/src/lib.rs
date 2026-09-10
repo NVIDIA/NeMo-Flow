@@ -12,13 +12,14 @@ use nemo_relay_plugin::{
     Json, LlmJsonAsyncStream, LlmRequest, LlmRequestInterceptOutcome, MetricKind,
     MetricMeasurement, MetricValueType, NEMO_RELAY_NATIVE_ABI_VERSION,
     NEMO_RELAY_NATIVE_ABI_VERSION_ASYNC_MIDDLEWARE, NEMO_RELAY_NATIVE_ABI_VERSION_LEGACY,
-    NativeExecutorConfig, NativePlugin, NemoRelayNativeAsyncCallbackState,
+    NEMO_RELAY_NATIVE_ABI_VERSION_RUNTIME_CONTROL, NativeExecutorConfig, NativePlugin,
+    NemoRelayNativeAsyncCallbackState,
     NemoRelayNativeAsyncMiddlewareCb, NemoRelayNativeAsyncMiddlewareKind, NemoRelayNativeAsyncNext,
     NemoRelayNativeAsyncStream, NemoRelayNativeHostApiV1, NemoRelayNativeHostApiV3,
-    NemoRelayNativeHostApiV4, NemoRelayNativePluginContext, NemoRelayNativePluginV1,
-    NemoRelayNativeString, NemoRelayNativeToolNextFn, NemoRelayStatus, PendingMarkSpec,
-    PluginContext, PluginRuntime, RuntimeRegistrationKind, ScopeCategory, ScopeType,
-    ToolExecutionInterceptOutcome,
+    NemoRelayNativeHostApiV4, NemoRelayNativeHostApiV5, NemoRelayNativePluginContext,
+    NemoRelayNativePluginV1, NemoRelayNativeString, NemoRelayNativeToolNextFn, NemoRelayStatus,
+    PendingMarkSpec, PluginContext, PluginRuntime, RuntimeRegistrationKind, ScopeCategory,
+    ScopeType, ToolExecutionInterceptOutcome,
 };
 use serde_json::{Map, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -181,9 +182,10 @@ impl NativePlugin for FixtureNativePlugin {
         })?;
         ctx.register_tool_execution_intercept("fixture_tool_execution", 0, {
             let runtime = runtime.clone();
-            move |_name, args, next| {
+            move |context, next| {
                 let runtime = runtime.clone();
                 async move {
+                    let args = context.arguments;
                     let args = mark_json(args, "native_plugin_tool_execution_request");
                     let result = if args
                         .get("use_isolated_next")
@@ -507,7 +509,24 @@ pub unsafe extern "C" fn nemo_relay_fixture_native_plugin_v2(
     }
 }
 
-/// Raw ABI-v4 entry used to verify the final current table.
+/// Raw ABI-v5 entry used to verify the current table.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nemo_relay_fixture_native_plugin_v5(
+    host: *const NemoRelayNativeHostApiV1,
+    out: *mut NemoRelayNativePluginV1,
+) -> NemoRelayStatus {
+    unsafe {
+        fixture_compat_entry(
+            host,
+            out,
+            NEMO_RELAY_NATIVE_ABI_VERSION,
+            std::mem::size_of::<NemoRelayNativeHostApiV5>(),
+            b"fixture_native_v5",
+        )
+    }
+}
+
+/// Raw ABI-v4 entry used to verify fallback for plugins built with the previous SDK.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nemo_relay_fixture_native_plugin_v4(
     host: *const NemoRelayNativeHostApiV1,
@@ -517,7 +536,7 @@ pub unsafe extern "C" fn nemo_relay_fixture_native_plugin_v4(
         fixture_compat_entry(
             host,
             out,
-            NEMO_RELAY_NATIVE_ABI_VERSION,
+            NEMO_RELAY_NATIVE_ABI_VERSION_RUNTIME_CONTROL,
             std::mem::size_of::<NemoRelayNativeHostApiV4>(),
             b"fixture_native_v4",
         )

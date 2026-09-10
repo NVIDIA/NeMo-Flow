@@ -1176,11 +1176,12 @@ fn native_loader_falls_back_to_abi_v3_plugins() {
 }
 
 #[test]
-fn native_loader_supports_current_v4_and_legacy_v2_plugins() {
+fn native_loader_supports_current_v5_frozen_v4_and_legacy_v2_plugins() {
     let _guard = NATIVE_PLUGIN_TEST_LOCK.blocking_lock();
     let fixture = build_fixture_plugin();
 
     for (plugin_id, symbol) in [
+        ("fixture_native_v5", "nemo_relay_fixture_native_plugin_v5"),
         ("fixture_native_v4", "nemo_relay_fixture_native_plugin_v4"),
         ("fixture_native_v2", "nemo_relay_fixture_native_plugin_v2"),
     ] {

@@ -261,9 +261,12 @@ fn register_fixture_tool_hooks(
     ctx.register_tool_execution_intercept(
         "fixture_tool_execution",
         0,
-        |_name, args, next: ToolNext| async move {
+        |context, next: ToolNext| async move {
             let result = next
-                .call(mark_json(args, "worker_plugin_tool_execution_request"))
+                .call(mark_json(
+                    context.into_arguments(),
+                    "worker_plugin_tool_execution_request",
+                ))
                 .await?;
             let mut result = result;
             result.result = mark_json(result.result, "worker_plugin_tool_execution");

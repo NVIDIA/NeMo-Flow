@@ -409,9 +409,13 @@ fn load_one_native_plugin(
                 ))
             })?;
         let mut status = entry(native_host_api(), &mut plugin);
-        // Older SDKs reject newer tables. Negotiate from the current v4 table
-        // through separately frozen v3 and v2 tables so their struct sizes and
+        // Older SDKs reject newer tables. Negotiate from the current v5 table
+        // through separately frozen v4, v3, and v2 tables so their struct sizes and
         // function pointers do not change as the current ABI grows.
+        if status == NemoRelayStatus::InvalidArg {
+            drop_native_plugin_descriptor(&mut plugin);
+            status = entry(native_host_api_v4(), &mut plugin);
+        }
         if status == NemoRelayStatus::InvalidArg {
             drop_native_plugin_descriptor(&mut plugin);
             status = entry(native_host_api_v3(), &mut plugin);
@@ -864,6 +868,11 @@ unsafe extern "C" fn native_llm_response_codec_decode(
 fn native_host_api() -> *const NemoRelayNativeHostApiV1 {
     static HOST_API: OnceLock<NemoRelayNativeHostApiV5> = OnceLock::new();
     &HOST_API.get_or_init(build_native_host_api_v5).v4.v3.v1 as *const NemoRelayNativeHostApiV1
+}
+
+fn native_host_api_v4() -> *const NemoRelayNativeHostApiV1 {
+    static HOST_API: OnceLock<NemoRelayNativeHostApiV4> = OnceLock::new();
+    &HOST_API.get_or_init(build_native_host_api_v4).v3.v1 as *const NemoRelayNativeHostApiV1
 }
 
 fn native_host_api_v3() -> *const NemoRelayNativeHostApiV1 {
