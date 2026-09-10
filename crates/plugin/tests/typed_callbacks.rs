@@ -26,11 +26,12 @@ use nemo_relay_plugin::{
     LlmJsonAsyncStream, LlmJsonStream, LlmNext, LlmRequest, LlmRequestInterceptOutcome, LlmStream,
     LlmStreamNext, LogSeverity, MetricKind, MetricMeasurement, MetricValueType,
     NEMO_RELAY_NATIVE_ABI_VERSION, NEMO_RELAY_NATIVE_ABI_VERSION_ASYNC_MIDDLEWARE,
-    NEMO_RELAY_NATIVE_ABI_VERSION_LEGACY, NativeExecutorConfig, NativePlugin,
-    NemoRelayNativeAsyncCallbackState, NemoRelayNativeAsyncCompletion,
-    NemoRelayNativeAsyncLlmStreamOpenCb, NemoRelayNativeAsyncLlmStreamPullCb,
-    NemoRelayNativeAsyncMiddlewareCb, NemoRelayNativeAsyncMiddlewareKind, NemoRelayNativeAsyncNext,
-    NemoRelayNativeAsyncNextResultCb, NemoRelayNativeAsyncNextStreamCb, NemoRelayNativeAsyncStream,
+    NEMO_RELAY_NATIVE_ABI_VERSION_LEGACY, NEMO_RELAY_NATIVE_ABI_VERSION_TOOL_EXECUTION_CONTEXT,
+    NativeExecutorConfig, NativePlugin, NemoRelayNativeAsyncCallbackState,
+    NemoRelayNativeAsyncCompletion, NemoRelayNativeAsyncLlmStreamOpenCb,
+    NemoRelayNativeAsyncLlmStreamPullCb, NemoRelayNativeAsyncMiddlewareCb,
+    NemoRelayNativeAsyncMiddlewareKind, NemoRelayNativeAsyncNext, NemoRelayNativeAsyncNextResultCb,
+    NemoRelayNativeAsyncNextStreamCb, NemoRelayNativeAsyncStream,
     NemoRelayNativeAsyncStreamMiddlewareCb, NemoRelayNativeConditionalMiddlewareCb,
     NemoRelayNativeEventSanitizeCb, NemoRelayNativeEventSubscriberCb, NemoRelayNativeFreeFn,
     NemoRelayNativeHostApiV1, NemoRelayNativeHostApiV3, NemoRelayNativeHostApiV4,
@@ -2785,7 +2786,7 @@ fn test_host_v4() -> NemoRelayNativeHostApiV4 {
 
 fn test_host_v5() -> NemoRelayNativeHostApiV5 {
     let mut v4 = test_host_v4();
-    v4.v3.v1.abi_version = 5;
+    v4.v3.v1.abi_version = NEMO_RELAY_NATIVE_ABI_VERSION_TOOL_EXECUTION_CONTEXT;
     v4.v3.v1.struct_size = size_of::<NemoRelayNativeHostApiV5>();
     NemoRelayNativeHostApiV5 {
         v4,
@@ -5696,10 +5697,24 @@ impl NativePlugin for RegisteringPlugin {
         ctx: &mut PluginContext<'_>,
     ) -> nemo_relay_plugin::Result<()> {
         assert_eq!(plugin_config.get("enabled"), Some(&json!(true)));
-        assert_eq!(ctx.host_api().abi_version, NEMO_RELAY_NATIVE_ABI_VERSION);
+        assert_eq!(
+            ctx.host_api().abi_version,
+            NEMO_RELAY_NATIVE_ABI_VERSION_TOOL_EXECUTION_CONTEXT
+        );
         assert!(ctx.runtime().scope_stack_active());
         ctx.register_subscriber("registered", |_event: &Event| {})?;
-        Ok(())
+        let status = unsafe {
+            ctx.register_tool_execution_intercept_raw(
+                "registered-tool-execution",
+                0,
+                passthrough_tool_execution_cb,
+                ptr::null_mut(),
+                None,
+            )
+        };
+        (status == NemoRelayStatus::Ok)
+            .then_some(())
+            .ok_or_else(|| "ABI-v5 tool execution registration failed".into())
     }
 }
 
@@ -6043,14 +6058,15 @@ fn exported_plugin_default_validate_returns_empty_diagnostics() {
 #[test]
 fn exported_plugin_register_installs_callbacks_and_propagates_errors() {
     let _guard = begin_test();
-    let host = test_host();
+    let host = test_host_v5();
+    let host_v1 = &host.v4.v3.v1;
 
     let mut plugin = NemoRelayNativePluginV1::default();
     assert_eq!(
-        unsafe { nemo_relay_plugin::export_plugin(&host, &mut plugin, RegisteringPlugin) },
+        unsafe { nemo_relay_plugin::export_plugin(host_v1, &mut plugin, RegisteringPlugin) },
         NemoRelayStatus::Ok
     );
-    let config = json_host_string(&host, json!({ "enabled": true }));
+    let config = json_host_string(host_v1, json!({ "enabled": true }));
     assert_eq!(
         unsafe {
             plugin.register.unwrap()(
@@ -6063,25 +6079,28 @@ fn exported_plugin_register_installs_callbacks_and_propagates_errors() {
     );
     let registration = take_subscriber_registration();
     assert_eq!(registration.name, "registered");
+    let tool_execution = take_tool_execution_context_registration();
+    assert_eq!(tool_execution.name, "registered-tool-execution");
     unsafe {
         registration.free();
-        (host.string_free)(config);
+        tool_execution.free();
+        (host_v1.string_free)(config);
     }
 
-    let config = json_host_string(&host, json!({ "enabled": true }));
+    let config = json_host_string(host_v1, json!({ "enabled": true }));
     assert_eq!(
         unsafe { plugin.register.unwrap()(plugin.user_data, config, ptr::null_mut()) },
         NemoRelayStatus::NullPointer
     );
-    unsafe { (host.string_free)(config) };
-    unsafe { drop_exported_plugin(&host, plugin) };
+    unsafe { (host_v1.string_free)(config) };
+    unsafe { drop_exported_plugin(host_v1, plugin) };
 
     let mut plugin = NemoRelayNativePluginV1::default();
     assert_eq!(
-        unsafe { nemo_relay_plugin::export_plugin(&host, &mut plugin, RegisterErrorPlugin) },
+        unsafe { nemo_relay_plugin::export_plugin(host_v1, &mut plugin, RegisterErrorPlugin) },
         NemoRelayStatus::Ok
     );
-    let config = json_host_string(&host, json!({}));
+    let config = json_host_string(host_v1, json!({}));
     assert_eq!(
         unsafe {
             plugin.register.unwrap()(
@@ -6097,8 +6116,8 @@ fn exported_plugin_register_installs_callbacks_and_propagates_errors() {
         Some("register rejected config")
     );
     unsafe {
-        (host.string_free)(config);
-        drop_exported_plugin(&host, plugin);
+        (host_v1.string_free)(config);
+        drop_exported_plugin(host_v1, plugin);
     }
 }
 

@@ -54,6 +54,8 @@ use serde_json::Map;
 /// Hosts retain frozen version-4, version-3, and version-2 tables for
 /// already-built plugins that target those layouts.
 pub const NEMO_RELAY_NATIVE_ABI_VERSION: u32 = 5;
+/// ABI version that introduced context-aware raw tool execution intercepts.
+pub const NEMO_RELAY_NATIVE_ABI_VERSION_TOOL_EXECUTION_CONTEXT: u32 = 5;
 /// ABI version that introduced runtime diagnostics and dynamic gate control.
 pub const NEMO_RELAY_NATIVE_ABI_VERSION_RUNTIME_CONTROL: u32 = 4;
 /// ABI version that introduced completion-based asynchronous middleware.
@@ -2635,7 +2637,7 @@ impl<'a> PluginContext<'a> {
         user_data: *mut c_void,
         free_fn: NemoRelayNativeFreeFn,
     ) -> NemoRelayStatus {
-        if self.host.abi_version < NEMO_RELAY_NATIVE_ABI_VERSION
+        if self.host.abi_version < NEMO_RELAY_NATIVE_ABI_VERSION_TOOL_EXECUTION_CONTEXT
             || self.host.struct_size < std::mem::size_of::<NemoRelayNativeHostApiV5>()
         {
             set_last_error(
@@ -3109,7 +3111,7 @@ enum OwnedHostApi {
 
 impl OwnedHostApi {
     unsafe fn copy_from(host: &NemoRelayNativeHostApiV1) -> Self {
-        if host.abi_version >= NEMO_RELAY_NATIVE_ABI_VERSION
+        if host.abi_version >= NEMO_RELAY_NATIVE_ABI_VERSION_TOOL_EXECUTION_CONTEXT
             && host.struct_size >= std::mem::size_of::<NemoRelayNativeHostApiV5>()
         {
             Self::V5(unsafe { *(host as *const _ as *const NemoRelayNativeHostApiV5) })
