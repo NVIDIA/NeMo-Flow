@@ -60,8 +60,21 @@ process_executable_path() {
 }
 
 canonical_path() {
-    canonical_directory=$(CDPATH= cd -P -- "$(dirname -- "$1")" && pwd) || return 1
-    printf '%s/%s\n' "$canonical_directory" "$(basename -- "$1")"
+    canonical_target=$1
+    canonical_hops=0
+    # Resolve the executable as well as its directory for process comparison.
+    # A dangling link can still be removed without following its missing target.
+    while [ -L "$canonical_target" ] && [ -e "$canonical_target" ]; do
+        [ "$canonical_hops" -lt 40 ] || return 1
+        canonical_link=$(readlink "$canonical_target") || return 1
+        case "$canonical_link" in
+            /*) canonical_target=$canonical_link ;;
+            *) canonical_target="$(dirname -- "$canonical_target")/$canonical_link" ;;
+        esac
+        canonical_hops=$((canonical_hops + 1))
+    done
+    canonical_directory=$(CDPATH= cd -P -- "$(dirname -- "$canonical_target")" && pwd) || return 1
+    printf '%s/%s\n' "$canonical_directory" "$(basename -- "$canonical_target")"
 }
 
 is_installed_relay_process() {

@@ -405,6 +405,46 @@ EOF
     done
 }
 
+test_executable_symlink_refuses_active_removal() {
+    tests_run=$((tests_run + 1))
+    install_dir="${test_root}/symlink bin"
+    mkdir -p "$install_dir"
+    build_relay_fixture "$install_dir/real-relay"
+    for link_kind in absolute relative chained; do
+        case "$link_kind" in
+            absolute) ln -s "$install_dir/real-relay" "$install_dir/nemo-relay" ;;
+            relative) ln -s real-relay "$install_dir/nemo-relay" ;;
+            chained)
+                ln -s real-relay "$install_dir/intermediate"
+                ln -s intermediate "$install_dir/nemo-relay"
+                ;;
+        esac
+        "$install_dir/nemo-relay" daemon &
+        active_session_pid=$!
+        sleep 1
+        kill -0 "$active_session_pid" || fail 'symlink fixture did not start'
+        for option in '' --force --dry-run; do
+            run_command sh "$uninstaller" --install-dir "$install_dir" $option
+            assert_failure
+            assert_contains "$run_output" 'active managed daemon deployment'
+            [ -L "$install_dir/nemo-relay" ] || fail 'active symlink was removed'
+            kill -0 "$active_session_pid" || fail 'managed process was terminated'
+        done
+        kill "$active_session_pid"
+        wait "$active_session_pid" 2>/dev/null || true
+        active_session_pid=""
+        run_command sh "$uninstaller" --install-dir "$install_dir"
+        assert_success
+        [ ! -L "$install_dir/nemo-relay" ] || fail 'inactive symlink was not removed'
+        [ -f "$install_dir/real-relay" ] || fail 'symlink target was removed'
+    done
+    ln -s missing-target "$install_dir/nemo-relay"
+    run_command sh "$uninstaller" --install-dir "$install_dir"
+    assert_success
+    [ ! -L "$install_dir/nemo-relay" ] || fail 'dangling symlink was not removed'
+}
+
+test_executable_symlink_refuses_active_removal
 test_process_inspection_failure_refuses_removal
 test_active_installation_path_with_spaces
 test_interface_validation
