@@ -159,11 +159,13 @@ additionally carry the logical `session.id`, optional `user.id`, and Relay-owned
 `nemo_relay.session.instance_id`. The instance value is the existing root scope
 UUID and is shared across trace roots created by the same runtime session.
 The `gen_ai` projection uses the standard `gen_ai.conversation.id` when the
-event supplies a conversation, session, or thread identifier. Typed endpoints
-derive the same native trace and span IDs from the same Relay lifecycle UUIDs,
-so the backend IDs also correlate across exporters. ATIF artifact filenames and
-storage keys remain based on the trajectory scope UUID. Logical coding-session
-values also remain available under `extra.nemo_relay`.
+event supplies a conversation, session, or thread identifier. Coding-agent LLM
+events prefer an explicit provider conversation identifier and otherwise use
+the resolved logical harness session identifier. Typed endpoints derive the
+same native trace and span IDs from the same Relay lifecycle UUIDs, so the
+backend IDs also correlate across exporters. ATIF artifact filenames and storage
+keys remain based on the trajectory scope UUID. Logical coding-session values
+also remain available under `extra.nemo_relay`.
 
 ## Pages
 
