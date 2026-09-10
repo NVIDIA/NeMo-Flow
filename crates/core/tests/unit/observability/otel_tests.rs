@@ -3987,6 +3987,71 @@ fn has_promoted_resource_metadata(attributes: &[OtlpKeyValue]) -> bool {
 }
 
 #[test]
+fn http_trace_exports_do_not_follow_redirects() {
+    let _guard = crate::observability::test_mutex().lock().unwrap();
+    reset_global();
+
+    for otel_type in [
+        OpenTelemetryType::Full,
+        OpenTelemetryType::GenAi,
+        OpenTelemetryType::OpenInference,
+    ] {
+        for status in [307, 308] {
+            let destination = TcpListener::bind("127.0.0.1:0").unwrap();
+            destination.set_nonblocking(true).unwrap();
+            let location = format!("http://{}/leak", destination.local_addr().unwrap());
+            let redirector = TcpListener::bind("127.0.0.1:0").unwrap();
+            let endpoint = format!("http://{}/v1/traces", redirector.local_addr().unwrap());
+            let server = thread::spawn(move || {
+                let (mut stream, _) = redirector.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let request = read_http_request(&mut stream);
+                write!(stream, "HTTP/1.1 {status} Redirect\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                request
+            });
+            let mut config =
+                OpenTelemetryConfig::new(otel_type, endpoint).with_timeout(Duration::from_secs(1));
+            config
+                .headers
+                .insert("x-collector-key".into(), "test-secret".into());
+            let subscriber = OpenTelemetrySubscriber::new(config).unwrap();
+            let callback = subscriber.subscriber();
+            let uuid = Uuid::now_v7();
+            callback(&make_start_event(
+                uuid,
+                None,
+                "redirect-test",
+                ScopeType::Agent,
+                None,
+            ));
+            callback(&make_end_event(
+                uuid,
+                None,
+                "redirect-test",
+                ScopeType::Agent,
+                None,
+            ));
+            assert!(
+                subscriber.force_flush().is_err(),
+                "redirect must fail export"
+            );
+            let request = server.join().unwrap();
+            assert!(
+                !request.body.is_empty(),
+                "initial collector must receive the export"
+            );
+            assert!(
+                matches!(destination.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+                "redirect destination must receive no connection, payload, or credentials"
+            );
+            subscriber.shutdown().unwrap();
+        }
+    }
+}
+
+#[test]
 fn direct_gen_ai_and_openinference_configs_export_typed_otlp_payloads() {
     let _guard = crate::observability::test_mutex().lock().unwrap();
     reset_global();

@@ -1030,8 +1030,23 @@ fn build_tracer_provider_with_resource(
 ) -> Result<SdkTracerProvider> {
     let exporter = match config.transport {
         OtlpTransport::HttpBinary => {
+            // Construct the blocking client outside any caller-owned async runtime,
+            // matching the OTLP exporter's default client construction behavior.
+            let timeout = config.timeout;
+            let client = thread::spawn(move || {
+                reqwest_otel::blocking::Client::builder()
+                    .timeout(timeout)
+                    .redirect(reqwest_otel::redirect::Policy::none())
+                    .build()
+            })
+            .join()
+            .map_err(|_| {
+                OpenTelemetryError::ExporterBuild("OTLP HTTP client construction panicked".into())
+            })?
+            .map_err(|error| OpenTelemetryError::ExporterBuild(error.to_string()))?;
             let mut builder = OtlpSpanExporter::builder()
                 .with_http()
+                .with_http_client(client)
                 .with_protocol(Protocol::HttpBinary)
                 .with_timeout(config.timeout);
             builder =
