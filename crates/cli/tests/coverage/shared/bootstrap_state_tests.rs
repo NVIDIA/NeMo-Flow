@@ -23,6 +23,27 @@ fn owner_records_are_versioned_endpoint_scoped_and_round_trip() {
     assert_eq!(lock_name("not a url/with spaces"), "not_a_url_with_spaces");
 }
 
+#[test]
+fn bootstrap_state_reports_malformed_recovery_and_non_directory_state_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let url = "http://127.0.0.1:47632";
+    std::fs::write(recovery_path(dir.path(), url), b"not-json").unwrap();
+    let error = read_recovery(dir.path(), url).unwrap_err();
+    assert!(
+        error.contains("failed to parse gateway recovery"),
+        "{error}"
+    );
+    std::fs::remove_file(recovery_path(dir.path(), url)).unwrap();
+    std::fs::create_dir(recovery_path(dir.path(), url)).unwrap();
+    let error = read_recovery(dir.path(), url).unwrap_err();
+    assert!(error.contains("failed to read gateway recovery"), "{error}");
+
+    let file = dir.path().join("not-a-directory");
+    std::fs::write(&file, b"occupied").unwrap();
+    let error = create_private_dir(&file).unwrap_err();
+    assert!(error.contains("failed to create"), "{error}");
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 #[test]
 fn live_owner_record_uses_a_process_instance_identity() {

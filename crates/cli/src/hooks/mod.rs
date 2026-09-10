@@ -25,13 +25,14 @@ pub(crate) use destination::{
 #[cfg(test)]
 pub(crate) use encoding::transparent_hook_forward_commands;
 pub(crate) use encoding::{
-    GeneratedHookCommands, generated_policy_hooks, persistent_hook_config_path,
-    persistent_hook_forward_commands, transparent_hook_forward_commands_with_config,
+    GeneratedHookCommands, event_requires_fail_closed, generated_policy_hooks,
+    persistent_hook_config_path, persistent_hook_forward_commands,
+    transparent_hook_forward_commands_with_config,
 };
 #[cfg(test)]
 pub(crate) use encoding::{
-    event_matches_tools, event_requires_fail_closed, generated_hooks,
-    persistent_hook_forward_commands_for_platform, transparent_hook_forward_commands_for_platform,
+    event_matches_tools, generated_hooks, persistent_hook_forward_commands_for_platform,
+    transparent_hook_forward_commands_for_platform,
 };
 #[cfg(test)]
 pub(crate) use merging::merge_hooks;

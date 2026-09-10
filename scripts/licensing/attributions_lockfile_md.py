@@ -392,7 +392,7 @@ def _render_rust_metadata_fallback_attribution(crate: dict[str, Any]) -> tuple[s
     license_name = _normalize_license_name(str(crate.get("license") or "UNKNOWN"))
 
     parts = [
-        f"## {name} - {version}\n",
+        f"## {name} - {version}\n\n",
         f"**Repository URL**: {repo}\n",
         f"**License Type(s)**: {license_name}\n",
         f"### License: {spdx_url(license_name, fallback='https://spdx.org/licenses/')}\n",
@@ -442,7 +442,7 @@ def _render_rust_crate_attribution(
 
     rendered = "".join(
         [
-            f"## {name} - {version}\n",
+            f"## {name} - {version}\n\n",
             f"**Repository URL**: {repo}\n",
             f"**License Type(s)**: {license_id}\n",
             f"### License: https://spdx.org/licenses/{license_id}.html\n",

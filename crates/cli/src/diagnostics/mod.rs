@@ -717,29 +717,43 @@ async fn pi_gateway_reachability_check(
         },
         Some(crate::gateway::client::RelayHealth::Unavailable) => unreachable("is not answering"),
         // Non-loopback, or the blocking probe did not finish in budget.
-        None => match reqwest::Client::builder()
-            .timeout(NETWORK_TIMEOUT)
-            .build()
-            .ok()
-        {
-            Some(client) => match client.get(format!("{url}/healthz")).send().await {
-                Ok(response) if response.status().is_success() => Check {
-                    name: NAME,
-                    status: Status::Pass,
-                    details: format!("{url} answered /healthz"),
-                },
-                Ok(response) => Check {
-                    name: NAME,
-                    status: Status::Warn,
-                    details: format!(
-                        "{url} answered /healthz with HTTP {}; the pi extension posts hooks here",
-                        response.status().as_u16()
-                    ),
-                },
-                Err(_) => unreachable("did not answer /healthz"),
+        None => remote_pi_gateway_reachability_check(&url).await,
+    }
+}
+
+async fn remote_pi_gateway_reachability_check(url: &str) -> Check {
+    const NAME: &str = "pi gateway reachability";
+    let unreachable = |detail: &str| Check {
+        name: NAME,
+        status: Status::Warn,
+        details: format!(
+            "{url} {detail}; start the gateway before pi, or every hook will fault -- and \
+             because the extension fails open by default, pi keeps running with no policy applied"
+        ),
+    };
+
+    match reqwest::Client::builder()
+        .timeout(NETWORK_TIMEOUT)
+        .build()
+        .ok()
+    {
+        Some(client) => match client.get(format!("{url}/healthz")).send().await {
+            Ok(response) if response.status().is_success() => Check {
+                name: NAME,
+                status: Status::Pass,
+                details: format!("{url} answered /healthz"),
             },
-            None => unreachable("could not be probed"),
+            Ok(response) => Check {
+                name: NAME,
+                status: Status::Warn,
+                details: format!(
+                    "{url} answered /healthz with HTTP {}; the pi extension posts hooks here",
+                    response.status().as_u16()
+                ),
+            },
+            Err(_) => unreachable("did not answer /healthz"),
         },
+        None => unreachable("could not be probed"),
     }
 }
 
@@ -1949,6 +1963,62 @@ pub(crate) async fn run_doctor(
     match exit_code(&report) {
         0 => Ok(std::process::ExitCode::SUCCESS),
         _ => Ok(std::process::ExitCode::FAILURE),
+    }
+}
+
+/// Runs the managed deployment doctor without loading or probing any personal runtime state.
+pub(crate) fn run_managed_bundle_doctor(
+    path: &Path,
+    expected_sha256: &crate::daemon::managed::ManagedBundleDigest,
+    json: bool,
+) -> Result<std::process::ExitCode, CliError> {
+    let report = collect_managed_bundle_report(path, expected_sha256);
+    let failed = matches!(report.managed_bundle.status, Status::Fail);
+    if json {
+        print!("{}", format_managed_bundle_json(&report)?);
+    } else {
+        crate::banner::print_doctor_header();
+        print!("{}", format_managed_bundle_human(&report));
+    }
+    Ok(if failed {
+        std::process::ExitCode::FAILURE
+    } else {
+        std::process::ExitCode::SUCCESS
+    })
+}
+
+pub(crate) fn collect_managed_bundle_report(
+    path: &Path,
+    expected_sha256: &crate::daemon::managed::ManagedBundleDigest,
+) -> ManagedBundleDoctorReport {
+    let expected_sha256_text = expected_sha256.to_string();
+    let managed_bundle = match crate::daemon::managed::refresh_bundle(path, expected_sha256) {
+        Ok(validation) => ManagedBundleDoctorInfo {
+            status: Status::Pass,
+            path: path.display().to_string(),
+            expected_sha256: expected_sha256_text,
+            artifact_count: Some(validation.artifact_count),
+            daemon_address: Some(validation.daemon_address),
+            platform: Some(validation.platform.as_str().into()),
+            details: format!(
+                "{} immutable artifacts match the trusted bundle digest {}",
+                validation.artifact_count, validation.sha256
+            ),
+        },
+        Err(error) => ManagedBundleDoctorInfo {
+            status: Status::Fail,
+            path: path.display().to_string(),
+            expected_sha256: expected_sha256_text,
+            artifact_count: None,
+            daemon_address: None,
+            platform: None,
+            details: error.to_string(),
+        },
+    };
+    ManagedBundleDoctorReport {
+        schema_version: 1,
+        binary_version: env!("CARGO_PKG_VERSION"),
+        managed_bundle,
     }
 }
 
