@@ -127,6 +127,11 @@ impl ActiveWorkerGenerations {
         })
     }
 
+    /// Captures generations that may reconnect after this daemon starts.
+    pub(crate) fn snapshot(&self) -> Result<HashMap<Fingerprint, String>, CliError> {
+        self.with_locked_generations(|generations| Ok((generations.clone(), false)))
+    }
+
     /// Publishes a ready generation, atomically replacing any prior generation for the route.
     pub(crate) fn publish(
         &self,

@@ -1,338 +1,442 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-
 use super::*;
 
-use std::convert::Infallible;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-
-use axum::body::Body;
-use axum::extract::State;
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
-use axum::routing::post;
-use axum::{Json, Router};
-use bytes::Bytes;
-use serde_json::{Value, json};
-use tokio::net::TcpListener;
-
-#[test]
-fn control_client_has_a_bounded_configuration() {
-    control_client().expect("control client");
-}
-
 #[tokio::test]
-async fn default_port_process_origins_reach_handshake_transport_for_mcp_and_worker() {
-    let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    // An explicit local proxy captures both HTTP requests and HTTPS CONNECT attempts without
-    // binding privileged ports, requiring external DNS, or contacting a real daemon.
-    let app = Router::new().fallback({
-        let requests = Arc::clone(&requests);
-        move || {
-            requests.fetch_add(1, Ordering::SeqCst);
-            async { StatusCode::BAD_GATEWAY }
-        }
-    });
-    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let client = reqwest::Client::builder()
-        .proxy(reqwest::Proxy::all(format!("http://{address}")).unwrap())
-        .timeout(Duration::from_secs(5))
-        .build()
-        .unwrap();
-    let identity = MachineIdentity::generate().unwrap().identity;
-    for raw in ["http://127.0.0.1:80/", "https://relay.example:443/"] {
-        let origin = crate::daemon::common::address::explicit_daemon_origin(raw).unwrap();
+#[allow(
+    clippy::result_large_err,
+    reason = "Tungstenite fixes the upgrade callback error type"
+)]
+async fn secure_control_connects_without_a_preinstalled_crypto_provider() {
+    const ORIGIN_ENV: &str = "NEMO_RELAY_TEST_FRESH_WSS_ORIGIN";
+    if let Ok(origin) = std::env::var(ORIGIN_ENV) {
+        assert!(rustls::crypto::CryptoProvider::get_default().is_none());
         for role in [ComponentRole::Mcp, ComponentRole::Worker] {
-            let before = requests.load(Ordering::SeqCst);
-            let result =
-                begin_handshake(&client, &origin, role, &identity, "default-port-test", None).await;
-            assert!(matches!(
-                result,
-                Err(CliError::Upstream(_) | CliError::Launch(_))
-            ));
-            assert_eq!(requests.load(Ordering::SeqCst), before + 1);
+            Client::default().connect(&origin, role).await.unwrap();
         }
+        return;
     }
-    server.abort();
-}
 
-#[tokio::test]
-async fn rejects_an_oversized_control_response_without_collecting_it() {
-    let second_polled = Arc::new(AtomicBool::new(false));
-    let endpoint_flag = Arc::clone(&second_polled);
-    let chunks = futures_util::stream::iter([
-        Ok::<_, Infallible>(Bytes::from(vec![b'a'; MAX_CONTROL_RESPONSE_BYTES + 1])),
-        Ok(Bytes::from_static(b"b")),
-    ])
-    .inspect(move |item| {
-        if item.as_ref().is_ok_and(|bytes| bytes.as_ref() == b"b") {
-            endpoint_flag.store(true, Ordering::Release);
+    let certificate = rcgen::generate_simple_self_signed(vec!["127.0.0.1".into()]).unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let certificate_path = temp.path().join("daemon.pem");
+    std::fs::write(&certificate_path, certificate.cert.pem()).unwrap();
+    let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_no_client_auth()
+    .with_single_cert(
+        vec![certificate.cert.der().clone()],
+        rustls::pki_types::PrivateKeyDer::Pkcs8(certificate.key_pair.serialize_der().into()),
+    )
+    .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("https://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+        for path in [MCP_SOCKET_PATH, WORKER_SOCKET_PATH] {
+            let (stream, _) = listener.accept().await.unwrap();
+            let stream = acceptor.accept(stream).await.unwrap();
+            tokio_tungstenite::accept_hdr_async(
+                stream,
+                |request: &tokio_tungstenite::tungstenite::handshake::server::Request, response| {
+                    assert_eq!(request.uri().path(), path);
+                    Ok(response)
+                },
+            )
+            .await
+            .unwrap();
         }
     });
-    let result = read_bounded_control_chunks(chunks, 0, |never| match never {}).await;
-
-    let error = result.expect_err("oversized response must be rejected");
-    assert!(
-        error
-            .error
-            .to_string()
-            .contains("daemon control response exceeded 262144 bytes")
-    );
-    assert!(!second_polled.load(Ordering::Acquire));
-}
-
-#[derive(Default)]
-struct RetryState {
-    json_bodies: Mutex<Vec<Bytes>>,
-    empty_bodies: Mutex<Vec<Bytes>>,
-}
-
-#[tokio::test]
-async fn idempotent_json_retry_reuses_the_exact_encoded_request() {
-    async fn endpoint(State(state): State<Arc<RetryState>>, body: Bytes) -> Response {
-        let attempt = {
-            let mut bodies = state.json_bodies.lock().expect("json bodies");
-            bodies.push(body);
-            bodies.len()
-        };
-        if attempt == 1 {
-            return StatusCode::SERVICE_UNAVAILABLE.into_response();
-        }
-        Json(json!({"accepted": true})).into_response()
-    }
-
-    let state = Arc::new(RetryState::default());
-    let origin = spawn(
-        Router::new()
-            .route("/control", post(endpoint))
-            .with_state(Arc::clone(&state)),
-    )
-    .await;
-    let result: Value = post_json_idempotent(
-        &control_client().expect("client"),
-        &format!("{origin}/control"),
-        &json!({"sequence": 7, "request_id": "same"}),
-        None,
-        fast_retry_policy(),
+    // Isolate the process-wide provider from other tests and trust only this fixture's CA.
+    let output = tokio::time::timeout(
+        Duration::from_secs(20),
+        tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "daemon::common::socket::tests::secure_control_connects_without_a_preinstalled_crypto_provider",
+                "--nocapture",
+            ])
+            .env(ORIGIN_ENV, origin)
+            .env("SSL_CERT_FILE", certificate_path)
+            .env("SSL_CERT_DIR", temp.path())
+            .kill_on_drop(true)
+            .output(),
     )
     .await
-    .expect("transient response should be retried");
-
-    assert_eq!(result, json!({"accepted": true}));
-    let bodies = state.json_bodies.lock().expect("json bodies");
-    assert_eq!(bodies.len(), 2);
-    assert_eq!(bodies[0], bodies[1]);
-}
-
-#[tokio::test]
-async fn idempotent_empty_retry_reuses_the_exact_encoded_request() {
-    async fn endpoint(State(state): State<Arc<RetryState>>, body: Bytes) -> StatusCode {
-        let attempt = {
-            let mut bodies = state.empty_bodies.lock().expect("empty bodies");
-            bodies.push(body);
-            bodies.len()
-        };
-        if attempt == 1 {
-            StatusCode::BAD_GATEWAY
-        } else {
-            StatusCode::NO_CONTENT
-        }
-    }
-
-    let state = Arc::new(RetryState::default());
-    let origin = spawn(
-        Router::new()
-            .route("/control", post(endpoint))
-            .with_state(Arc::clone(&state)),
-    )
-    .await;
-    post_empty_idempotent(
-        &control_client().expect("client"),
-        &format!("{origin}/control"),
-        &json!({"sequence": 8, "request_id": "same"}),
-        fast_retry_policy(),
-    )
-    .await
-    .expect("transient response should be retried");
-
-    let bodies = state.empty_bodies.lock().expect("empty bodies");
-    assert_eq!(bodies.len(), 2);
-    assert_eq!(bodies[0], bodies[1]);
-}
-
-#[tokio::test]
-async fn control_response_failures_preserve_auth_status_and_json_context() {
-    async fn invalid_json() -> Response {
-        (StatusCode::OK, "not-json").into_response()
-    }
-    async fn unauthorized() -> Response {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"error": {"message": "bad session"}})),
-        )
-            .into_response()
-    }
-    async fn bad_request() -> Response {
-        (StatusCode::BAD_REQUEST, "opaque rejection").into_response()
-    }
-    async fn declared_oversized() -> Response {
-        Response::new(Body::from(vec![b'x'; MAX_CONTROL_RESPONSE_BYTES + 1]))
-    }
-    let origin = spawn(
-        Router::new()
-            .route("/invalid-json", post(invalid_json))
-            .route("/unauthorized", post(unauthorized))
-            .route("/bad-request", post(bad_request))
-            .route("/oversized", post(declared_oversized)),
-    )
-    .await;
-    let client = control_client().unwrap();
-
-    let invalid: Result<Value, _> =
-        post_json(&client, &format!("{origin}/invalid-json"), &json!({}), None).await;
+    .expect("fresh WSS client timed out")
+    .unwrap();
     assert!(
-        invalid
-            .unwrap_err()
-            .to_string()
-            .contains("invalid daemon control response")
+        output.status.success(),
+        "fresh WSS client failed: {}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
-
-    let unauthorized: Result<Value, _> =
-        post_json(&client, &format!("{origin}/unauthorized"), &json!({}), None).await;
-    assert!(
-        matches!(unauthorized, Err(CliError::Unauthorized(message)) if message == "bad session")
-    );
-
-    let bad_request: Result<Value, _> =
-        post_json(&client, &format!("{origin}/bad-request"), &json!({}), None).await;
-    assert!(bad_request.unwrap_err().to_string().contains("HTTP 400"));
-
-    let oversized: Result<Value, _> =
-        post_json(&client, &format!("{origin}/oversized"), &json!({}), None).await;
-    assert!(
-        oversized
-            .unwrap_err()
-            .to_string()
-            .contains("exceeded 262144 bytes")
-    );
-
-    let unauthorized = post_empty_idempotent(
-        &client,
-        &format!("{origin}/unauthorized"),
-        &json!({}),
-        fast_retry_policy(),
-    )
-    .await;
-    assert!(matches!(unauthorized, Err(CliError::Unauthorized(_))));
+    tokio::time::timeout(Duration::from_secs(2), server)
+        .await
+        .expect("both control roles must complete their WSS upgrade")
+        .unwrap();
 }
 
 #[tokio::test(start_paused = true)]
-async fn bounded_control_retry_stops_on_permanent_error_and_total_deadline() {
-    let permanent: Result<(), _> = retry_control(fast_retry_policy(), || async {
-        Err(ControlAttemptError::permanent(CliError::Config(
-            "permanent".into(),
-        )))
+async fn reconnect_attempts_are_bounded_by_one_monotonic_grace_window() {
+    let started = tokio::time::Instant::now();
+    let attempts = std::sync::atomic::AtomicUsize::new(0);
+    let result: Result<(), CliError> = retry(|| {
+        attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        async { Err(failure("unavailable")) }
     })
     .await;
-    assert!(matches!(permanent, Err(CliError::Config(message)) if message == "permanent"));
-
-    let timed_out: Result<(), _> = retry_control(
-        ControlRetryPolicy::new(
-            Duration::from_millis(5),
-            Duration::from_millis(10),
-            Duration::ZERO,
-        ),
-        std::future::pending,
-    )
-    .await;
-    assert!(
-        timed_out
-            .unwrap_err()
-            .to_string()
-            .contains("attempt timed out")
-    );
-    assert!(is_transient_status(StatusCode::TOO_EARLY));
-    assert!(!is_transient_status(StatusCode::BAD_REQUEST));
+    assert!(result.is_err());
+    assert_eq!(started.elapsed(), GRACE);
+    assert!((5..25).contains(&attempts.load(std::sync::atomic::Ordering::Relaxed)));
 }
 
 #[tokio::test(start_paused = true)]
-async fn retry_control_honors_retry_after_and_caps_exponential_backoff() {
+async fn a_hung_reconnect_attempt_does_not_extend_grace() {
     let started = tokio::time::Instant::now();
-    let mut attempts = 0;
-    let value = retry_control(
-        ControlRetryPolicy::new(
-            Duration::from_secs(1),
-            Duration::from_secs(10),
-            Duration::from_millis(10),
-        ),
-        || {
-            attempts += 1;
-            async move {
-                if attempts == 1 {
-                    Err(
-                        ControlAttemptError::transient(CliError::Launch("retry".into()))
-                            .with_retry_after(Some(Duration::from_secs(2))),
-                    )
-                } else {
-                    Ok(attempts)
-                }
-            }
-        },
-    )
-    .await
-    .expect("retry succeeds");
-    assert_eq!(value, 2);
-    assert_eq!(
-        tokio::time::Instant::now() - started,
-        Duration::from_secs(2)
-    );
-
-    assert_eq!(retry_backoff(Duration::ZERO, 10), Duration::ZERO);
-    for attempt in 0..10 {
-        let delay = retry_backoff(Duration::from_secs(1), attempt);
-        assert!(delay >= Duration::from_millis(875));
-        assert!(delay < Duration::from_millis(5_625));
-    }
+    let result: Result<(), CliError> = retry(std::future::pending).await;
+    assert!(result.is_err());
+    assert_eq!(started.elapsed(), GRACE);
 }
 
 #[tokio::test]
-async fn a_daemon_role_cannot_initiate_a_client_handshake() {
-    let identity = MachineIdentity::generate().unwrap().identity;
-    let result = begin_handshake(
-        &control_client().unwrap(),
-        "http://127.0.0.1:1",
-        ComponentRole::Daemon,
-        &identity,
-        "daemon-client",
-        None,
-    )
+async fn remote_cleartext_is_rejected_before_connecting() {
+    for origin in ["http://192.0.2.1:80", "http://daemon.example:80"] {
+        let error = Client::default()
+            .connect(origin, ComponentRole::Mcp)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, CliError::Config(ref message) if message == "non-loopback daemon addresses must use https")
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn delayed_recovery_uses_only_the_remaining_grace() {
+    let deadline = tokio::time::Instant::now() + GRACE;
+    tokio::time::advance(Duration::from_secs(12)).await;
+    let started = tokio::time::Instant::now();
+    let result: Result<(), CliError> = retry_until(deadline, std::future::pending).await;
+    assert!(result.is_err());
+    assert_eq!(started.elapsed(), Duration::from_secs(18));
+    let result: Result<(), CliError> = retry_until(deadline, || async {
+        panic!("expired recovery must not start an attempt")
+    })
     .await;
-    let error = match result {
-        Ok(_) => panic!("daemon role must be rejected before network I/O"),
-        Err(error) => error,
-    };
-    assert!(matches!(
-        error,
-        CliError::Config(message) if message == "a daemon cannot initiate a daemon client handshake"
-    ));
+    assert!(result.is_err());
 }
 
-fn fast_retry_policy() -> ControlRetryPolicy {
-    ControlRetryPolicy::new(
-        Duration::from_secs(1),
-        Duration::from_secs(2),
-        Duration::ZERO,
-    )
-}
-
-async fn spawn(router: Router) -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let address = listener.local_addr().expect("local address");
-    tokio::spawn(async move {
-        axum::serve(listener, router).await.expect("serve");
+#[tokio::test]
+async fn queued_disconnect_keeps_its_original_recovery_deadline() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+        socket.send(Message::Close(None)).await.unwrap();
     });
-    format!("http://{address}")
+    let client = Client::default();
+    client.connect(&origin, ComponentRole::Mcp).await.unwrap();
+    server.await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if client.0.lock().await.as_ref().unwrap().task.is_finished() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let deadline = client.recovery_deadline().await;
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(12)).await;
+    assert!(client.next().await.is_err());
+    assert_eq!(client.recovery_deadline().await, deadline);
+}
+
+async fn connected_control_pair() -> (
+    Client,
+    tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let client = Client::default();
+    let (connected, socket) = tokio::join!(client.connect(&origin, ComponentRole::Mcp), async {
+        let (stream, _) = listener.accept().await.unwrap();
+        tokio_tungstenite::accept_async(stream).await.unwrap()
+    });
+    connected.unwrap();
+    (client, socket)
+}
+
+async fn receive_control_request(
+    socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+) -> Request {
+    let message = socket.next().await.unwrap().unwrap();
+    serde_json::from_str(message.to_text().unwrap()).unwrap()
+}
+
+async fn send_control_event(
+    socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+    event: Event,
+) {
+    socket
+        .send(Message::Text(serde_json::to_string(&event).unwrap().into()))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn idle_event_receiver_does_not_block_concurrent_requests_or_reorder_replies() {
+    let (client, mut socket) = connected_control_pair().await;
+    let mut next = std::pin::pin!(client.next());
+    assert!(futures_util::poll!(&mut next).is_pending());
+    let first = client.request::<String>(Command::Acknowledge {
+        request_id: "first".into(),
+    });
+    let second = client.request::<String>(Command::Acknowledge {
+        request_id: "second".into(),
+    });
+    let server = async {
+        let first = receive_control_request(&mut socket).await;
+        let second = receive_control_request(&mut socket).await;
+        send_control_event(
+            &mut socket,
+            Event::Directive {
+                request_id: "directive".into(),
+                directive: BrokerDirective::UsePassThrough,
+            },
+        )
+        .await;
+        // Reply in the reverse order and interleave an event with those replies.
+        for request in [second, first] {
+            let Command::Acknowledge { request_id: label } = request.command else {
+                panic!("expected acknowledgment");
+            };
+            send_control_event(
+                &mut socket,
+                Event::Reply {
+                    request_id: request.request_id,
+                    status: 200,
+                    payload: Value::String(label),
+                },
+            )
+            .await;
+        }
+    };
+    let (first, second, event, ()) = tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::join!(first, second, next, server)
+    })
+    .await
+    .expect("idle event reception must not block command dispatch");
+    assert_eq!(first.unwrap(), "first");
+    assert_eq!(second.unwrap(), "second");
+    assert!(
+        matches!(event.unwrap(), Event::Directive { request_id, .. } if request_id == "directive")
+    );
+}
+
+#[tokio::test]
+async fn idle_event_receiver_does_not_delay_request_timeout_or_consume_late_replies() {
+    let (client, mut socket) = connected_control_pair().await;
+    let mut next = std::pin::pin!(client.next());
+    assert!(futures_util::poll!(&mut next).is_pending());
+    let mut request = std::pin::pin!(client.acknowledge("unanswered".into()));
+    assert!(futures_util::poll!(&mut request).is_pending());
+    let expired = receive_control_request(&mut socket).await;
+    tokio::time::pause();
+    tokio::time::advance(ATTEMPT_TIMEOUT).await;
+    let error = request.await.unwrap_err();
+    assert!(matches!(error, CliError::Launch(message) if message == "control operation timed out"));
+    assert!(futures_util::poll!(&mut next).is_pending());
+    tokio::time::resume();
+    let server = async {
+        let current = receive_control_request(&mut socket).await;
+        for (request_id, payload) in [
+            (expired.request_id, Value::String("late".into())),
+            (current.request_id, Value::Null),
+        ] {
+            send_control_event(
+                &mut socket,
+                Event::Reply {
+                    request_id,
+                    status: 200,
+                    payload,
+                },
+            )
+            .await;
+        }
+    };
+    let (result, ()) = tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::join!(client.acknowledge("current".into()), server)
+    })
+    .await
+    .unwrap();
+    result.unwrap();
+    assert!(futures_util::poll!(&mut next).is_pending());
+}
+
+#[tokio::test]
+async fn replacement_releases_old_waiters_without_consuming_new_connection_events() {
+    let (client, mut socket) = connected_control_pair().await;
+    let mut next = std::pin::pin!(client.next());
+    assert!(futures_util::poll!(&mut next).is_pending());
+    let mut request = std::pin::pin!(client.acknowledge("old".into()));
+    assert!(futures_util::poll!(&mut request).is_pending());
+    receive_control_request(&mut socket).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let server = async {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+        send_control_event(
+            &mut socket,
+            Event::Directive {
+                request_id: "replacement".into(),
+                directive: BrokerDirective::UsePassThrough,
+            },
+        )
+        .await;
+        socket
+    };
+    let (connected, _replacement_socket) = tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::join!(client.connect(&origin, ComponentRole::Mcp), server)
+    })
+    .await
+    .expect("replacement must not wait for the old event receiver");
+    connected.unwrap();
+    let (old_request, old_event) = tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::join!(request, next)
+    })
+    .await
+    .unwrap();
+    assert!(old_request.is_err());
+    assert!(old_event.is_err());
+    let event = tokio::time::timeout(Duration::from_secs(2), client.next())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(event, Event::Directive { request_id, .. } if request_id == "replacement"));
+}
+
+#[tokio::test]
+async fn pending_events_are_available_before_the_registration_reply_is_observed() {
+    let (client, mut socket) = connected_control_pair().await;
+    let server = async {
+        let request = receive_control_request(&mut socket).await;
+        send_control_event(
+            &mut socket,
+            Event::Directive {
+                request_id: "pending".into(),
+                directive: BrokerDirective::UsePassThrough,
+            },
+        )
+        .await;
+        send_control_event(
+            &mut socket,
+            Event::Reply {
+                request_id: request.request_id,
+                status: 200,
+                payload: Value::Null,
+            },
+        )
+        .await;
+    };
+    let (result, ()) = tokio::join!(client.acknowledge("registration".into()), server);
+    result.unwrap();
+    assert!(
+        matches!(client.pending_event().await, Some(Event::Directive { request_id, .. }) if request_id == "pending")
+    );
+    assert!(client.pending_event().await.is_none());
+}
+
+#[tokio::test]
+async fn cancelled_requests_do_not_exhaust_reply_capacity() {
+    let (client, mut socket) = connected_control_pair().await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        for _ in 0..=QUEUE_CAPACITY {
+            let mut request = std::pin::pin!(client.acknowledge("cancelled".into()));
+            assert!(futures_util::poll!(&mut request).is_pending());
+            receive_control_request(&mut socket).await;
+            // Drop the caller without a response; the next request must reclaim its slot.
+        }
+        let server = async {
+            let request = receive_control_request(&mut socket).await;
+            send_control_event(
+                &mut socket,
+                Event::Reply {
+                    request_id: request.request_id,
+                    status: 200,
+                    payload: Value::Null,
+                },
+            )
+            .await;
+        };
+        let (result, ()) = tokio::join!(client.acknowledge("active".into()), server);
+        result.unwrap();
+    })
+    .await
+    .expect("cancelled requests must not fill the pending reply map");
+}
+
+#[tokio::test]
+async fn event_overflow_closes_the_connection_and_fails_pending_requests() {
+    let (client, mut socket) = connected_control_pair().await;
+    let mut request = std::pin::pin!(client.acknowledge("unanswered".into()));
+    assert!(futures_util::poll!(&mut request).is_pending());
+    receive_control_request(&mut socket).await;
+    for _ in 0..=QUEUE_CAPACITY {
+        send_control_event(
+            &mut socket,
+            Event::Directive {
+                request_id: "overflow".into(),
+                directive: BrokerDirective::UsePassThrough,
+            },
+        )
+        .await;
+    }
+    let error = tokio::time::timeout(Duration::from_secs(2), request)
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert!(matches!(error, CliError::Launch(message) if message == "control connection lost"));
+    for _ in 0..QUEUE_CAPACITY {
+        assert!(client.pending_event().await.is_some());
+    }
+    assert!(client.pending_event().await.is_none());
+    assert!(client.next().await.is_err());
+}
+
+#[tokio::test]
+async fn outstanding_reply_limit_disconnects_and_releases_every_waiter() {
+    let (client, mut socket) = connected_control_pair().await;
+    let mut requests = Vec::new();
+    for _ in 0..QUEUE_CAPACITY {
+        let mut request = Box::pin(client.acknowledge("unanswered".into()));
+        assert!(futures_util::poll!(&mut request).is_pending());
+        receive_control_request(&mut socket).await;
+        requests.push(request);
+    }
+    let error = tokio::time::timeout(
+        Duration::from_secs(2),
+        client.acknowledge("overflow".into()),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert!(matches!(error, CliError::Launch(message) if message == "control connection lost"));
+    for request in requests {
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), request)
+                .await
+                .unwrap()
+                .is_err()
+        );
+    }
+    assert!(client.next().await.is_err());
 }

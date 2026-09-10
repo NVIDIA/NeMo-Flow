@@ -687,7 +687,7 @@ fn daemon_router_with_ready_worker(
                 fingerprint,
                 token_digest: credential.digest(),
                 session_id: mcp_session,
-                lease_expires_at_unix_ms: now_unix_ms().saturating_add(MCP_LEASE_MS),
+                lease_expires_at_unix_ms: u64::MAX,
             },
             launch,
         )
@@ -717,6 +717,7 @@ fn daemon_router_with_ready_worker(
     )
     .expect("active generation state");
     let state = Arc::new(DaemonState {
+        sockets: socket::Hub::default(),
         registry,
         identity,
         descriptor: crate::daemon::common::control::descriptor(ComponentRole::Daemon),
@@ -728,7 +729,6 @@ fn daemon_router_with_ready_worker(
         challenges: Mutex::new(HashMap::new()),
         activations: Mutex::new(HashMap::new()),
         mcp_sessions: Mutex::new(HashMap::new()),
-        mcp_heartbeat_serialization: Mutex::new(()),
         worker_sessions: Mutex::new(HashMap::new()),
         pending_directives: Mutex::new(HashMap::new()),
         active_worker_generations,
@@ -755,7 +755,7 @@ fn daemon_router_with_pass_through(
                 fingerprint,
                 token_digest: credential.digest(),
                 session_id: McpSessionId::new("test-pass-through-mcp").expect("MCP session ID"),
-                lease_expires_at_unix_ms: now_unix_ms().saturating_add(MCP_LEASE_MS),
+                lease_expires_at_unix_ms: u64::MAX,
             },
             WorkerLaunch {
                 activation_id: "unused-pass-through-activation".into(),
@@ -790,6 +790,7 @@ fn daemon_router_with_pass_through(
     )
     .expect("active generation state");
     let state = Arc::new(DaemonState {
+        sockets: socket::Hub::default(),
         registry,
         identity,
         descriptor: crate::daemon::common::control::descriptor(ComponentRole::Daemon),
@@ -801,7 +802,6 @@ fn daemon_router_with_pass_through(
         challenges: Mutex::new(HashMap::new()),
         activations: Mutex::new(HashMap::new()),
         mcp_sessions: Mutex::new(HashMap::new()),
-        mcp_heartbeat_serialization: Mutex::new(()),
         worker_sessions: Mutex::new(HashMap::new()),
         pending_directives: Mutex::new(HashMap::new()),
         active_worker_generations,
@@ -834,7 +834,7 @@ fn daemon_router_with_two_ready_workers(
                     token_digest: credential.digest(),
                     session_id: McpSessionId::new(format!("test-mcp-session-{index}"))
                         .expect("MCP session ID"),
-                    lease_expires_at_unix_ms: now_unix_ms().saturating_add(MCP_LEASE_MS),
+                    lease_expires_at_unix_ms: u64::MAX,
                 },
                 WorkerLaunch {
                     activation_id: activation_id.clone(),
@@ -874,6 +874,7 @@ fn daemon_router_with_two_ready_workers(
     )
     .expect("active generation state");
     let state = Arc::new(DaemonState {
+        sockets: socket::Hub::default(),
         registry,
         identity,
         descriptor: crate::daemon::common::control::descriptor(ComponentRole::Daemon),
@@ -885,7 +886,6 @@ fn daemon_router_with_two_ready_workers(
         challenges: Mutex::new(HashMap::new()),
         activations: Mutex::new(HashMap::new()),
         mcp_sessions: Mutex::new(HashMap::new()),
-        mcp_heartbeat_serialization: Mutex::new(()),
         worker_sessions: Mutex::new(HashMap::new()),
         pending_directives: Mutex::new(HashMap::new()),
         active_worker_generations,
@@ -1888,7 +1888,6 @@ struct LifecycleDaemonHarness {
     mcp_session_id: String,
     mcp_secret: SensitiveString,
     worker_id: String,
-    worker_control_secret: SensitiveString,
     generation_id: String,
     target: Arc<WorkerTarget>,
     _generation_state: tempfile::TempDir,
@@ -1912,7 +1911,7 @@ fn lifecycle_daemon_router(
                 fingerprint,
                 token_digest: credential.digest(),
                 session_id: McpSessionId::new(mcp_session_id.clone()).expect("MCP session ID"),
-                lease_expires_at_unix_ms: now_unix_ms().saturating_add(MCP_LEASE_MS),
+                lease_expires_at_unix_ms: u64::MAX,
             },
             WorkerLaunch {
                 activation_id: activation_id.into(),
@@ -1963,6 +1962,7 @@ fn lifecycle_daemon_router(
     let worker_control_secret =
         SensitiveString::new("unused-test-control-token").expect("worker control token");
     let state = Arc::new(DaemonState {
+        sockets: socket::Hub::default(),
         registry,
         identity: daemon_identity,
         descriptor: crate::daemon::common::control::descriptor(ComponentRole::Daemon),
@@ -1980,10 +1980,9 @@ fn lifecycle_daemon_router(
                 token_digest: credential.digest(),
                 secret: mcp_secret.clone(),
                 secret_digest: TokenDigest::from_token(mcp_secret.expose().as_bytes()),
-                lease_expires_at_unix_ms: now_unix_ms().saturating_add(MCP_LEASE_MS),
+                lease_expires_at_unix_ms: u64::MAX,
                 last_sequence: 0,
                 last_request_id: String::new(),
-                last_heartbeat: None,
                 worker_network: WorkerNetworkHint {
                     advertised_host: Ipv4Addr::LOCALHOST.to_string(),
                     port: None,
@@ -1991,7 +1990,6 @@ fn lifecycle_daemon_router(
                 released: false,
             },
         )])),
-        mcp_heartbeat_serialization: Mutex::new(()),
         worker_sessions: Mutex::new(HashMap::from([(
             worker_id.clone(),
             WorkerControlSession {
@@ -2001,8 +1999,7 @@ fn lifecycle_daemon_router(
                 secret_digest: TokenDigest::from_token(worker_control_secret.expose().as_bytes()),
                 last_sequence: 0,
                 last_request_id: String::new(),
-                next_daemon_sequence: 0,
-                lease_expires_at_unix_ms: now_unix_ms().saturating_add(WORKER_LEASE_MS),
+                lease_expires_at_unix_ms: u64::MAX,
                 pending_target: Arc::clone(&target),
                 publication: WorkerPublication::Activation {
                     activation_id: activation_id.into(),
@@ -2023,7 +2020,6 @@ fn lifecycle_daemon_router(
             mcp_session_id,
             mcp_secret,
             worker_id,
-            worker_control_secret,
             generation_id,
             target,
             _generation_state: generation_state,
@@ -2124,13 +2120,20 @@ async fn broker_release_enters_draining_while_admitted_stream_finishes() {
         EmptyPayload::default(),
     )
     .expect("MCP release request");
-    let request = Request::post(format!("http://{daemon_address}{MCP_RELEASE_PATH}"))
-        .header(CONTENT_TYPE, "application/json")
-        .body(box_body(Full::new(Bytes::from(
-            serde_json::to_vec(&release).expect("serialize MCP release"),
-        ))))
-        .expect("MCP release HTTP request");
-    let release_response = client.request(request).await.expect("MCP release response");
+    let release_response = release_mcp(State(harness.state.clone()), Json(release)).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while harness
+            .state
+            .active_worker_generations
+            .matches(harness.fingerprint, &harness.generation_id)
+            .expect("generation state")
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("worker generation revoked before drain");
+    worker_handle.begin_drain(now_unix_ms() + DRAIN_LIFETIME_MS);
     assert_eq!(release_response.status(), StatusCode::NO_CONTENT);
     release_response
         .into_body()
@@ -2185,7 +2188,7 @@ async fn broker_release_enters_draining_while_admitted_stream_finishes() {
 }
 
 #[tokio::test]
-async fn broker_worker_heartbeat_expiry_rejects_new_work_but_preserves_admitted_stream() {
+async fn broker_worker_disconnect_expiry_rejects_new_work_but_preserves_admitted_stream() {
     let (provider_address, release_second, _observed, provider_task) =
         spawn_causal_provider(TestProtocol::Http1).await;
     let (worker_router, worker_handle) =
@@ -2195,32 +2198,6 @@ async fn broker_worker_heartbeat_expiry_rejects_new_work_but_preserves_admitted_
     let (daemon_router, harness) = lifecycle_daemon_router(&token, worker_address);
     let (daemon_address, daemon_task) = spawn_router(TestProtocol::Http1, daemon_router).await;
     let client = client_for(TestProtocol::Http1);
-
-    let heartbeat = SessionRequest::new(
-        harness.worker_id.clone(),
-        harness.worker_control_secret.clone(),
-        1,
-        WorkerHeartbeatPayload {
-            worker_id: harness.worker_id.clone(),
-        },
-    )
-    .expect("worker heartbeat request");
-    let request = Request::post(format!("http://{daemon_address}{WORKER_HEARTBEAT_PATH}"))
-        .header(CONTENT_TYPE, "application/json")
-        .body(box_body(Full::new(Bytes::from(
-            serde_json::to_vec(&heartbeat).expect("serialize worker heartbeat"),
-        ))))
-        .expect("worker heartbeat HTTP request");
-    let heartbeat_response = client
-        .request(request)
-        .await
-        .expect("worker heartbeat response");
-    assert_eq!(heartbeat_response.status(), StatusCode::NO_CONTENT);
-    heartbeat_response
-        .into_body()
-        .collect()
-        .await
-        .expect("worker heartbeat body");
 
     let response = client
         .request(provider_request(
@@ -2236,11 +2213,7 @@ async fn broker_worker_heartbeat_expiry_rejects_new_work_but_preserves_admitted_
     assert_eq!(harness.target.in_flight(), 1);
     assert_eq!(worker_handle.in_flight(), 1);
 
-    lock(&harness.state.worker_sessions)
-        .get_mut(&harness.worker_id)
-        .expect("live worker control session")
-        .lease_expires_at_unix_ms = now_unix_ms().saturating_sub(1);
-    spawn_maintenance(Arc::clone(&harness.state));
+    socket::test_expire_worker(harness.state.clone(), harness.worker_id.clone()).await;
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             let worker_expired =

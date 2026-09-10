@@ -17,6 +17,8 @@ Keep `scripts/` focused on helpers that are still script-native:
 - `test-install.sh`: Run live GitHub release and local interface checks for the curl-based CLI installer
 - `test-install.ps1`: Run live GitHub release and local interface checks for the PowerShell CLI installer
 - `test-install-mocks.sh`: Run installer scenarios that require simulated platforms or failures
+- `test-uninstall.sh`: Run local interface and filesystem checks for the curl-based CLI uninstaller
+- `test-uninstall.ps1`: Run local interface and filesystem checks for the PowerShell CLI uninstaller
 
 ## Opt-In Coding-Agent E2E Tests
 

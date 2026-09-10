@@ -1434,6 +1434,57 @@ async fn normalized_llm_paths_use_configured_anthropic_codec_without_a_system_me
 }
 
 #[tokio::test]
+async fn normalized_anthropic_overlapping_paths_redact_multiple_text_blocks() {
+    let backend = crate::builtin::CompiledBuiltinBackend::new(
+        BuiltinBackendConfig {
+            action: "redact".to_string(),
+            detector: Some("email".to_string()),
+            target_path_globs: vec![
+                "/messages/*/content".to_string(),
+                "/messages/*/content/*/text".to_string(),
+            ],
+            ..BuiltinBackendConfig::default()
+        },
+        None,
+    )
+    .unwrap();
+    let sanitize_request = crate::builtin::llm_sanitize_request_callback(backend);
+
+    let sanitized = sanitize_request(
+        LlmRequest {
+            headers: serde_json::Map::new(),
+            content: json!({
+                "model": "claude-opus-5",
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "first@example.com"},
+                        {"type": "text", "text": "second@example.com"}
+                    ]
+                }],
+                "stream": true
+            }),
+        },
+        LlmSanitizeRequestContext::for_request_codec(Some(Arc::new(
+            crate::codec::anthropic::AnthropicMessagesCodec,
+        ))),
+    )
+    .await
+    .expect("the sanitizer callback must succeed")
+    .expect("overlapping normalized paths must retain the request payload");
+
+    assert_eq!(
+        sanitized.content["messages"][0]["content"][0]["text"],
+        json!("[REDACTED]")
+    );
+    assert_eq!(
+        sanitized.content["messages"][0]["content"][1]["text"],
+        json!("[REDACTED]")
+    );
+    assert_eq!(sanitized.content["stream"], json!(true));
+}
+
+#[tokio::test]
 async fn trajectory_preset_redacts_known_marks_and_nested_scope_content() {
     let callback = crate::builtin::event_sanitize_callback(trajectory_backend(None, "preserve"));
     let chunk = Event::Mark(MarkEvent::new(

@@ -33,9 +33,9 @@ flowchart TD
     P["Model provider"]
     H -. "launch and MCP stdio" .-> M
     H -. "launch with hook payload" .-> F
-    M <-->|"registration and lease renewal"| D
+    M <-->|"WebSocket lifecycle and control"| D
     M -. "launch with protected grant" .-> W
-    W -->|"registration and heartbeat"| D
+    W <-->|"WebSocket lifecycle and control"| D
     H -->|"model requests"| D
     F -->|"hook requests"| D
     D -->|"authenticated requests"| W
@@ -51,6 +51,10 @@ return along the request path. Model streams travel back through the worker and
 daemon to the harness. Hook responses return through the hook forwarder.
 The harness and hook forwarder do not contact a worker directly.
 
+MCP and worker processes each open a persistent WebSocket control session to the
+daemon. The daemon pushes route decisions and drain commands on those sessions.
+Model and hook traffic use separate HTTP connections.
+
 ## Local Deployment
 
 <div role="region" aria-label="Local deployment diagram" tabIndex={0} style={{ overflowX: "auto" }}>
@@ -65,9 +69,9 @@ flowchart TD
         W["Per-user worker<br/>127.0.0.1:auto port"]
         H -->|"HTTP requests"| D
         H -. "launch" .-> M
-        M -->|"HTTP control"| D
+        M <-->|"WebSocket control"| D
         M -. "launch" .-> W
-        W -->|"HTTP control"| D
+        W <-->|"WebSocket control"| D
         D -->|"HTTP requests"| W
     end
     W -->|"HTTPS"| P["Model provider"]
@@ -101,12 +105,13 @@ sequenceDiagram
         D-->>M: LaunchWorker and one-time grant
         M->>W: Launch with grant through protected stdin
         W->>D: Prove identity and grant, register endpoint
-        D->>W: Verify readiness
-        W-->>D: Ready
+        W->>D: Ready over control socket
+        D->>W: Probe HTTP readiness endpoint
+        W-->>D: Readiness confirmed
         D-->>M: Route ready
     else Another MCP is starting or draining a worker
         D-->>M: WaitForWorker
-        M->>D: Wait and follow broker decisions
+        D-->>M: Push next broker decision
     else Worker is already ready
         D-->>M: ReuseWorker
     else Pass-through route
@@ -115,7 +120,7 @@ sequenceDiagram
     H->>M: MCP initialize
     M-->>H: MCP initialized after route is ready
     H->>D: Model or hook request with route credential
-    Note over M,D: MCP lease stays open for the session
+    Note over M,D: MCP control socket stays open for the session
 ```
 
 </div>
@@ -154,4 +159,4 @@ exit. Accepted requests have up to two minutes to finish. Workers also stop
 accepting new requests if they lose authenticated daemon control.
 
 See [Identity and Lifecycle](/daemon/reference#understand-broker-identity-and-lifecycle)
-for heartbeat timing, restart recovery, and all broker states.
+for reconnect grace, remote keepalive timing, restart recovery, and all broker states.

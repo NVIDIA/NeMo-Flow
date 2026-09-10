@@ -1117,15 +1117,18 @@ impl Session {
                     owner.subagent_id.as_deref(),
                     owner.status,
                 );
-                let metadata = merge_metadata(
-                    llm_correlation_metadata(
-                        start.metadata,
-                        owner.status,
-                        owner.source.as_deref(),
-                        owner.subagent_id.as_deref(),
-                        owner.hint.as_ref(),
+                let metadata = self.merge_llm_identity_metadata(
+                    merge_metadata(
+                        llm_correlation_metadata(
+                            start.metadata,
+                            owner.status,
+                            owner.source.as_deref(),
+                            owner.subagent_id.as_deref(),
+                            owner.hint.as_ref(),
+                        ),
+                        owner.metadata,
                     ),
-                    owner.metadata,
+                    start.conversation_id.as_deref(),
                 );
                 let handle = llm_call(
                     LlmCallParams::builder()
@@ -1181,15 +1184,18 @@ impl Session {
                     owner.subagent_id.as_deref(),
                     owner.status,
                 );
-                let metadata = merge_metadata(
-                    llm_correlation_metadata(
-                        start.metadata,
-                        owner.status,
-                        owner.source.as_deref(),
-                        owner.subagent_id.as_deref(),
-                        owner.hint.as_ref(),
+                let metadata = self.merge_llm_identity_metadata(
+                    merge_metadata(
+                        llm_correlation_metadata(
+                            start.metadata,
+                            owner.status,
+                            owner.source.as_deref(),
+                            owner.subagent_id.as_deref(),
+                            owner.hint.as_ref(),
+                        ),
+                        owner.metadata,
                     ),
-                    owner.metadata,
+                    start.conversation_id.as_deref(),
                 );
                 let mut request = start.request;
                 enrich_routing_identity_headers(
@@ -1448,6 +1454,28 @@ impl Session {
                 "identity_quality": "native",
             }),
         )
+    }
+
+    // LLM requests do not consistently repeat hook metadata, so replace reserved identity
+    // fields with the resolved session identity on every LLM lifecycle. An explicit provider
+    // conversation id takes precedence; the GenAI projection falls back to the stable session
+    // id when it is absent.
+    fn merge_llm_identity_metadata(
+        &self,
+        mut metadata: Value,
+        conversation_id: Option<&str>,
+    ) -> Value {
+        if let Value::Object(metadata) = &mut metadata {
+            for reserved_key in ["session_id", "agent_kind", "conversation_id"] {
+                metadata.remove(reserved_key);
+            }
+        }
+        let mut identity = Map::from_iter([
+            ("session_id".to_string(), json!(self.session_id)),
+            ("agent_kind".to_string(), json!(self.agent_kind.as_str())),
+        ]);
+        insert_optional(&mut identity, "conversation_id", conversation_id);
+        merge_metadata(metadata, Value::Object(identity))
     }
 
     async fn end_turn(

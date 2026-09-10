@@ -140,7 +140,10 @@ worker with a fabricated activation grant or try to extract its session token.
 
 Close all harnesses for this identity, allow the worker to drain, and confirm its
 listener closes. Open a new harness and confirm a fresh worker becomes ready.
-Repeat after a planned daemon restart and after reconnecting the VPN.
+Repeat after a planned daemon restart and after reconnecting the VPN. A control
+connection has 30 seconds to recover; if that window expires, restore network
+access and start a fresh harness. A successful HTTPS probe alone does not verify
+that the proxy permits the persistent WSS control sessions.
 
 ## Update and Remove the Client
 

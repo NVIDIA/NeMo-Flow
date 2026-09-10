@@ -6,6 +6,7 @@ set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 installer="${repo_root}/install.sh"
+uninstaller="${repo_root}/uninstall.sh"
 test_root=$(mktemp -d)
 original_path=$PATH
 tests_run=0
@@ -121,8 +122,14 @@ EOF
 
     cat >"${mock_commands_dir}/powershell.exe" <<'EOF'
 #!/bin/sh
-[ -n "${NEMO_RELAY_INSTALL_DIR:-}" ] || exit 99
-printf '%s\n' "$NEMO_RELAY_INSTALL_DIR" >>"$MOCK_POWERSHELL_LOG"
+if [ -n "${NEMO_RELAY_INSTALL_DIR:-}" ]; then
+    printf '%s\n' "$NEMO_RELAY_INSTALL_DIR" >>"$MOCK_POWERSHELL_LOG"
+    exit 0
+fi
+case "$*" in
+    *Win32_Process*) printf '%s\n' "${MOCK_WINDOWS_PROCESS_SNAPSHOT:-}" ;;
+    *) exit 99 ;;
+esac
 EOF
 
     chmod +x "${mock_commands_dir}/uname" "${mock_commands_dir}/curl" "${mock_commands_dir}/sha256sum" \
@@ -163,6 +170,15 @@ new_case() {
 
 run_installer() {
     if run_output=$(sh "$installer" "$@" 2>&1); then
+        run_status=0
+    else
+        run_status=$?
+    fi
+    return 0
+}
+
+run_uninstaller() {
+    if run_output=$(sh "$uninstaller" "$@" 2>&1); then
         run_status=0
     else
         run_status=$?
@@ -269,6 +285,21 @@ test_checksum_mismatch_preserves_existing_binary() {
     return 0
 }
 
+test_git_bash_windows_uninstall() {
+    new_case
+    MOCK_UNAME_S=MINGW64_NT-10.0
+    LOCALAPPDATA="${HOME}/AppData/Local"
+    install_dir="${LOCALAPPDATA}/nemo-relay/bin"
+    mkdir -p "$install_dir"
+    : >"${install_dir}/nemo-relay.exe"
+    export MOCK_UNAME_S LOCALAPPDATA
+
+    run_uninstaller
+    assert_success
+    [ ! -e "${install_dir}/nemo-relay.exe" ] || fail "Windows uninstaller did not remove nemo-relay.exe"
+    return 0
+}
+
 test_linux_arm64_mapping
 test_macos_arm64_mapping
 test_git_bash_windows_x86_64_mapping_and_path_update
@@ -277,5 +308,6 @@ test_unsupported_platform
 test_malformed_release_response
 test_missing_checksum_fails_closed
 test_checksum_mismatch_preserves_existing_binary
+test_git_bash_windows_uninstall
 
 printf 'PASS: %s mock-only installer scenarios\n' "$tests_run"

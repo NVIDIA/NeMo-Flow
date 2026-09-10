@@ -256,6 +256,7 @@ impl Registry {
     }
 
     /// Expires dead MCP leases and returns any resulting teardown or ownership actions.
+    #[cfg(test)]
     pub(crate) fn expire_mcp_leases(
         &self,
         now_unix_ms: u64,
@@ -829,6 +830,9 @@ impl RouteEntry {
             | RouteState::Recovering { target: None, .. } => {
                 BrokerDirective::WaitForWorker { retry_after_ms }
             }
+            RouteState::Ready { target } if !target.control_available() => {
+                BrokerDirective::WaitForWorker { retry_after_ms }
+            }
             RouteState::Ready { target } => BrokerDirective::ReuseWorker {
                 endpoint: target.endpoint().to_owned(),
             },
@@ -860,6 +864,9 @@ impl RouteEntry {
             RouteState::Activating { .. }
             | RouteState::Draining { .. }
             | RouteState::Recovering { target: None, .. } => {
+                BrokerDirective::WaitForWorker { retry_after_ms }
+            }
+            RouteState::Ready { target } if !target.control_available() => {
                 BrokerDirective::WaitForWorker { retry_after_ms }
             }
             RouteState::Ready { target } => BrokerDirective::ReuseWorker {
