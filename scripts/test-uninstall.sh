@@ -11,6 +11,7 @@ tests_run=0
 active_session_pid=""
 active_child_pids=""
 
+dry_run_removal_prefix='Would remove NeMo Relay CLI'
 cleanup() {
     if [ -n "$active_session_pid" ]; then
         kill "$active_session_pid" 2>/dev/null || true
@@ -160,7 +161,7 @@ test_custom_installation_dry_run_and_removal() {
     run_command sh "$uninstaller" --install-dir "$install_dir" --dry-run
     assert_success
     [ -e "${install_dir}/nemo-relay" ] || fail 'dry run removed the binary'
-    assert_contains "$run_output" "Would remove NeMo Relay CLI at ${install_dir}/nemo-relay"
+    assert_contains "$run_output" "${dry_run_removal_prefix} at ${install_dir}/nemo-relay"
 
     run_command sh "$uninstaller" --install-dir "$install_dir"
     assert_success
@@ -204,7 +205,7 @@ test_active_relay_process_refuses_removal() {
     run_command sh "$uninstaller" --install-dir "$install_dir" --dry-run
     assert_failure
     assert_contains "$run_output" 'dry run would refuse removal until these processes exit'
-    assert_not_contains "$run_output" 'Would remove NeMo Relay CLI'
+    assert_not_contains "$run_output" "$dry_run_removal_prefix"
     [ -e "$relay_binary" ] || fail 'dry run removed an active binary'
 
     kill "$session_pid" 2>/dev/null || true
@@ -232,7 +233,7 @@ test_managed_daemon_refuses_force() {
             assert_failure
             assert_contains "$run_output" 'active managed daemon deployment'
             assert_contains "$run_output" '--force cannot override'
-            assert_not_contains "$run_output" 'Would remove NeMo Relay CLI'
+            assert_not_contains "$run_output" "$dry_run_removal_prefix"
             [ -e "$relay_binary" ] || fail 'managed binary was removed'
             kill -0 "$active_session_pid" || fail 'managed process was terminated'
         done
@@ -366,7 +367,7 @@ test_active_installation_path_with_spaces() {
         run_command sh "$uninstaller" --install-dir "$install_dir" $option
         assert_failure
         assert_contains "$run_output" 'active managed daemon deployment'
-        assert_not_contains "$run_output" 'Would remove NeMo Relay CLI'
+        assert_not_contains "$run_output" "$dry_run_removal_prefix"
         [ -e "$install_dir/nemo-relay" ] || fail 'active binary was removed'
         kill -0 "$active_session_pid" || fail 'managed process was terminated'
     done
@@ -399,7 +400,7 @@ EOF
                 PS_FAIL_AT="$fail_at" sh "$uninstaller" --install-dir "$install_dir" $option
             assert_failure
             assert_contains "$run_output" 'could not inspect active processes'
-            assert_not_contains "$run_output" 'Would remove NeMo Relay CLI'
+            assert_not_contains "$run_output" "$dry_run_removal_prefix"
             [ -e "$install_dir/nemo-relay" ] || fail 'inspection failure removed binary'
         done
     done
@@ -418,6 +419,7 @@ test_executable_symlink_refuses_active_removal() {
                 ln -s real-relay "$install_dir/intermediate"
                 ln -s intermediate "$install_dir/nemo-relay"
                 ;;
+            *) fail "unknown symlink fixture kind: $link_kind" ;;
         esac
         "$install_dir/nemo-relay" daemon &
         active_session_pid=$!

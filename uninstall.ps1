@@ -53,12 +53,21 @@ function Test-RelayMcpProcess([string]$CommandLine) {
     return $CommandLine -match '(?i)(?:^|\s)mcp(?:\s|$)'
 }
 
+function Get-RelayCimInstance {
+    param([Parameter(ValueFromRemainingArguments = $true)]$Arguments)
+    return Get-CimInstance @Arguments
+}
+
+function Read-UninstallConfirmation([string]$Prompt) {
+    return Read-Host $Prompt
+}
+
 function Get-ActiveRelayShutdownTargets([string]$Destination, [switch]$ManagedOnly) {
     if ($env:OS -ne 'Windows_NT') {
         return @()
     }
     try {
-        $processes = @(Get-CimInstance Win32_Process)
+        $processes = @(Get-RelayCimInstance Win32_Process)
     }
     catch {
         Fail "could not inspect active processes before uninstall: $($_.Exception.Message)"
@@ -144,7 +153,7 @@ function Test-ProcessIsAncestorOfUninstaller([uint32]$AncestorId) {
             return $true
         }
         try {
-            $current = Get-CimInstance Win32_Process -Filter "ProcessId = $currentId"
+            $current = Get-RelayCimInstance Win32_Process -Filter "ProcessId = $currentId"
         }
         catch {
             Fail "could not inspect the uninstaller process tree: $($_.Exception.Message)"
@@ -161,7 +170,7 @@ function Stop-ConfirmedProcessTree($Process, [string]$Destination) {
     if (Test-ProcessIsAncestorOfUninstaller $Process.ProcessId) {
         Fail "cannot terminate process $($Process.ProcessId) from within its own process tree; rerun the uninstaller from an independent terminal"
     }
-    $answer = Read-Host "Terminate $(Format-ProcessDescription $Process) and its child processes? [y/N]"
+    $answer = Read-UninstallConfirmation "Terminate $(Format-ProcessDescription $Process) and its child processes? [y/N]"
     if ($answer -notmatch '^(?i:y|yes)$') {
         Fail "uninstall cancelled; process $($Process.ProcessId) remains active"
     }

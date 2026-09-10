@@ -73,8 +73,8 @@ try {
             $destination = 'C:\relay\nemo-relay.exe'
             $agent = [pscustomobject]@{ ProcessId = 10; ParentProcessId = 1; Name = 'codex.exe'; ExecutablePath = 'C:\codex.exe'; CommandLine = 'codex' }
             $relay = [pscustomobject]@{ ProcessId = 11; ParentProcessId = 10; Name = 'nemo-relay.exe'; ExecutablePath = $destination; CommandLine = "$destination mcp" }
-            function Get-CimInstance { @($agent, $relay) }
-            function Read-Host { throw 'unexpected shutdown prompt' }
+            function Get-RelayCimInstance { @($agent, $relay) }
+            function Read-UninstallConfirmation { throw 'unexpected shutdown prompt' }
             $Force = $true
             $DryRun = $false
             Assert-True ((Get-ActiveRelayShutdownTargets $destination).ProcessId -eq 10) 'personal MCP did not select its agent'
