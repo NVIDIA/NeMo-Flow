@@ -314,6 +314,14 @@ impl Drop for ActivationChild {
 
 type PendingLaunch = Option<(String, ActivationChild, tokio::time::Instant)>;
 
+fn route_activation_timed_out(started: tokio::time::Instant, directive: &BrokerDirective) -> bool {
+    started.elapsed() > ACTIVATION_POLL_MAX
+        && !matches!(
+            directive,
+            BrokerDirective::ReuseWorker { .. } | BrokerDirective::UsePassThrough
+        )
+}
+
 async fn stop_pending_launch(launched: &mut PendingLaunch) -> Result<(), CliError> {
     if let Some((_, mut child, _)) = launched.take() {
         child.child.kill().await.map_err(CliError::Io)?;
@@ -329,12 +337,7 @@ async fn make_route_ready(
     let mut launched: PendingLaunch = None;
     let result = async {
         loop {
-            if started.elapsed() > ACTIVATION_POLL_MAX
-                && !matches!(
-                    directive,
-                    BrokerDirective::ReuseWorker { .. } | BrokerDirective::UsePassThrough
-                )
-            {
+            if route_activation_timed_out(started, &directive) {
                 return Err(CliError::Launch(
                     "timed out waiting for the broker route to become ready".into(),
                 ));

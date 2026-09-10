@@ -946,7 +946,7 @@ async fn trajectory_managed_llm_events_fail_closed_for_runtime_and_opaque_codecs
         ),
         ("opaque", LlmCodecIdentity::Opaque),
     ] {
-        initialize_plugins(plugin_config(json!({
+        test_initialize_plugin_host_exact(plugin_config(json!({
             "codec": "openai_responses",
             "mode": "builtin",
             "builtin": {"preset": "trajectory_context"}
@@ -1004,7 +1004,7 @@ async fn trajectory_managed_llm_events_fail_closed_for_runtime_and_opaque_codecs
         assert!(!serde_json::to_string(&captured).unwrap().contains("SECRET"));
 
         deregister_subscriber(&subscriber_name).unwrap();
-        clear_plugin_configuration().unwrap();
+        test_close_plugin_host().unwrap();
     }
 }
 
@@ -1014,7 +1014,7 @@ async fn trajectory_managed_llm_events_trust_the_active_builtin_codec_over_raw_s
     reset_runtime();
     setup_isolated_thread();
 
-    initialize_plugins(plugin_config(json!({
+    test_initialize_plugin_host_exact(plugin_config(json!({
         "codec": "openai_responses",
         "mode": "builtin",
         "builtin": {"preset": "trajectory_context"}
@@ -1074,7 +1074,7 @@ async fn trajectory_managed_llm_events_trust_the_active_builtin_codec_over_raw_s
     assert!(!serde_json::to_string(&captured).unwrap().contains("SECRET"));
 
     deregister_subscriber("pii-trajectory-active-codec-surface").unwrap();
-    clear_plugin_configuration().unwrap();
+    test_close_plugin_host().unwrap();
 }
 
 #[tokio::test]
@@ -2643,7 +2643,7 @@ fn trajectory_component_preserves_normalized_cost_source_and_optimization_summar
     reset_runtime();
     setup_isolated_thread();
 
-    futures::executor::block_on(initialize_plugins(plugin_config(json!({
+    futures::executor::block_on(test_initialize_plugin_host_exact(plugin_config(json!({
         "codec": "openai_chat",
         "mode": "builtin",
         "builtin": {"preset": "trajectory_context"}
@@ -2739,7 +2739,7 @@ fn trajectory_component_preserves_normalized_cost_source_and_optimization_summar
     assert_eq!(summary.estimated_cost_saved, Some(0.25));
 
     assert!(deregister_subscriber("trajectory-normalized-accounting").unwrap());
-    clear_plugin_configuration().unwrap();
+    test_close_plugin_host().unwrap();
 }
 
 #[tokio::test]
@@ -4977,7 +4977,7 @@ fn builtin_mask_with_ip_address_detector_preserves_last_octet_by_default() {
 }
 
 #[test]
-fn builtin_mask_with_url_detector_preserves_scheme_and_host_by_default() {
+fn builtin_mask_with_url_detector_preserves_only_host_and_port() {
     let _guard = crate::plugins::pii_redaction::test_mutex().lock().unwrap();
     reset_runtime();
     setup_isolated_thread();
@@ -4997,27 +4997,58 @@ fn builtin_mask_with_url_detector_preserves_scheme_and_host_by_default() {
     }))))
     .unwrap();
 
+    let cases = [
+        ("https://example.com/path?q=1", "https://example.com/*"),
+        (
+            "https://alice:s3cr3t@example.test/private",
+            "https://example.test/*",
+        ),
+        ("https://alice:s3cr3t@example.test", "https://example.test"),
+        (
+            "https://example.test?token=secret/path",
+            "https://example.test/*",
+        ),
+        (
+            "https://example.test#access_token=secret/path",
+            "https://example.test/*",
+        ),
+        (
+            "https://example.test\\@alice:s3cr3t",
+            "https://example.test/*",
+        ),
+        ("https://example.test", "https://example.test"),
+        (
+            "https://[2001:db8::1]:8443/private",
+            "https://[2001:db8::1]:8443/*",
+        ),
+    ];
+
     let events = capture_events("pii-redaction-url-default-mask-events");
-    let _handle = tool_call(
-        ToolCallParams::builder()
-            .name("notify")
-            .args(json!({
-                "url": "https://example.com/path?q=1",
-                "keep": "unchanged"
-            }))
-            .build(),
-    )
-    .unwrap();
+    let _handles = cases
+        .iter()
+        .map(|(input, _)| {
+            tool_call(
+                ToolCallParams::builder()
+                    .name("fetch")
+                    .args(json!({
+                        "url": input,
+                        "keep": "unchanged"
+                    }))
+                    .build(),
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
 
     let captured_events = captured_events_snapshot(&events);
-    assert_eq!(captured_events.len(), 1);
-    assert_eq!(
-        captured_events[0].input(),
-        Some(&json!({
-            "url": "https://example.com/*",
+    assert_eq!(captured_events.len(), cases.len());
+    for (event, (input, expected)) in captured_events.iter().zip(cases) {
+        let expected_input = json!({
+            "url": expected,
             "keep": "unchanged"
-        }))
-    );
+        });
+        assert_eq!(event.input(), Some(&expected_input), "input: {input}");
+    }
 
     deregister_subscriber("pii-redaction-url-default-mask-events").unwrap();
     test_close_plugin_host().unwrap();

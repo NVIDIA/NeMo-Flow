@@ -42,6 +42,8 @@ pub async fn initialize(
 ) -> Result<PluginHostActivation> {
     let resolved = resolve_plugin_host_config(config, additional_plugins_toml.as_deref())?;
     let dynamic_reports = resolved.dynamic_reports;
+    let config_paths = resolved.config_paths;
+    let resolved_config = resolved.resolved_config;
     let (mut activation, config_report) = PluginHostActivation::activate_validated(
         resolved.config,
         resolved.dynamic_plugins,
@@ -51,6 +53,8 @@ pub async fn initialize(
     activation.report = PluginHostReport {
         config: config_report,
         dynamic_plugins: dynamic_reports,
+        config_paths,
+        resolved_config,
     };
     Ok(activation)
 }
@@ -97,11 +101,14 @@ impl PluginHostActivation {
     /// [`initialize`] so core owns discovery and policy resolution.
     #[doc(hidden)]
     pub async fn initialize_exact(config: PluginConfig) -> Result<Self> {
+        let resolved_config = super::sanitized_plugin_config(&config);
         let (mut activation, report) =
             Self::activate_validated(config, Vec::new(), Vec::new()).await?;
         activation.report = PluginHostReport {
             config: report,
             dynamic_plugins: Vec::new(),
+            config_paths: Vec::new(),
+            resolved_config,
         };
         Ok(activation)
     }
@@ -121,11 +128,14 @@ impl PluginHostActivation {
     {
         let dynamic_plugins = dynamic_plugins.into_iter().collect::<Vec<_>>();
         validate_dynamic_plugin_specs(&dynamic_plugins)?;
+        let resolved_config = super::sanitized_plugin_config(&config);
         let (mut activation, report) =
             Self::activate_validated(config, dynamic_plugins, Vec::new()).await?;
         activation.report = PluginHostReport {
             config: report.clone(),
             dynamic_plugins: Vec::new(),
+            config_paths: Vec::new(),
+            resolved_config,
         };
         Ok((activation, report))
     }

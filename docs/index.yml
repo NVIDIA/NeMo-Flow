@@ -14,6 +14,10 @@ navigation:
     title: "NVIDIA NeMo Relay CLI"
     slug: nemo-relay-cli
     title-source: frontmatter
+  - folder: ./daemon
+    title: "Daemon"
+    slug: daemon
+    title-source: frontmatter
   - folder: ./supported-integrations
     title: "Supported Integrations"
     slug: supported-integrations
@@ -28,6 +32,9 @@ navigation:
       - page: "About"
         path: ./configure-plugins/about.mdx
         slug: about
+      - page: "Configure and Initialize Plugins"
+        path: ./configure-plugins/initialize-plugins.mdx
+        slug: initialize-plugins
       - folder: ./configure-plugins/observability
         title: "Observability"
         title-source: frontmatter
