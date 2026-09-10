@@ -529,7 +529,7 @@ describe('Scope-local auto-cleanup on scope pop', () => {
     }
     assert.equal(seen.toolName, 'sl_ctx_tool');
     assert.equal(seen.toolCallId, 'sl-call-77');
-    assert.deepEqual(seen.arguments, { x: 5 });
+    assert.deepEqual(seen.args, { x: 5 });
   });
 
   it('scope-local tool execution intercept is cleaned up when scope is popped', async () => {

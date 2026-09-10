@@ -873,7 +873,7 @@ describe('Tool intercepts', () => {
     }
     assert.equal(seen.toolName, 'ctx_tool');
     assert.equal(seen.toolCallId, 'node-call-abc');
-    assert.deepEqual(seen.arguments, { x: 10 });
+    assert.deepEqual(seen.args, { x: 10 });
   });
 
   it('execution intercept sees null toolCallId when absent', async () => {

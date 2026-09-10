@@ -4575,6 +4575,7 @@ unsafe extern "C" fn noop_tool_execution(
     NemoRelayStatus::Ok
 }
 
+#[cfg(unix)]
 unsafe extern "C" fn noop_tool_execution_context(
     _user_data: *mut c_void,
     _context_json: *const NemoRelayNativeString,
