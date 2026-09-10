@@ -136,10 +136,9 @@ Redaction does not disable this requirement. Existing remote plaintext trace
 endpoints must migrate to HTTPS or use a loopback collector.
 
 OTLP/HTTP trace exporters do not follow redirects, including redirects to other
-HTTPS endpoints. Configure the final collector URL directly. This changes behavior
-for existing endpoints that rely on redirects and prevents redirected exports from
-bypassing transport validation or forwarding payloads and credentials to another
-destination. This policy applies to all trace projections; gRPC, log, and metric
+HTTPS endpoints. Redirects are disabled to prevent exports from bypassing transport
+validation or forwarding payloads and credentials to another destination. Configure
+the final collector URL directly. This policy applies to all trace projections; gRPC, log, and metric
 exporters are unchanged.
 
 | Field | Default | Notes |
