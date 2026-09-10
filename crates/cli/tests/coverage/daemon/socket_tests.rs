@@ -666,3 +666,343 @@ async fn restart_defers_replacement_until_the_generation_recovery_deadline() {
     );
     task.abort();
 }
+
+struct RecoveryFixture {
+    state: Arc<DaemonState>,
+    origin: String,
+    identity: MachineIdentity,
+    worker: Client,
+    registration: WorkerRegisterResponse,
+    target: Arc<WorkerTarget>,
+    fail_probe: Arc<std::sync::atomic::AtomicBool>,
+    block_probe: Arc<std::sync::atomic::AtomicBool>,
+    probe_started: Arc<Notify>,
+    probe_release: Arc<Notify>,
+    tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+impl Drop for RecoveryFixture {
+    fn drop(&mut self) {
+        for task in &self.tasks {
+            task.abort();
+        }
+    }
+}
+impl RecoveryFixture {
+    fn ready(&self, sequence: u64) -> Command {
+        Command::Ready(
+            SessionRequest::new(
+                "worker".into(),
+                self.registration.session_token.clone(),
+                sequence,
+                WorkerReadyPayload {
+                    worker_id: "worker".into(),
+                },
+            )
+            .unwrap(),
+        )
+    }
+}
+async fn recovering_worker() -> RecoveryFixture {
+    let (state, origin, task) = daemon(false).await;
+    let identity = MachineIdentity::generate().unwrap().identity;
+    let client = Client::default();
+    let mcp_registration = mcp(&client, &origin, &identity, "owner").await;
+    let crate::daemon::common::control::WorkerBootstrap {
+        activation_id,
+        activation_token,
+        ..
+    } = crate::daemon::common::control::WorkerBootstrap::from_directive(mcp_registration.directive)
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let worker = Client::default();
+    let handshake = begin_handshake(
+        &worker,
+        &origin,
+        ComponentRole::Worker,
+        &identity,
+        "worker",
+        None,
+    )
+    .await
+    .unwrap();
+    let registration: WorkerRegisterResponse = worker
+        .request(Command::RegisterWorker(WorkerRegisterRequest {
+            proof: handshake.proof,
+            worker_id: "worker".into(),
+            endpoint: endpoint.clone(),
+            activation_id,
+            activation_token,
+            tls_root_certificate: None,
+        }))
+        .await
+        .unwrap();
+    let data = registration.data_token.clone();
+    let probe_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let count = probe_count.clone();
+    let fail_probe = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let block_probe = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let probe_started = Arc::new(Notify::new());
+    let probe_release = Arc::new(Notify::new());
+    let fail = fail_probe.clone();
+    let block = block_probe.clone();
+    let started = probe_started.clone();
+    let release = probe_release.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new().route(
+                WORKER_PROBE_PATH,
+                axum::routing::get(move |headers: HeaderMap| {
+                    let data = data.clone();
+                    let count = count.clone();
+                    let fail = fail.clone();
+                    let block = block.clone();
+                    let started = started.clone();
+                    let release = release.clone();
+                    async move {
+                        assert_eq!(headers[WORKER_TOKEN_HEADER], data.expose());
+                        count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if block.load(std::sync::atomic::Ordering::Relaxed) {
+                            started.notify_one();
+                            release.notified().await;
+                        }
+                        if fail.load(std::sync::atomic::Ordering::Relaxed) {
+                            StatusCode::SERVICE_UNAVAILABLE
+                        } else {
+                            StatusCode::NO_CONTENT
+                        }
+                    }
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+    });
+    let ready = SessionRequest::new(
+        "worker".into(),
+        registration.session_token.clone(),
+        1,
+        WorkerReadyPayload {
+            worker_id: "worker".into(),
+        },
+    )
+    .unwrap();
+    worker
+        .request::<()>(Command::Ready(ready.clone()))
+        .await
+        .unwrap();
+    worker.request::<()>(Command::Ready(ready)).await.unwrap();
+    acknowledge_until_ready(&client).await;
+    let mcp_task = tokio::spawn(acknowledge_directives(client.clone()));
+    let target = lock(&state.worker_sessions)["worker"]
+        .pending_target
+        .clone();
+    drop(worker);
+    wait_disconnected(&state, ComponentRole::Worker, "worker").await;
+    assert!(!target.control_available());
+    assert!(matches!(
+        state
+            .registry
+            .current_directive(identity.fingerprint(), &McpSessionId::new("owner").unwrap())
+            .unwrap(),
+        BrokerDirective::WaitForWorker { .. }
+    ));
+    let restored = Client::default();
+    let handshake = begin_handshake(
+        &restored,
+        &origin,
+        ComponentRole::Worker,
+        &identity,
+        "worker",
+        None,
+    )
+    .await
+    .unwrap();
+    let recovered: WorkerRegisterResponse = restored
+        .request(Command::RecoverWorker(WorkerRecoverRequest {
+            proof: handshake.proof,
+            worker_id: "worker".into(),
+            endpoint: endpoint.clone(),
+            tls_root_certificate: None,
+            generation_grant: registration.generation_grant.clone(),
+        }))
+        .await
+        .unwrap();
+    assert!(!target.control_available());
+    RecoveryFixture {
+        state,
+        origin,
+        identity,
+        worker: restored,
+        registration: recovered,
+        target,
+        fail_probe,
+        block_probe,
+        probe_started,
+        probe_release,
+        tasks: vec![task, server, mcp_task],
+    }
+}
+
+#[tokio::test]
+async fn failed_recovery_probe_preserves_session_for_retry_and_expiry() {
+    let mut fixture = recovering_worker().await;
+    fixture
+        .fail_probe
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        fixture
+            .worker
+            .request::<()>(fixture.ready(1))
+            .await
+            .is_err()
+    );
+    assert!(lock(&fixture.state.worker_sessions).contains_key("worker"));
+    assert!(!fixture.target.control_available());
+    fixture
+        .fail_probe
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    fixture
+        .worker
+        .request::<()>(fixture.ready(2))
+        .await
+        .unwrap();
+    assert!(fixture.target.control_available());
+    // Fail a subsequent probe and disconnect without another recovery attempt.
+    fixture
+        .fail_probe
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        fixture
+            .worker
+            .request::<()>(fixture.ready(3))
+            .await
+            .is_err()
+    );
+    drop(std::mem::take(&mut fixture.worker));
+    wait_disconnected(&fixture.state, ComponentRole::Worker, "worker").await;
+    let generation = lock(&fixture.state.sockets.peers)[&key(ComponentRole::Worker, "worker")]
+        .generation
+        .clone();
+    lock(&fixture.state.sockets.peers)
+        .get_mut(&key(ComponentRole::Worker, "worker"))
+        .unwrap()
+        .disconnected = Some(tokio::time::Instant::now() - GRACE);
+    disconnected(
+        fixture.state.clone(),
+        ComponentRole::Worker,
+        "worker".into(),
+        generation,
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while lock(&fixture.state.worker_sessions).contains_key("worker") {
+            tokio::task::yield_now().await;
+        }
+        while matches!(
+            fixture
+                .state
+                .registry
+                .current_directive(
+                    fixture.identity.fingerprint(),
+                    &McpSessionId::new("owner").unwrap()
+                )
+                .unwrap(),
+            BrokerDirective::WaitForWorker { .. }
+        ) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn slow_probe_does_not_block_other_control_sessions_or_stale_publication() {
+    let fixture = recovering_worker().await;
+    fixture
+        .block_probe
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let worker = fixture.worker.clone();
+    let ready = fixture.ready(1);
+    let probing = tokio::spawn(async move { worker.request::<()>(ready).await });
+    fixture.probe_started.notified().await;
+    let other = Client::default();
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        mcp(&other, &fixture.origin, &fixture.identity, "other"),
+    )
+    .await
+    .unwrap();
+    // Replace the socket while its old probe is still in flight.
+    let replacement = Client::default();
+    let handshake = begin_handshake(
+        &replacement,
+        &fixture.origin,
+        ComponentRole::Worker,
+        &fixture.identity,
+        "worker",
+        None,
+    )
+    .await
+    .unwrap();
+    let _: WorkerRegisterResponse = replacement
+        .request(Command::RecoverWorker(WorkerRecoverRequest {
+            proof: handshake.proof,
+            worker_id: "worker".into(),
+            endpoint: fixture.target.endpoint().into(),
+            tls_root_certificate: None,
+            generation_grant: fixture.registration.generation_grant.clone(),
+        }))
+        .await
+        .unwrap();
+    fixture.probe_release.notify_one();
+    assert!(probing.await.unwrap().is_err());
+    assert!(!fixture.target.control_available());
+}
+
+#[tokio::test]
+async fn drain_during_readiness_probe_prevents_publication() {
+    let fixture = recovering_worker().await;
+    fixture
+        .block_probe
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let worker = fixture.worker.clone();
+    let ready = fixture.ready(1);
+    let probing = tokio::spawn(async move { worker.request::<()>(ready).await });
+    fixture.probe_started.notified().await;
+    fixture.state.sockets.drain(WorkerDrainRequest {
+        worker_id: "worker".into(),
+        deadline_unix_ms: now_unix_ms() + DRAIN_LIFETIME_MS,
+        timeout_ms: Some(DRAIN_LIFETIME_MS),
+    });
+    fixture.probe_release.notify_one();
+    assert!(probing.await.unwrap().is_err());
+    assert!(!fixture.target.control_available());
+    assert!(fixture.state.sockets.draining("worker"));
+}
+
+async fn acknowledge_until_ready(client: &Client) {
+    loop {
+        let Event::Directive {
+            request_id,
+            directive,
+        } = client.next().await.unwrap()
+        else {
+            panic!("directive expected")
+        };
+        client.acknowledge(request_id).await.unwrap();
+        if matches!(directive, BrokerDirective::ReuseWorker { .. }) {
+            break;
+        }
+    }
+}
+
+async fn acknowledge_directives(client: Client) {
+    while let Ok(Event::Directive { request_id, .. }) = client.next().await {
+        if client.acknowledge(request_id).await.is_err() {
+            break;
+        }
+    }
+}

@@ -945,36 +945,78 @@ fn stage_worker(
     .into_response()
 }
 
+struct ReadyWorker {
+    fingerprint: Fingerprint,
+    target: Arc<WorkerTarget>,
+    publication: WorkerPublication,
+    generation_id: String,
+    published: bool,
+}
+
+#[cfg(test)]
 async fn ready_worker(
     State(state): State<Arc<DaemonState>>,
     Json(request): Json<SessionRequest<WorkerReadyPayload>>,
 ) -> Response<Body> {
-    let candidate = {
-        let mut sessions = lock(&state.worker_sessions);
-        let Some(session) = sessions.get_mut(&request.session_id) else {
-            return control_message(StatusCode::UNAUTHORIZED, "unknown worker session");
-        };
-        if request.payload.worker_id != session.worker_id {
-            return control_message(StatusCode::UNAUTHORIZED, "worker identity mismatch");
-        }
-        if let Err(response) = authenticate_sequence(
-            session.secret_digest,
-            &mut session.last_sequence,
-            &mut session.last_request_id,
-            &request,
-        ) {
-            return response;
-        }
-        (
-            session.fingerprint,
-            Arc::clone(&session.pending_target),
-            session.publication.clone(),
-            session.generation_grant.generation_id.clone(),
-            session.published,
-        )
+    let candidate = match prepare_ready_worker(&state, &request) {
+        Ok(candidate) => candidate,
+        Err(response) => return response,
     };
-    let (fingerprint, target, publication, generation_id, published) = candidate;
-    if let Err(error) = probe_worker(&target).await {
+    let probe = probe_worker(&candidate.target).await;
+    finish_ready_worker(state, candidate, probe).await
+}
+
+#[allow(clippy::result_large_err)]
+fn prepare_ready_worker(
+    state: &DaemonState,
+    request: &SessionRequest<WorkerReadyPayload>,
+) -> Result<ReadyWorker, Response<Body>> {
+    let mut sessions = lock(&state.worker_sessions);
+    let Some(session) = sessions.get_mut(&request.session_id) else {
+        return Err(control_message(
+            StatusCode::UNAUTHORIZED,
+            "unknown worker session",
+        ));
+    };
+    if request.payload.worker_id != session.worker_id {
+        return Err(control_message(
+            StatusCode::UNAUTHORIZED,
+            "worker identity mismatch",
+        ));
+    }
+    authenticate_sequence(
+        session.secret_digest,
+        &mut session.last_sequence,
+        &mut session.last_request_id,
+        request,
+    )?;
+    Ok(ReadyWorker {
+        fingerprint: session.fingerprint,
+        target: Arc::clone(&session.pending_target),
+        publication: session.publication.clone(),
+        generation_id: session.generation_grant.generation_id.clone(),
+        published: session.published,
+    })
+}
+
+async fn finish_ready_worker(
+    state: Arc<DaemonState>,
+    candidate: ReadyWorker,
+    probe: Result<(), CliError>,
+) -> Response<Body> {
+    let ReadyWorker {
+        fingerprint,
+        target,
+        publication,
+        generation_id,
+        published,
+    } = candidate;
+    if let Err(error) = probe {
+        // Retain a published session through recovery failures: its disconnect grace owns
+        // generation revocation and replacement, and another probe may still succeed.
+        if published {
+            return control_error(StatusCode::BAD_GATEWAY, error);
+        }
         let fail_route = match &publication {
             WorkerPublication::Activation { .. } => true,
             WorkerPublication::Recovery { .. } => {

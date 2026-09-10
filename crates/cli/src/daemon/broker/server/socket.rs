@@ -282,9 +282,17 @@ async fn run(state: Arc<DaemonState>, role: ComponentRole, local: bool, socket: 
                     if send.try_send(Message::Text(text.into())).is_err() { break; }
                     continue;
                 }
+                let readiness = if let Command::Ready(payload) = &request.command {
+                    Some(socket_ready(&state, role, id.as_deref(), &generation, payload).await)
+                } else {
+                    None
+                };
                 let _transaction = state.sockets.gate.lock().await;
                 if let Some(id) = &id && lock(&state.sockets.peers).get(&key(role, id)).is_none_or(|p| p.generation != generation) { break; }
-                let response = dispatch(&state, role, &mut id, &mut challenge, request.command).await;
+                let response = match readiness {
+                    Some(response) => response,
+                    None => dispatch(&state, role, &mut id, &mut challenge, request.command).await,
+                };
                 let success = response.status().is_success();
                 if success && let Some(id) = &id {
                     let mut peers = lock(&state.sockets.peers);
@@ -331,6 +339,67 @@ async fn run(state: Arc<DaemonState>, role: ComponentRole, local: bool, socket: 
     if let Some(id) = id {
         disconnected(state, role, id, generation).await;
     }
+}
+
+// Authenticate and snapshot under the transaction lock, but never hold it over network I/O.
+// A replacement connection or drain may run during the probe, so fence publication again.
+async fn socket_ready(
+    state: &Arc<DaemonState>,
+    role: ComponentRole,
+    id: Option<&str>,
+    generation: &str,
+    request: &SessionRequest<WorkerReadyPayload>,
+) -> Response<Body> {
+    let candidate = {
+        let _transaction = state.sockets.gate.lock().await;
+        if role != ComponentRole::Worker || id != Some(request.session_id.as_str()) {
+            return control_message(StatusCode::UNAUTHORIZED, "worker connection required");
+        }
+        if let Err(response) = validate_ready_connection(state, &request.session_id, generation) {
+            return response;
+        }
+        match prepare_ready_worker(state, request) {
+            Ok(candidate) => candidate,
+            Err(response) => return response,
+        }
+    };
+    let probe = probe_worker(&candidate.target).await;
+    let _transaction = state.sockets.gate.lock().await;
+    if let Err(response) = validate_ready_connection(state, &request.session_id, generation) {
+        return response;
+    }
+    let response = finish_ready_worker(state.clone(), candidate, probe).await;
+    if response.status().is_success() {
+        if let Some(peer) = lock(&state.sockets.peers).get_mut(&key(role, &request.session_id)) {
+            peer.ready = true;
+        }
+        if let Some(session) = lock(&state.worker_sessions).get(&request.session_id) {
+            session.pending_target.set_control_available(true);
+        }
+    }
+    response
+}
+
+#[allow(clippy::result_large_err)]
+fn validate_ready_connection(
+    state: &DaemonState,
+    id: &str,
+    generation: &str,
+) -> Result<(), Response<Body>> {
+    let peers = lock(&state.sockets.peers);
+    let Some(peer) = peers
+        .get(&key(ComponentRole::Worker, id))
+        .filter(|peer| peer.generation == generation && peer.sender.is_some())
+    else {
+        return Err(control_message(
+            StatusCode::UNAUTHORIZED,
+            "worker connection was replaced",
+        ));
+    };
+    if peer.drain.is_some() {
+        return Err(control_message(StatusCode::CONFLICT, "worker is draining"));
+    }
+    Ok(())
 }
 
 #[allow(clippy::cognitive_complexity)] // Keep role and authentication guards beside each command.
@@ -420,28 +489,6 @@ async fn dispatch(
             if response.status().is_success() {
                 *id = Some(worker_id.clone());
                 reset_worker(state, &worker_id);
-            }
-            response
-        }
-        Command::Ready(request)
-            if role == ComponentRole::Worker && id.as_ref() == Some(&request.session_id) =>
-        {
-            if lock(&state.sockets.peers)
-                .get(&key(role, &request.session_id))
-                .is_some_and(|p| p.drain.is_some())
-            {
-                return control_message(StatusCode::CONFLICT, "worker is draining");
-            }
-            let response = ready_worker(State(state.clone()), Json(request)).await;
-            if response.status().is_success() {
-                if let Some(peer) =
-                    lock(&state.sockets.peers).get_mut(&key(role, id.as_ref().unwrap()))
-                {
-                    peer.ready = true;
-                }
-                if let Some(session) = lock(&state.worker_sessions).get(id.as_ref().unwrap()) {
-                    session.pending_target.set_control_available(true);
-                }
             }
             response
         }
