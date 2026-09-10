@@ -21,16 +21,6 @@ use super::protocol::{
 };
 use crate::error::CliError;
 
-pub(crate) const CHALLENGE_PATH: &str = "/_nemo-relay/control/v1/challenge";
-pub(crate) const MCP_REGISTER_PATH: &str = "/_nemo-relay/control/v1/mcp/register";
-pub(crate) const MCP_HEARTBEAT_PATH: &str = "/_nemo-relay/control/v1/mcp/heartbeat";
-pub(crate) const MCP_RELEASE_PATH: &str = "/_nemo-relay/control/v1/mcp/release";
-pub(crate) const MCP_ACTIVATION_FAILED_PATH: &str = "/_nemo-relay/control/v1/mcp/activation-failed";
-pub(crate) const WORKER_REGISTER_PATH: &str = "/_nemo-relay/control/v1/worker/register";
-pub(crate) const WORKER_RECOVER_PATH: &str = "/_nemo-relay/control/v1/worker/recover";
-pub(crate) const WORKER_READY_PATH: &str = "/_nemo-relay/control/v1/worker/ready";
-pub(crate) const WORKER_HEARTBEAT_PATH: &str = "/_nemo-relay/control/v1/worker/heartbeat";
-pub(crate) const WORKER_DRAIN_PATH: &str = "/_nemo-relay/control/v1/worker/drain";
 pub(crate) const WORKER_PROBE_PATH: &str = "/_nemo-relay/worker/v1/ready";
 
 pub(crate) const CLIENT_TOKEN_HEADER: &str = "x-nemo-relay-client-token";
@@ -40,13 +30,9 @@ pub(crate) const WORKER_TOKEN_HEADER: &str = "x-nemo-relay-worker-token";
 pub(crate) const WORKER_ROUTE_FAILURE_HEADER: &str = "x-nemo-relay-worker-route-failure";
 pub(crate) const MAX_CONTROL_BODY_BYTES: usize = 256 * 1024;
 pub(crate) const CHALLENGE_LIFETIME_MS: u64 = 15_000;
-pub(crate) const MCP_HEARTBEAT_INTERVAL_MS: u64 = 10_000;
-pub(crate) const MCP_LEASE_MS: u64 = 30_000;
-pub(crate) const WORKER_HEARTBEAT_INTERVAL_MS: u64 = 5_000;
-pub(crate) const WORKER_LEASE_MS: u64 = 20_000;
 pub(crate) const ACTIVATION_LIFETIME_MS: u64 = 15_000;
 pub(crate) const DRAIN_LIFETIME_MS: u64 = 120_000;
-pub(crate) const RECOVERY_LIFETIME_MS: u64 = 120_000;
+pub(crate) const RECOVERY_LIFETIME_MS: u64 = 30_000;
 const WORKER_NETWORK_HINT_DOMAIN: &[u8] = b"nemo-relay/worker-network-hint/v1";
 const WORKER_GENERATION_DOMAIN: &[u8] = b"nemo-relay/worker-generation/v1";
 const DAEMON_CHALLENGE_DOMAIN: &[u8] = b"nemo-relay/daemon-challenge/v1";
@@ -286,7 +272,6 @@ fn worker_network_hint_bytes(
 pub(crate) struct McpRegisterResponse {
     pub(crate) daemon_proof: HandshakeProof,
     pub(crate) session_token: SensitiveString,
-    pub(crate) heartbeat_interval_ms: u64,
     pub(crate) directive: BrokerDirective,
 }
 
@@ -348,7 +333,6 @@ pub(crate) struct WorkerRegisterResponse {
     pub(crate) daemon_proof: HandshakeProof,
     pub(crate) session_token: SensitiveString,
     pub(crate) data_token: SensitiveString,
-    pub(crate) heartbeat_interval_ms: u64,
     pub(crate) generation_grant: WorkerGenerationGrant,
 }
 
@@ -500,16 +484,6 @@ pub(crate) struct ActivationFailedPayload {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct McpHeartbeatResponse {
-    pub(crate) directive: Option<BrokerDirective>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct WorkerHeartbeatPayload {
-    pub(crate) worker_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct WorkerReadyPayload {
     pub(crate) worker_id: String,
 }
@@ -517,7 +491,7 @@ pub(crate) struct WorkerReadyPayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct WorkerDrainRequest {
     pub(crate) worker_id: String,
-    /// Daemon wall-clock deadline retained for protocol-v1 compatibility and audit logs.
+    /// Daemon wall-clock deadline used for audit logs.
     pub(crate) deadline_unix_ms: u64,
     /// Relative lifetime enforced against the worker's local monotonic clock.
     #[serde(default)]

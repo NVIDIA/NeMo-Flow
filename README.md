@@ -85,7 +85,8 @@ nemo-relay --version
 
 The installer supports Linux x86_64/ARM64, macOS Apple Silicon, and Windows
 x86_64/ARM64. Refer to the [installation guide](https://docs.nvidia.com/nemo/relay/getting-started/installation)
-for version pinning, custom directories, and source-based installation.
+for version pinning, custom directories, uninstalling a script-installed CLI,
+and source-based installation.
 
 #### 2. Enable Local Observability Output
 

@@ -5403,6 +5403,23 @@ fn cli_install_pi_refuses_to_add_a_copy_beside_a_project_scoped_one() {
     );
 }
 
+/// Exercise MCP startup within the native Windows executable's 1 MiB stack budget.
+fn daemon_mcp_test_command() -> Command {
+    #[cfg(unix)]
+    {
+        let mut command = Command::new("/bin/sh");
+        command.args([
+            "-c",
+            "ulimit -s 1024 || exit; exec \"$@\"",
+            "relay-mcp-stack-test",
+        ]);
+        command.arg(gateway_bin());
+        command
+    }
+    #[cfg(not(unix))]
+    Command::new(gateway_bin())
+}
+
 /// Exercises the deployed daemon topology through the real CLI processes. The MCP must complete
 /// authenticated registration, launch its same-machine worker, wait for broker publication, and
 /// expose the no-tools protocol only after the route is usable. A Pi hook then traverses the
@@ -5434,7 +5451,7 @@ fn cli_daemon_mcp_launches_worker_and_forwards_pi_hook() {
     let daemon_origin = format!("http://{address}");
     let mcp_stderr_path = temp.path().join("daemon-mcp.stderr");
     let mut mcp = ChildGuard::new(
-        Command::new(gateway_bin())
+        daemon_mcp_test_command()
             .current_dir(temp.path())
             .env("HOME", temp.path())
             .env("XDG_CONFIG_HOME", &config_home)
@@ -5477,7 +5494,12 @@ fn cli_daemon_mcp_launches_worker_and_forwards_pi_hook() {
             );
         }
     };
-    let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+    let response: serde_json::Value = serde_json::from_str(&response).unwrap_or_else(|error| {
+        panic!(
+            "invalid daemon MCP initialization response {response:?}: {error}\n{}",
+            std::fs::read_to_string(&mcp_stderr_path).unwrap_or_default()
+        )
+    });
     assert_eq!(response["result"]["serverInfo"]["name"], "nemo-relay");
 
     let (provider_origin, provider_request) = spawn_single_request_server(
@@ -5627,8 +5649,9 @@ fn cli_pass_through_daemon_serves_managed_hooks_and_pi_provider_routing() {
     );
     wait_for_port_open(address);
 
+    let mcp_stderr_path = temp.path().join("daemon-mcp.stderr");
     let mut mcp = ChildGuard::new(
-        Command::new(gateway_bin())
+        daemon_mcp_test_command()
             .current_dir(temp.path())
             .env("HOME", temp.path())
             .env("XDG_CONFIG_HOME", temp.path().join("xdg"))
@@ -5636,7 +5659,9 @@ fn cli_pass_through_daemon_serves_managed_hooks_and_pi_provider_routing() {
             .args(["daemon", "mcp", "--daemon-address", &daemon_origin])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(
+                std::fs::File::create(&mcp_stderr_path).unwrap(),
+            ))
             .spawn()
             .unwrap(),
     );
@@ -5656,7 +5681,12 @@ fn cli_pass_through_daemon_serves_managed_hooks_and_pi_provider_routing() {
         .recv_timeout(Duration::from_secs(20))
         .unwrap()
         .unwrap();
-    let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+    let response: serde_json::Value = serde_json::from_str(&response).unwrap_or_else(|error| {
+        panic!(
+            "invalid daemon MCP initialization response {response:?}: {error}\n{}",
+            std::fs::read_to_string(&mcp_stderr_path).unwrap_or_default()
+        )
+    });
     assert_eq!(response["result"]["serverInfo"]["name"], "nemo-relay");
 
     for (agent, expected) in [

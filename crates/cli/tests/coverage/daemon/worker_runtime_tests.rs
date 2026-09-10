@@ -698,7 +698,30 @@ async fn runtime_serve_reaches_readiness_and_exposes_the_authenticated_listener(
     let daemon = tokio::spawn(async move {
         axum::serve(
             daemon_listener,
-            Router::new().fallback(|| async { StatusCode::NO_CONTENT }),
+            Router::new().route(
+                crate::daemon::common::socket::WORKER_SOCKET_PATH,
+                get(|ws: axum::extract::ws::WebSocketUpgrade| async {
+                    ws.on_upgrade(|mut socket| async move {
+                        while let Some(Ok(axum::extract::ws::Message::Text(text))) =
+                            socket.recv().await
+                        {
+                            let request: crate::daemon::common::socket::Request =
+                                serde_json::from_str(&text).unwrap();
+                            let reply = crate::daemon::common::socket::Event::Reply {
+                                request_id: request.request_id,
+                                status: 204,
+                                payload: serde_json::Value::Null,
+                            };
+                            socket
+                                .send(axum::extract::ws::Message::Text(
+                                    serde_json::to_string(&reply).unwrap().into(),
+                                ))
+                                .await
+                                .unwrap();
+                        }
+                    })
+                }),
+            ),
         )
         .await
         .expect("serve daemon fixture");
@@ -706,6 +729,10 @@ async fn runtime_serve_reaches_readiness_and_exposes_the_authenticated_listener(
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind worker");
     let worker_address = listener.local_addr().expect("worker address");
     let identity = MachineIdentity::generate().expect("identity").identity;
+    let registration = control::test_registration("runtime-data", "runtime-control");
+    registration
+        .test_connect(&format!("http://{daemon_address}"))
+        .await;
     let worker = tokio::spawn(serve(
         listener,
         RuntimeOptions {
@@ -717,7 +744,7 @@ async fn runtime_serve_reaches_readiness_and_exposes_the_authenticated_listener(
             tls_config: None,
             config: GatewayConfig::default(),
             dynamic_plugins: Vec::new(),
-            registration: control::test_registration("runtime-data", "runtime-control"),
+            registration,
         },
     ));
 
@@ -789,58 +816,13 @@ async fn tls_worker_listener_discards_bad_handshakes_and_serves_authenticated_re
     assert!(server.await.expect_err("server aborted").is_cancelled());
 }
 
-#[tokio::test]
-async fn heartbeat_attempt_accepts_only_a_successful_daemon_acknowledgement() {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind daemon fixture");
-    let address = listener.local_addr().expect("daemon address");
-    let daemon = tokio::spawn(async move {
-        axum::serve(
-            listener,
-            Router::new().fallback(|| async { StatusCode::NO_CONTENT }),
-        )
-        .await
-        .expect("serve daemon fixture");
-    });
-    let mut registration = control::test_registration("data", "control");
-    assert!(
-        heartbeat_attempt(
-            &mut registration,
-            &format!("http://{address}"),
-            "worker-one"
-        )
-        .await
-    );
-    daemon.abort();
-}
-
-#[tokio::test(start_paused = true)]
-async fn monitor_control_stops_without_contacting_daemon_after_drain_begins() {
-    let state = state();
-    state.begin_drain(10_000);
-    let identity = MachineIdentity::generate().expect("identity").identity;
-    let monitor = monitor_control(
-        Arc::clone(&state),
-        "http://127.0.0.1:9".into(),
-        identity,
-        "worker-one".into(),
-        "http://127.0.0.1:1".into(),
-        None,
-        control::test_registration("data", "control"),
-    );
-    tokio::time::timeout(Duration::from_secs(6), monitor)
-        .await
-        .expect("monitor exits on its first lifecycle check");
-}
-
 #[tokio::test(start_paused = true)]
 async fn monitor_control_rejects_work_and_exits_after_recovery_deadline() {
     let state = state();
     state.accepting.store(true, Ordering::Release);
     let identity = MachineIdentity::generate().expect("identity").identity;
     tokio::time::timeout(
-        Duration::from_millis(RECOVERY_LIFETIME_MS + 30_000),
+        Duration::from_millis(crate::daemon::common::control::RECOVERY_LIFETIME_MS + 1_000),
         monitor_control(
             Arc::clone(&state),
             "http://127.0.0.1:9".into(),

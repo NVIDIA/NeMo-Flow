@@ -86,8 +86,10 @@ jobs:
         if: ${{ matrix.shell == 'sh' }}
         run: |
           sh -n install.sh
+          sh -n uninstall.sh
           sh -n scripts/test-install.sh
           sh -n scripts/test-install-mocks.sh
+          sh -n scripts/test-uninstall.sh
 
       - name: Run live installer tests
         if: ${{ matrix.shell == 'sh' }}
@@ -97,11 +99,15 @@ jobs:
         if: ${{ matrix.shell == 'sh' && matrix.run_mock_tests }}
         run: sh scripts/test-install-mocks.sh
 
+      - name: Run CLI uninstaller tests
+        if: ${{ matrix.shell == 'sh' }}
+        run: sh scripts/test-uninstall.sh
+
       - name: Validate PowerShell installer syntax
         if: ${{ matrix.shell == 'pwsh' }}
         shell: pwsh
         run: |
-          $scripts = @('install.ps1', 'scripts/test-install.ps1')
+          $scripts = @('install.ps1', 'uninstall.ps1', 'scripts/test-install.ps1', 'scripts/test-uninstall.ps1')
           foreach ($script in $scripts) {
             $tokens = $null
             $errors = $null
@@ -117,6 +123,11 @@ jobs:
         if: ${{ matrix.shell == 'pwsh' }}
         shell: pwsh
         run: ./scripts/test-install.ps1
+
+      - name: Run PowerShell CLI uninstaller tests
+        if: ${{ matrix.shell == 'pwsh' }}
+        shell: pwsh
+        run: ./scripts/test-uninstall.ps1
 
   check:
     name: Run
