@@ -542,6 +542,24 @@ fn make_openinference_test_subscriber(
     (subscriber, exporter)
 }
 
+fn make_gen_ai_test_subscriber(
+    scope: &str,
+) -> (
+    OpenTelemetrySubscriber,
+    opentelemetry_sdk::trace::InMemorySpanExporter,
+) {
+    let exporter = InMemorySpanExporterBuilder::new().build();
+    let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+        .with_simple_exporter(exporter.clone())
+        .build();
+    let subscriber = OpenTelemetrySubscriber::from_tracer_provider_with_type(
+        provider,
+        scope.to_string(),
+        OpenTelemetryType::GenAi,
+    );
+    (subscriber, exporter)
+}
+
 fn attr_map(attributes: &[KeyValue]) -> HashMap<String, String> {
     attributes
         .iter()
@@ -2420,6 +2438,91 @@ async fn codex_openinference_spans_match_shared_contract() {
             .values()
             .flat_map(|attributes| attributes.values())
             .all(|value| !value.contains("sessionEnd"))
+    );
+}
+
+#[tokio::test]
+async fn coding_agent_gen_ai_llm_spans_carry_conversation_identity() {
+    let _guard = PLUGIN_CONFIG_TEST_LOCK.lock().await;
+    let subscriber_name = "cli-coding-agent-gen-ai-conversation-test";
+    let _ = deregister_subscriber(subscriber_name);
+    let (subscriber, exporter) = make_gen_ai_test_subscriber("coding-agent-gen-ai-test-scope");
+    subscriber.register(subscriber_name).unwrap();
+    let manager = SessionManager::new(session_test_config());
+
+    let claude = manager
+        .start_llm(
+            &HeaderMap::new(),
+            LlmGatewayStart {
+                conversation_id: Some("claude-conversation".into()),
+                ..llm_start_with_messages_task("claude-session", "Inspect the repository.")
+            },
+        )
+        .await
+        .unwrap();
+    manager
+        .end_llm(
+            claude,
+            json!({
+                "model": "claude-test",
+                "content": [{"type": "text", "text": "Done."}],
+                "stop_reason": "end_turn"
+            }),
+            json!({}),
+        )
+        .await
+        .unwrap();
+
+    let codex = manager
+        .start_llm(
+            &HeaderMap::new(),
+            llm_start_with_responses_task("codex-session", "Inspect the repository."),
+        )
+        .await
+        .unwrap();
+    manager
+        .end_llm(
+            codex,
+            json!({
+                "id": "codex-response",
+                "model": "gpt-test",
+                "status": "completed",
+                "output": [{
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Done."}]
+                }]
+            }),
+            json!({}),
+        )
+        .await
+        .unwrap();
+
+    manager.close_all("test_shutdown").await.unwrap();
+    flush_subscribers().unwrap();
+    subscriber.force_flush().unwrap();
+    assert!(subscriber.deregister(subscriber_name).unwrap());
+
+    let spans = exporter.get_finished_spans().unwrap();
+    let conversations_by_model = spans
+        .iter()
+        .filter_map(|span| {
+            let attributes = attr_map(&span.attributes);
+            Some((
+                attributes.get("gen_ai.request.model")?.clone(),
+                attributes.get("gen_ai.conversation.id")?.clone(),
+            ))
+        })
+        .collect::<HashMap<_, _>>();
+    assert_eq!(
+        conversations_by_model
+            .get("claude-test")
+            .map(String::as_str),
+        Some("claude-conversation")
+    );
+    assert_eq!(
+        conversations_by_model.get("gpt-test").map(String::as_str),
+        Some("codex-session")
     );
 }
 
