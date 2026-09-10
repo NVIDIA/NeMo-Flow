@@ -27,6 +27,10 @@ function Assert-Contains([string]$Text, [string]$Expected) {
     Assert-True ($Text.Contains($Expected)) "expected '$Expected' in: $Text"
 }
 
+function Assert-NotContains([string]$Text, [string]$Unexpected) {
+    Assert-True (-not $Text.Contains($Unexpected)) "did not expect '$Unexpected' in: $Text"
+}
+
 function Invoke-Uninstaller {
     param(
         [string[]]$Arguments = @(),
@@ -84,6 +88,15 @@ try {
                     Assert-Contains $_.Exception.Message 'active managed daemon deployment'
                 }
             }
+            $DryRun = $true
+            $relay.CommandLine = "$destination daemon"
+            try {
+                Stop-ActiveRelayProcesses $destination
+                throw 'managed dry-run unexpectedly succeeded'
+            }
+            catch {
+                Assert-Contains $_.Exception.Message 'dry run would refuse removal'
+            }
             $relay.ExecutablePath = 'C:\other\nemo-relay.exe'
             $relay.CommandLine = 'C:\other\nemo-relay.exe daemon'
             Assert-True (@(Get-ActiveRelayShutdownTargets $destination -ManagedOnly).Count -eq 0) 'unrelated installation blocked uninstall'
@@ -92,7 +105,7 @@ try {
             $env:OS = $originalOS
         }
     }
-    $TestsRun += 6
+    $TestsRun += 7
 
     $TestsRun++
     Invoke-Uninstaller -Arguments @('-Help')
@@ -155,9 +168,10 @@ try {
                     if ($mode -eq 'force') { $arguments += '-Force' }
                     if ($mode -eq 'dry-run') { $arguments += '-DryRun' }
                     Invoke-Uninstaller -Arguments $arguments -InputText 'y'
-                    if ($mode -eq 'dry-run') { Assert-Success } else { Assert-Failure }
+                    Assert-Failure
                     Assert-Contains $RunOutput 'active managed daemon deployment'
                     Assert-Contains $RunOutput '-Force cannot override'
+                    Assert-NotContains $RunOutput 'Would remove NeMo Relay CLI'
                     Assert-True (-not $ManagedProcess.HasExited) 'managed process was terminated'
                     Assert-True (Test-Path -LiteralPath $ManagedDestination) 'managed binary was removed'
                 }
@@ -187,8 +201,9 @@ try {
 
             $TestsRun++
             Invoke-Uninstaller -Arguments @('-InstallDir', $ActiveDir, '-DryRun')
-            Assert-Success
-            Assert-Contains $RunOutput 'Dry run would refuse removal until these processes exit.'
+            Assert-Failure
+            Assert-Contains $RunOutput 'dry run would refuse removal until these processes exit'
+            Assert-NotContains $RunOutput 'Would remove NeMo Relay CLI'
             Assert-True (-not $ActiveProcess.HasExited) 'dry run terminated the active Relay process'
             Assert-True (Test-Path -LiteralPath $ActiveDestination -PathType Leaf) 'dry run removed the active binary'
 

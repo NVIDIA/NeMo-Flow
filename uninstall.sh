@@ -233,8 +233,7 @@ check_managed_relay_processes() {
             *" daemon "*)
                 describe_process "$relay_pid" >&2
                 if [ "$dry_run" -eq 1 ]; then
-                    printf '%s\n' 'Dry run would refuse removal: active managed daemon deployment; stop it through its administrative lifecycle first. --force cannot override this restriction.' >&2
-                    return 0
+                    error 'dry run would refuse removal: active managed daemon deployment; stop it through its administrative lifecycle first. --force cannot override this restriction'
                 fi
                 error 'active managed daemon deployment; stop it through its administrative lifecycle first. --force cannot override this restriction'
                 ;;
@@ -252,8 +251,7 @@ stop_active_relay_processes() {
         describe_process "$active_pid" >&2
     done
     if [ "$dry_run" -eq 1 ]; then
-        printf '%s\n' 'Dry run would refuse removal until these processes exit.' >&2
-        return 0
+        error 'dry run would refuse removal until these processes exit'
     fi
     if [ "$force" -eq 0 ]; then
         error "refusing to uninstall while active Relay processes exist; close the coding agents and retry, or rerun with --force to confirm each process shutdown"

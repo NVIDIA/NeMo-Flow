@@ -210,6 +210,9 @@ coding-agent integrations.
 `--force` is intentionally interactive; it does not terminate a detected
 coding-agent process without its own confirmation.
 
+A dry run exits nonzero when removal would be refused because Relay processes
+are active.
+
 Active managed daemon processes using the selected binary block removal even
 with `--force` or `-Force`. This includes the broker, `daemon mcp`,
 `daemon worker`, and `daemon hook`. Stop the managed deployment through its

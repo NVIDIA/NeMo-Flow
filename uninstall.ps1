@@ -183,8 +183,7 @@ function Assert-NoManagedRelayProcesses([string]$Destination) {
         }
         $message = 'active managed daemon deployment; stop it through its administrative lifecycle first. -Force cannot override this restriction'
         if ($DryRun) {
-            [Console]::Error.WriteLine("Dry run would refuse removal: $message")
-            return
+            Fail "dry run would refuse removal: $message"
         }
         Fail $message
     }
@@ -202,8 +201,7 @@ function Stop-ActiveRelayProcesses([string]$Destination) {
         [Console]::Error.WriteLine((Format-ProcessDescription $process))
     }
     if ($DryRun) {
-        [Console]::Error.WriteLine('Dry run would refuse removal until these processes exit.')
-        return
+        Fail 'dry run would refuse removal until these processes exit'
     }
     if (-not $Force) {
         Fail 'refusing to uninstall while active Relay processes exist; close the coding agents and retry, or rerun with -Force to confirm each process shutdown'

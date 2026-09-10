@@ -93,6 +93,15 @@ assert_contains() {
     return 0
 }
 
+assert_not_contains() {
+    assert_actual=$1
+    assert_unexpected=$2
+    if printf '%s\n' "$assert_actual" | grep -F -- "$assert_unexpected" >/dev/null; then
+        fail "did not expect '$assert_unexpected' in: $assert_actual"
+    fi
+    return 0
+}
+
 build_relay_fixture() {
     fixture_path=$1
     cc -x c -o "$fixture_path" - <<'EOF'
@@ -192,6 +201,12 @@ test_active_relay_process_refuses_removal() {
     assert_contains "$run_output" '--force requires an interactive terminal'
     [ -e "$relay_binary" ] || fail 'non-interactive force removed an active binary'
 
+    run_command sh "$uninstaller" --install-dir "$install_dir" --dry-run
+    assert_failure
+    assert_contains "$run_output" 'dry run would refuse removal until these processes exit'
+    assert_not_contains "$run_output" 'Would remove NeMo Relay CLI'
+    [ -e "$relay_binary" ] || fail 'dry run removed an active binary'
+
     kill "$session_pid" 2>/dev/null || true
     wait "$session_pid" 2>/dev/null || true
     active_session_pid=""
@@ -214,13 +229,10 @@ test_managed_daemon_refuses_force() {
         sleep 1
         for option in '' --force --dry-run; do
             run_command sh "$uninstaller" --install-dir "$install_dir" $option
-            if [ "$option" = --dry-run ]; then
-                assert_success
-            else
-                assert_failure
-            fi
+            assert_failure
             assert_contains "$run_output" 'active managed daemon deployment'
             assert_contains "$run_output" '--force cannot override'
+            assert_not_contains "$run_output" 'Would remove NeMo Relay CLI'
             [ -e "$relay_binary" ] || fail 'managed binary was removed'
             kill -0 "$active_session_pid" || fail 'managed process was terminated'
         done
