@@ -108,6 +108,34 @@ fn scope_lineage_retains_active_contexts_and_preserves_root_trace_id() {
 }
 
 #[test]
+fn scope_lineage_synthesizes_remote_context_only_for_imported_parents() {
+    let lineage = ScopeLineage::new();
+    let root_uuid = Uuid::now_v7();
+    let imported_parent_uuid = Uuid::now_v7();
+    let mut imported = scope_with_parent(
+        Uuid::now_v7(),
+        Some(imported_parent_uuid),
+        ScopeCategory::Start,
+    );
+    imported.set_propagation_root_uuid(Some(root_uuid));
+    imported.set_propagation_parent_uuid(Some(imported_parent_uuid));
+
+    let remote_context = lineage
+        .parent_context(&imported)
+        .expect("imported parent context");
+    assert!(remote_context.is_remote());
+    assert_eq!(remote_context.trace_id(), relay_trace_id(root_uuid));
+    assert_eq!(
+        remote_context.span_id(),
+        relay_span_id(imported_parent_uuid)
+    );
+
+    let mut local = scope_with_parent(Uuid::now_v7(), Some(Uuid::now_v7()), ScopeCategory::Start);
+    local.set_propagation_root_uuid(Some(Uuid::now_v7()));
+    assert!(lineage.parent_context(&local).is_none());
+}
+
+#[test]
 fn scope_lineage_reuses_completed_parent_within_ttl_and_expires_after_boundary() {
     let mut lineage = ScopeLineage::new();
     let parent = Uuid::now_v7();

@@ -250,6 +250,11 @@ impl ScopeStack {
             .or_else(|| (!self.is_rootless_propagation).then(|| self.root_uuid()))
     }
 
+    /// Return the synthetic parent imported from a rooted propagation context.
+    pub(crate) fn event_propagation_parent_uuid(&self) -> Option<Uuid> {
+        self.propagated_parent_uuid
+    }
+
     /// Whether `uuid` is the synthetic parent imported from propagation.
     pub fn is_propagated_parent(&self, uuid: Uuid) -> bool {
         self.propagated_parent_uuid == Some(uuid)
