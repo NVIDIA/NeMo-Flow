@@ -10,6 +10,25 @@ Use this page to plan an upgrade to NeMo Relay 0.9.
 
 ## Upgrade to NeMo Relay 0.9
 
+### Tool execution intercept callbacks receive context
+
+Relay 0.9 changes tool execution intercept callbacks to receive a
+`ToolExecutionContext` and the continuation instead of separate tool-name,
+argument, and continuation parameters. Migrate Rust, Python, and Go callbacks
+from `(tool_name, args, next)` to `(context, next)`. Migrate Node.js and public
+C callbacks from their argument-only shape to the context shape.
+
+Forward `context.args` to the continuation and read the tool name and optional
+provider-issued identifier from the context. Node.js exposes these fields as
+`toolName`, `args`, and `toolCallId`; the public C callback receives
+`tool_name`, `args`, and `tool_call_id` in `context_json`.
+
+Native and worker plugins that register this context-aware surface must declare
+`compat.relay = ">=0.9,<1.0"` or another range that excludes Relay 0.8. Native
+plugins use ABI v5 for this callback registration. See
+[Tool Execution Intercept Outcomes](/reference/tool-execution-intercept-outcomes#tool-execution-context)
+for the complete binding contract and examples.
+
 ### Plugin initialization and validation has unified APIs
 
 Plugin-host APIs changed in NeMo Relay 0.9. Earlier global initialization,
