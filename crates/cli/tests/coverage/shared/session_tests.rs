@@ -6,6 +6,9 @@ use nemo_relay::api::event::{Event, ScopeCategory};
 use nemo_relay::api::llm::{LlmCallExecuteParams, llm_call_execute};
 use nemo_relay::api::runtime::EventSubscriberFn;
 use nemo_relay::api::subscriber::{deregister_subscriber, flush_subscribers, register_subscriber};
+use nemo_relay::codec::resolve::{
+    ProviderSurface, request_codec as build_request_codec, response_codec as build_response_codec,
+};
 use nemo_relay::observability::OpenTelemetryType;
 use nemo_relay::observability::atof::{AtofExporter, AtofExporterConfig, AtofExporterMode};
 use nemo_relay::observability::otel::OpenTelemetrySubscriber;
@@ -572,6 +575,36 @@ fn attr_map(attributes: &[KeyValue]) -> HashMap<String, String> {
             )
         })
         .collect()
+}
+
+fn unique_span_attributes_by_model(
+    spans: &[opentelemetry_sdk::trace::SpanData],
+    model_attribute: &str,
+    expected_models: &[&str],
+) -> HashMap<String, HashMap<String, String>> {
+    let modeled_spans = spans
+        .iter()
+        .filter_map(|span| {
+            let attributes = attr_map(&span.attributes);
+            Some((attributes.get(model_attribute)?.clone(), attributes))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        modeled_spans.len(),
+        expected_models.len(),
+        "expected exactly one modeled LLM span for each model in {model_attribute}"
+    );
+    for expected_model in expected_models {
+        assert_eq!(
+            modeled_spans
+                .iter()
+                .filter(|(model, _)| model == expected_model)
+                .count(),
+            1,
+            "expected exactly one {expected_model} LLM span in {model_attribute}"
+        );
+    }
+    modeled_spans.into_iter().collect()
 }
 
 fn read_atof_events(path: &Path) -> Vec<Value> {
@@ -2506,24 +2539,21 @@ async fn coding_agent_gen_ai_llm_spans_carry_conversation_identity() {
     assert!(subscriber.deregister(subscriber_name).unwrap());
 
     let spans = exporter.get_finished_spans().unwrap();
-    let conversations_by_model = spans
-        .iter()
-        .filter_map(|span| {
-            let attributes = attr_map(&span.attributes);
-            Some((
-                attributes.get("gen_ai.request.model")?.clone(),
-                attributes.get("gen_ai.conversation.id")?.clone(),
-            ))
-        })
-        .collect::<HashMap<_, _>>();
+    let attributes_by_model = unique_span_attributes_by_model(
+        &spans,
+        "gen_ai.request.model",
+        &["claude-test", "gpt-test"],
+    );
     assert_eq!(
-        conversations_by_model
-            .get("claude-test")
+        attributes_by_model["claude-test"]
+            .get("gen_ai.conversation.id")
             .map(String::as_str),
         Some("claude-conversation")
     );
     assert_eq!(
-        conversations_by_model.get("gpt-test").map(String::as_str),
+        attributes_by_model["gpt-test"]
+            .get("gen_ai.conversation.id")
+            .map(String::as_str),
         Some("codex-session")
     );
 }
@@ -2636,35 +2666,30 @@ async fn managed_gateway_typed_projections_carry_merged_conversation_identity() 
     );
 
     let gen_ai_spans = gen_ai_exporter.get_finished_spans().unwrap();
-    let conversations_by_model = gen_ai_spans
-        .iter()
-        .filter_map(|span| {
-            let attributes = attr_map(&span.attributes);
-            Some((
-                attributes.get("gen_ai.request.model")?.clone(),
-                attributes.get("gen_ai.conversation.id")?.clone(),
-            ))
-        })
-        .collect::<HashMap<_, _>>();
+    let gen_ai_by_model = unique_span_attributes_by_model(
+        &gen_ai_spans,
+        "gen_ai.request.model",
+        &["claude-test", "gpt-test"],
+    );
     assert_eq!(
-        conversations_by_model
-            .get("claude-test")
+        gen_ai_by_model["claude-test"]
+            .get("gen_ai.conversation.id")
             .map(String::as_str),
         Some("managed-claude-conversation")
     );
     assert_eq!(
-        conversations_by_model.get("gpt-test").map(String::as_str),
+        gen_ai_by_model["gpt-test"]
+            .get("gen_ai.conversation.id")
+            .map(String::as_str),
         Some("managed-codex-session")
     );
 
     let full_spans = full_exporter.get_finished_spans().unwrap();
-    let full_by_model = full_spans
-        .iter()
-        .filter_map(|span| {
-            let attributes = attr_map(&span.attributes);
-            Some((attributes.get("nemo_relay.model_name")?.clone(), attributes))
-        })
-        .collect::<HashMap<_, _>>();
+    let full_by_model = unique_span_attributes_by_model(
+        &full_spans,
+        "nemo_relay.model_name",
+        &["claude-test", "gpt-test"],
+    );
     let full_claude = &full_by_model["claude-test"];
     assert_eq!(
         full_claude
@@ -2700,13 +2725,11 @@ async fn managed_gateway_typed_projections_carry_merged_conversation_identity() 
     assert!(!full_codex.contains_key("nemo_relay.start.metadata.conversation_id"));
 
     let openinference_spans = openinference_exporter.get_finished_spans().unwrap();
-    let openinference_by_model = openinference_spans
-        .iter()
-        .filter_map(|span| {
-            let attributes = attr_map(&span.attributes);
-            Some((attributes.get("llm.model_name")?.clone(), attributes))
-        })
-        .collect::<HashMap<_, _>>();
+    let openinference_by_model = unique_span_attributes_by_model(
+        &openinference_spans,
+        "llm.model_name",
+        &["claude-test", "gpt-test"],
+    );
     let openinference_claude = &openinference_by_model["claude-test"];
     assert_eq!(
         openinference_claude
@@ -2753,9 +2776,18 @@ async fn execute_prepared_llm(manager: &SessionManager, prep: GatewayCallPrep, r
         metadata,
         model_name,
         owner_subagent_id: _,
-        bypass_managed_pipeline: _,
+        bypass_managed_pipeline,
         session_finish,
     } = prep;
+    assert!(
+        !bypass_managed_pipeline,
+        "managed execution helper must not emit an LLM span for a bypassed gateway call"
+    );
+    let surface = match provider_name.as_str() {
+        "anthropic.messages" => ProviderSurface::AnthropicMessages,
+        "openai.responses" => ProviderSurface::OpenAIResponses,
+        provider => panic!("unsupported managed test provider: {provider}"),
+    };
     let func = Arc::new(move |_request| {
         let response = response.clone();
         Box::pin(async move { Ok(response) }) as _
@@ -2768,6 +2800,8 @@ async fn execute_prepared_llm(manager: &SessionManager, prep: GatewayCallPrep, r
         .attributes(attributes)
         .metadata(metadata)
         .model_name_opt(model_name)
+        .codec(build_request_codec(surface))
+        .response_codec(build_response_codec(surface))
         .build();
     TASK_SCOPE_STACK
         .scope(scope_stack, async move { llm_call_execute(params).await })
