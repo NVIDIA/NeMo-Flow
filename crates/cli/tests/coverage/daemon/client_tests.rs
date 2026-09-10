@@ -2,6 +2,84 @@
 // SPDX-License-Identifier: Apache-2.0
 use super::*;
 
+#[tokio::test]
+#[allow(
+    clippy::result_large_err,
+    reason = "Tungstenite fixes the upgrade callback error type"
+)]
+async fn secure_control_connects_without_a_preinstalled_crypto_provider() {
+    const ORIGIN_ENV: &str = "NEMO_RELAY_TEST_FRESH_WSS_ORIGIN";
+    if let Ok(origin) = std::env::var(ORIGIN_ENV) {
+        assert!(rustls::crypto::CryptoProvider::get_default().is_none());
+        for role in [ComponentRole::Mcp, ComponentRole::Worker] {
+            Client::default().connect(&origin, role).await.unwrap();
+        }
+        return;
+    }
+
+    let certificate = rcgen::generate_simple_self_signed(vec!["127.0.0.1".into()]).unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let certificate_path = temp.path().join("daemon.pem");
+    std::fs::write(&certificate_path, certificate.cert.pem()).unwrap();
+    let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_no_client_auth()
+    .with_single_cert(
+        vec![certificate.cert.der().clone()],
+        rustls::pki_types::PrivateKeyDer::Pkcs8(certificate.key_pair.serialize_der().into()),
+    )
+    .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("https://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+        for path in [MCP_SOCKET_PATH, WORKER_SOCKET_PATH] {
+            let (stream, _) = listener.accept().await.unwrap();
+            let stream = acceptor.accept(stream).await.unwrap();
+            tokio_tungstenite::accept_hdr_async(
+                stream,
+                |request: &tokio_tungstenite::tungstenite::handshake::server::Request, response| {
+                    assert_eq!(request.uri().path(), path);
+                    Ok(response)
+                },
+            )
+            .await
+            .unwrap();
+        }
+    });
+    // Isolate the process-wide provider from other tests and trust only this fixture's CA.
+    let output = tokio::time::timeout(
+        Duration::from_secs(20),
+        tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "daemon::common::socket::tests::secure_control_connects_without_a_preinstalled_crypto_provider",
+                "--nocapture",
+            ])
+            .env(ORIGIN_ENV, origin)
+            .env("SSL_CERT_FILE", certificate_path)
+            .env("SSL_CERT_DIR", temp.path())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .expect("fresh WSS client timed out")
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "fresh WSS client failed: {}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    tokio::time::timeout(Duration::from_secs(2), server)
+        .await
+        .expect("both control roles must complete their WSS upgrade")
+        .unwrap();
+}
+
 #[tokio::test(start_paused = true)]
 async fn reconnect_attempts_are_bounded_by_one_monotonic_grace_window() {
     let started = tokio::time::Instant::now();

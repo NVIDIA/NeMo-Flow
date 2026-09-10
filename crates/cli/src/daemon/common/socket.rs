@@ -90,6 +90,9 @@ impl Client {
         let config = WebSocketConfig::default()
             .max_message_size(Some(MAX_CONTROL_BODY_BYTES))
             .max_frame_size(Some(MAX_CONTROL_BODY_BYTES));
+        // Multiple rustls backends are enabled in the workspace. Select Relay's provider
+        // before the WSS connector builds its TLS configuration, as pooled_client does.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let (socket, _) = tokio::time::timeout(
             ATTEMPT_TIMEOUT,
             tokio_tungstenite::connect_async_with_config(url.as_str(), Some(config), true),
