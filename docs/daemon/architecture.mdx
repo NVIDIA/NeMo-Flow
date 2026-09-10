@@ -53,9 +53,7 @@ The harness and hook forwarder do not contact a worker directly.
 
 MCP and worker processes each open a persistent WebSocket control session to the
 daemon. The daemon pushes route decisions and drain commands on those sessions.
-Command replies and pushed events share the socket, while HTTP streams use
-separate connections. An idle control-event listener does not delay commands or
-their acknowledgments.
+Model and hook traffic use separate HTTP connections.
 
 ## Local Deployment
 

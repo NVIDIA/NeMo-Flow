@@ -492,7 +492,7 @@ async fn raw_mcp(origin: &str) -> RawSocket {
         responder: challenge.daemon,
         initiator_instance_id: "raw".into(),
         responder_instance_id: challenge.daemon_instance_id,
-        selected_protocol: crate::daemon::common::protocol::PROTOCOL_V2,
+        selected_protocol: crate::daemon::common::protocol::PROTOCOL_V1,
         initiator_public_identity: identity.public_identity(),
         responder_public_identity: challenge.daemon_public_identity,
         initiator_fingerprint: identity.fingerprint(),

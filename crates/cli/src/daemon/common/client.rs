@@ -1,6 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//! Signed authentication over the v2 control socket.
+//! Signed authentication over the daemon control socket.
 use super::address::daemon_url;
 use super::control::{
     ChallengeRequest, ChallengeResponse, RegistrationProof, descriptor, fresh_nonce,

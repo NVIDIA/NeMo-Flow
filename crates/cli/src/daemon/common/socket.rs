@@ -16,8 +16,8 @@ use std::time::Duration;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio_tungstenite::tungstenite::{Message, protocol::WebSocketConfig};
 
-pub(crate) const MCP_SOCKET_PATH: &str = "/_nemo-relay/control/v2/mcp";
-pub(crate) const WORKER_SOCKET_PATH: &str = "/_nemo-relay/control/v2/worker";
+pub(crate) const MCP_SOCKET_PATH: &str = "/_nemo-relay/control/v1/mcp";
+pub(crate) const WORKER_SOCKET_PATH: &str = "/_nemo-relay/control/v1/worker";
 pub(crate) const QUEUE_CAPACITY: usize = 1024;
 pub(crate) const GRACE: Duration = Duration::from_secs(30);
 pub(crate) const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -118,11 +118,7 @@ impl Client {
         )
         .await
         .map_err(|_| failure("control connection timed out"))?
-        .map_err(|error| {
-            failure(format!(
-                "control protocol v2 WebSocket connection failed: {error}"
-            ))
-        })?;
+        .map_err(|error| failure(format!("daemon WebSocket connection failed: {error}")))?;
         let (send, mut requests) = mpsc::channel::<PendingRequest>(QUEUE_CAPACITY);
         let (events, receive) = mpsc::channel(QUEUE_CAPACITY);
         let disconnected = Arc::new(std::sync::Mutex::new(None));

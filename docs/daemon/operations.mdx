@@ -122,8 +122,7 @@ or activation grants in support reports.
 | Remote worker advertises loopback | Wrong address override or network route | Use a concrete client IPv4 address reachable from the server. |
 | First request works but large streams stall | Buffering proxy or blocked provider path | Check the full request path and streaming requirements; compare a direct private-network deployment. |
 | Startup fails after moving service accounts | Signing identity or state directory changed | Restore the original state and ownership; verify any intended identity change out of band. |
-| Control connection fails through a proxy | WebSocket upgrade or idle-session handling | Allow both v2 upgrade paths and check [proxy requirements](/daemon/reference#configure-a-trusted-reverse-proxy). |
-| Control protocol version is rejected | Incompatible daemon and client binaries | Install v2-compatible daemon, MCP, and worker binaries together; there is no v1 fallback. |
+| Control connection fails through a proxy | WebSocket upgrade or idle-session handling | Allow Relay WebSocket connections and check [proxy requirements](/daemon/reference#configure-a-trusted-reverse-proxy). |
 | Session exits after a network outage | The 30-second reconnect grace expired | Restore connectivity and start a fresh harness; failed reconnect attempts do not extend grace. |
 | Many clients fail to enroll together | Challenge admission limits | Stagger client startup; investigate shared transport-peer limits. |
 | Hooks run twice | Personal and managed integrations both loaded | Remove the duplicate Relay integration and restart the harness. |
@@ -175,9 +174,8 @@ a local token file revokes a binding from the running broker.
 <Step title="Prepare the Upgrade">
 
 Schedule a maintenance window. Save the approved binary version, service
-definition, configuration, and separately trusted bundle digest. Check that the
-daemon and every client's MCP and worker binaries support control protocol v2.
-A v1/v2 mixed deployment cannot recover through a legacy control endpoint.
+definition, configuration, and separately trusted bundle digest. Verify that the
+replacement daemon and client binaries are compatible before rollout.
 
 </Step>
 
@@ -214,10 +212,8 @@ verification with one client before reopening the deployment.
 
 For rollback, stop affected processes and restore the previous verified binary
 and compatible service/configuration files. Keep the same persistent identities
-and validate the same bundle. Different binary versions can share a worker only
-when their protocol ranges and capabilities are compatible; a version string
-alone is not the compatibility check. A rollback across the v2 boundary requires
-rolling back all daemon and client components together.
+and validate the same bundle. Restore a compatible set of daemon and client
+binaries together.
 
 Use a separately named artifact for an incompatible managed-settings change.
 When a plugin configuration changes, restart affected harness sessions so a fresh

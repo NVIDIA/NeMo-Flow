@@ -7,7 +7,7 @@ position: 10
 {/* SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0 */}
 
-Use this page for exact command and protocol behavior. For step-by-step setup,
+Use this page for command, connection, and lifecycle behavior. For step-by-step setup,
 start with [Daemon](/daemon/about).
 
 ## Start the Daemon
@@ -202,10 +202,7 @@ the worker launch directive.
 
 ## Understand Broker Identity and Lifecycle
 
-Each daemon component proves a signed `nemo-relay` service identity and role,
-and advertises its supported protocol range and capabilities. The binary
-version is diagnostic metadata, not a route key or a compatibility decision.
-Different compatible Relay binary versions can therefore share a worker.
+The daemon authenticates MCP clients and workers using signed Relay identities.
 
 Each machine-user identity has an owner-private Ed25519 key. The public-key
 digest is the route fingerprint. MCP registration also binds the digest of
@@ -215,9 +212,7 @@ client trust-on-first-use pins the daemon identity to the normalized daemon
 origin.
 
 The broker accepts a worker only when it proves both the single-use activation
-grant and the same machine-user identity as the MCP client. Challenges expire,
-are single use, and are replay protected. Later control messages use scoped
-session credentials, request IDs, sequence numbers, and body hashes.
+grant and the same machine-user identity as the MCP client.
 
 One fingerprint moves through these broker states:
 
@@ -230,24 +225,10 @@ One fingerprint moves through these broker states:
 | `PassThrough` | The daemon forwards authenticated requests directly to providers.           |
 | `Recovering`  | One connected MCP is nominated to replace a failed worker.                  |
 
-MCP clients and workers each open an authenticated WebSocket control session to
-the daemon. Protocol v2 carries registration, recovery, readiness, launch
-instructions, release, and drain messages. Upgrade the daemon, MCP clients, and
-workers together; v1 HTTP control endpoints are no longer supported. Provider
-and hook requests still use HTTP, and MCP clients still serve stdio locally.
-
-The upgrade paths are `/_nemo-relay/control/v2/mcp` and
-`/_nemo-relay/control/v2/worker`. Clients derive `ws` or `wss` from the configured
-HTTP or HTTPS daemon origin. Each new connection authenticates before it can
-change state. Commands carry request IDs and receive explicit acknowledgments;
-pushed directives are received independently of command replies. A replaced
-connection cannot invalidate its successor. Each control command also has a
-five-second deadline, including time waiting to be sent.
-
-Control messages are limited to 256 KiB. Outbound queues and client event queues
-hold at most 1,024 messages; clients also bound outstanding replies to 1,024. Queue
-overflow closes the connection and triggers normal recovery. These limits are
-independent of HTTP body streaming and have no CLI configuration.
+MCP clients and workers each keep a WebSocket connection to the daemon for
+registration, route updates, readiness, shutdown, and recovery. Clients derive
+`ws` or `wss` from the configured HTTP or HTTPS daemon origin. Provider and hook
+requests use HTTP, and MCP clients serve stdio locally.
 
 Connected sessions do not require lease renewals. Strictly loopback connections
 send no periodic pings. Both actual socket endpoints must be loopback; the
@@ -346,8 +327,8 @@ across users as well as keeping the coding-agent artifacts byte-identical.
 A reverse proxy in front of the daemon becomes part of the streaming path.
 Configure it to:
 
-- Allow WebSocket upgrades on `/_nemo-relay/control/v2/mcp` and
-  `/_nemo-relay/control/v2/worker`, including bidirectional frames after upgrade.
+- Allow WebSocket upgrades under `/_nemo-relay/control/`, including
+  bidirectional frames after upgrade.
 - Preserve WebSocket ping and pong frames. For a non-loopback daemon connection,
   the daemon pings every 30 seconds and requires its matching pong within 10
   seconds. Set proxy idle limits above that interval with enough margin.

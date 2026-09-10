@@ -281,7 +281,7 @@ async fn issue_challenge(
     {
         return control_message(
             StatusCode::UPGRADE_REQUIRED,
-            "daemon control protocol v2 is required; upgrade all peers together",
+            "daemon and client are incompatible; use compatible Relay binaries",
         );
     }
     if !has_required_transport_capabilities(&request.initiator) {
