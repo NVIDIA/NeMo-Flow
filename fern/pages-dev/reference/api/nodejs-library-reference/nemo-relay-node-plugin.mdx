@@ -515,11 +515,11 @@ export declare function ComponentSpec(
 
 Initialize the core-owned static and dynamic plugin host.
 
-Resolves programmatic config with either an explicit or discovered user file, then the system configuration, and activates one owned lifetime.
+Resolves an explicit or discovered user file with the system configuration, then applies programmatic config and activates one owned lifetime.
 
 **Parameters**
 
-- `config`: Lowest-precedence programmatic configuration.
+- `config`: Programmatic configuration. It overrides file values.
 - `additionalPluginsToml`: Optional explicit `plugins.toml` layer.
 
 **Returns**
@@ -542,7 +542,7 @@ Resolves the same layered configuration and trust policy used by activation whil
 
 **Parameters**
 
-- `config`: Lowest-precedence programmatic configuration.
+- `config`: Programmatic configuration. It overrides file values.
 - `additionalPluginsToml`: Optional explicit `plugins.toml` layer.
 
 **Returns**

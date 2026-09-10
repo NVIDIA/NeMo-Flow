@@ -32,6 +32,9 @@ navigation:
   - page: About
     path: ../pages-dev/configure-plugins/about.mdx
     slug: about
+  - page: Configure and Initialize Plugins
+    path: ../pages-dev/configure-plugins/initialize-plugins.mdx
+    slug: initialize-plugins
   - folder: ../pages-dev/configure-plugins/observability
     title: Observability
     title-source: frontmatter
