@@ -84,11 +84,15 @@ trusted_public_keys = ["ed25519:<base64-public-key>"]
 ```
 
 `startup = "required"` makes lifecycle preflight failures for an enabled plugin
-fatal. The default is `optional`, which skips that preflight. A later native or
-worker load or activation failure still stops gateway startup; correct or
-disable the plugin to start without it. `attestation` accepts `integrity_only`,
-`signature_if_present`, or `signature_required`; integrity verification always
-checks the declared artifact digest.
+fatal. When a policy field is omitted, the host defaults to `startup =
+"required"` and `attestation = "signature_required"`. An unsigned dynamic
+plugin is therefore refused unless you sign its artifact and configure a
+trusted public key, or explicitly select `integrity_only` or
+`signature_if_present`. A later native or worker load or activation failure
+still stops gateway startup; correct or disable the plugin to start without it.
+`attestation` accepts `integrity_only`, `signature_if_present`, or
+`signature_required`; integrity verification always checks the declared
+artifact digest.
 
 Use `startup = "required"` when failed integrity or signature verification must
 prevent worker startup. An optional trust failure records failed lifecycle

@@ -11,7 +11,19 @@ upgrade actions as they are identified during the 0.9 development cycle.
 
 ## Upgrade to NeMo Relay 0.9
 
-No migration actions have been recorded for NeMo Relay 0.9 yet.
+### Dynamic-plugin attestation is enforced by the core host
+
+NeMo Relay 0.9 evaluates dynamic-plugin attestation in the core host for every
+embedding API, not only through CLI lifecycle commands. When
+`[plugins.policy.defaults]` omits these fields, the effective policy is
+`startup = "required"` and `attestation = "signature_required"`.
+
+An unsigned plugin that activated on 0.8 can therefore be refused during 0.9
+startup. Sign its artifact and configure `trusted_public_keys`, or explicitly
+set `attestation = "integrity_only"` or `"signature_if_present"` under
+`[plugins.policy.defaults]` when that trust posture is appropriate. Validate
+the resolved policy and artifact evidence before deployment with
+`nemo-relay plugins validate <plugin-id>`.
 
 ## Related Release Information
 

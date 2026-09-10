@@ -95,7 +95,9 @@ impl DynamicPluginTrustFailure {
                 path.display()
             ),
             Self::MissingSignature => format!(
-                "dynamic plugin '{plugin_id}' requires integrity.signature under host policy"
+                "dynamic plugin '{plugin_id}' requires integrity.signature under host policy; \
+                 sign the artifact and configure trusted_public_keys, or set attestation to \
+                 'integrity_only' or 'signature_if_present' under [plugins.policy.defaults]"
             ),
             Self::MissingTrustedKeys => format!(
                 "dynamic plugin '{plugin_id}' requires signature verification, but no trusted_public_keys are configured in host policy"
