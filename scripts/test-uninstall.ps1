@@ -159,7 +159,7 @@ try {
             Copy-Item -LiteralPath $env:ComSpec -Destination $ManagedDestination
             # Keep a real executable alive with the managed command tokens in argv.
             $ManagedProcess = Start-Process -FilePath $ManagedDestination -ArgumentList @(
-                '/d', '/c', "timeout /t 30 /nobreak >NUL & rem $role"
+                '/d', '/c', "ping -n 31 127.0.0.1 >NUL & rem $role"
             ) -PassThru
             try {
                 Start-Sleep -Milliseconds 500
