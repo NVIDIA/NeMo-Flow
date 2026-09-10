@@ -558,13 +558,19 @@ fn build_atof_config(
 
 static NEXT_STREAM_ID: AtomicU64 = AtomicU64::new(0);
 
-type StreamSender = tokio::sync::mpsc::UnboundedSender<FlowResult<Json>>;
+struct StreamEnvelope {
+    item: FlowResult<Json>,
+    _permit: Option<tokio::sync::OwnedSemaphorePermit>,
+}
+
+type StreamSender = tokio::sync::mpsc::UnboundedSender<StreamEnvelope>;
 type RustJsonStream = LlmJsonStream;
 
 struct StreamChannel {
     sender: StreamSender,
     cancelled: AtomicBool,
     closed: tokio::sync::watch::Sender<Option<std::result::Result<(), String>>>,
+    capacity: Arc<tokio::sync::Semaphore>,
 }
 
 static STREAM_CHANNELS: std::sync::LazyLock<StdMutex<HashMap<u64, Arc<StreamChannel>>>> =
@@ -581,6 +587,7 @@ fn register_stream_channel(
             sender: tx,
             cancelled: AtomicBool::new(false),
             closed,
+            capacity: Arc::new(tokio::sync::Semaphore::new(LLM_STREAM_BRIDGE_CAPACITY)),
         }),
     );
     closed_rx
@@ -664,7 +671,7 @@ pub(crate) fn llm_stream_from_rust_stream(rust_stream: RustJsonStream) -> LlmStr
 }
 
 struct NodePushStream {
-    receiver: tokio_stream::wrappers::UnboundedReceiverStream<FlowResult<Json>>,
+    receiver: tokio_stream::wrappers::UnboundedReceiverStream<StreamEnvelope>,
     stream_id: u64,
     closed: tokio::sync::watch::Receiver<Option<std::result::Result<(), String>>>,
 }
@@ -673,7 +680,11 @@ impl Stream for NodePushStream {
     type Item = FlowResult<Json>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Pin::new(&mut self.receiver).poll_next(cx)
+        match Pin::new(&mut self.receiver).poll_next(cx) {
+            Poll::Ready(Some(envelope)) => Poll::Ready(Some(envelope.item)),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
     }
 }
 
@@ -709,10 +720,45 @@ impl LlmStreamInner for NodePushStream {
 pub fn push_stream_chunk(stream_id: f64, chunk: Json) -> bool {
     let id = stream_id as u64;
     if let Some(channel) = STREAM_CHANNELS.lock().unwrap().get(&id) {
-        !channel.cancelled.load(Ordering::Acquire) && channel.sender.send(Ok(chunk)).is_ok()
+        !channel.cancelled.load(Ordering::Acquire)
+            && channel
+                .sender
+                .send(StreamEnvelope {
+                    item: Ok(chunk),
+                    _permit: None,
+                })
+                .is_ok()
     } else {
         false
     }
+}
+
+/// Push a chunk while applying bounded backpressure to a JavaScript producer.
+///
+/// Resolves to `false` when the consumer has closed or cancelled the stream.
+#[napi]
+pub async fn push_stream_chunk_async(stream_id: f64, chunk: Json) -> bool {
+    let id = stream_id as u64;
+    let channel = STREAM_CHANNELS.lock().unwrap().get(&id).cloned();
+    let Some(channel) = channel else {
+        return false;
+    };
+    if channel.cancelled.load(Ordering::Acquire) {
+        return false;
+    }
+    let Ok(permit) = channel.capacity.clone().acquire_owned().await else {
+        return false;
+    };
+    if channel.cancelled.load(Ordering::Acquire) {
+        return false;
+    }
+    channel
+        .sender
+        .send(StreamEnvelope {
+            item: Ok(chunk),
+            _permit: Some(permit),
+        })
+        .is_ok()
 }
 
 /// Signal that a stream is complete. Drops the sender so the Rust
@@ -721,6 +767,24 @@ pub fn push_stream_chunk(stream_id: f64, chunk: Json) -> bool {
 pub fn end_stream(env: Env, stream_id: f64) -> napi::Result<()> {
     let id = stream_id as u64;
     finish_stream_channel(id, Ok(()));
+    callback_factory::expire_callback_context(&env)
+}
+
+/// Signal that a JavaScript stream producer failed.
+///
+/// The error is delivered to the managed Relay stream and retained as the
+/// producer cleanup result so both iteration and explicit close preserve the
+/// original failure instead of treating a broken provider stream as complete.
+#[napi]
+pub fn fail_stream(env: Env, stream_id: f64, message: String) -> napi::Result<()> {
+    let id = stream_id as u64;
+    if let Some(channel) = STREAM_CHANNELS.lock().unwrap().get(&id) {
+        let _ = channel.sender.send(StreamEnvelope {
+            item: Err(FlowError::Internal(message.clone())),
+            _permit: None,
+        });
+    }
+    finish_stream_channel(id, Err(message));
     callback_factory::expire_callback_context(&env)
 }
 

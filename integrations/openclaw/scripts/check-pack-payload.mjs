@@ -7,8 +7,8 @@
  * Package payload validation for the OpenClaw integration.
  *
  * This script guards the npm package boundary: production source files,
- * generated dist files, and OpenClaw manifest entries must be packed, while
- * tests, maps, and test build output must stay out of the package.
+ * generated dist files and OpenClaw manifest entries must be packed, while
+ * TypeScript sources, tests, maps, and test build output stay out.
  */
 import { spawnSync } from 'node:child_process';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
@@ -59,14 +59,6 @@ function normalizePackagePath(value) {
   return value.replace(/^\.\//, '').replaceAll('\\', '/');
 }
 
-/** Extract the OpenClaw release version from supported single-version specs. */
-function normalizeOpenClawVersion(value, fieldName) {
-  assert(typeof value === 'string' && value.length > 0, `${fieldName} is required`);
-  const match = value.match(/^(?:\^|~|>=)?(\d+\.\d+\.\d+(?:-\d+)?)$/);
-  assert(match, `${fieldName} must be a single OpenClaw release version`);
-  return match[1];
-}
-
 /** Recursively list files below a package-local directory. */
 function walkFiles(root, prefix = '') {
   const absoluteRoot = path.join(packageRoot, root, prefix);
@@ -89,10 +81,8 @@ const pack = runNpm(['pack', '--dry-run', '--json', '--ignore-scripts']);
 const packInfo = JSON.parse(pack.stdout)[0];
 assert(packInfo, 'npm pack did not return package metadata');
 
-const productionSources = walkFiles('src').filter((file) => file.endsWith('.ts') && !file.endsWith('.test.ts'));
 const packedFiles = new Set(packInfo.files.map((file) => normalizePackagePath(file.path)));
 const packageJson = JSON.parse(readFileSync(path.join(packageRoot, 'package.json'), 'utf8'));
-const declaredFiles = new Set(packageJson.files ?? []);
 
 assert(
   packageJson.repository?.url === 'https://github.com/NVIDIA/NeMo-Relay',
@@ -103,26 +93,7 @@ assert(
   'package repository.directory must identify the OpenClaw workspace',
 );
 
-for (const entry of declaredFiles) {
-  assert(
-    !(entry.startsWith('src/') && entry.includes('*')),
-    `package files should explicitly allowlist production sources, not ${entry}`,
-  );
-}
-
-for (const source of productionSources) {
-  assert(declaredFiles.has(source), `package files allowlist is missing ${source}`);
-  assert(packedFiles.has(source), `packed package is missing source file ${source}`);
-}
-
-const requiredFiles = [
-  'package.json',
-  'README.md',
-  'index.ts',
-  'openclaw.plugin.json',
-  'dist/index.js',
-  'dist/index.d.ts',
-];
+const requiredFiles = ['package.json', 'README.md', 'openclaw.plugin.json', 'dist/index.js', 'dist/index.d.ts'];
 
 for (const file of requiredFiles) {
   assert(packedFiles.has(file), `packed package is missing ${file}`);
@@ -143,23 +114,21 @@ assert(packageJson.openclaw?.compat?.minGatewayVersion, 'openclaw.compat.minGate
 assert(packageJson.openclaw?.build?.openclawVersion, 'openclaw.build.openclawVersion is required');
 assert(packageJson.openclaw?.build?.pluginSdkVersion, 'openclaw.build.pluginSdkVersion is required');
 
-const expectedOpenClawVersion = normalizeOpenClawVersion(packageJson.peerDependencies?.openclaw, 'peerDependencies.openclaw');
-for (const [fieldName, value] of [
-  ['openclaw.compat.pluginApi', packageJson.openclaw.compat.pluginApi],
-  ['openclaw.compat.minGatewayVersion', packageJson.openclaw.compat.minGatewayVersion],
-  ['openclaw.build.openclawVersion', packageJson.openclaw.build.openclawVersion],
-  ['openclaw.build.pluginSdkVersion', packageJson.openclaw.build.pluginSdkVersion],
-]) {
-  const actualOpenClawVersion = normalizeOpenClawVersion(value, fieldName);
-  assert(
-    actualOpenClawVersion === expectedOpenClawVersion,
-    `${fieldName} must target peerDependencies.openclaw version ${expectedOpenClawVersion}`,
-  );
-}
+assert(
+  packageJson.peerDependencies?.openclaw === '>=2026.9.3 <2027',
+  'OpenClaw peer range must match compatibility policy',
+);
+assert(packageJson.peerDependenciesMeta?.openclaw?.optional === true, 'OpenClaw peer dependency must be optional');
+assert(packageJson.devDependencies?.openclaw === '2026.9.3', 'OpenClaw development dependency must be exact');
+assert(packageJson.openclaw.compat.pluginApi === '>=2026.9.3', 'plugin API compatibility floor must be 2026.9.3');
+assert(packageJson.openclaw.compat.minGatewayVersion === '2026.9.3', 'gateway compatibility floor must be 2026.9.3');
+assert(packageJson.openclaw.build.openclawVersion === '2026.9.3', 'OpenClaw build version must be exact');
+assert(packageJson.openclaw.build.pluginSdkVersion === '2026.9.3', 'plugin SDK build version must be exact');
 
 for (const file of packedFiles) {
   assert(!file.startsWith('test/'), `packed package includes test artifact ${file}`);
   assert(!file.startsWith('.test-dist/'), `packed package includes test output ${file}`);
+  assert(!file.endsWith('.ts') || file.endsWith('.d.ts'), `packed package includes TypeScript source ${file}`);
   assert(!file.endsWith('.map'), `packed package includes source/declaration map ${file}`);
 }
 

@@ -1,13 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-/**
- * Runtime lifecycle coordinator for the OpenClaw plugin.
- *
- * This module validates config, lazy-loads NeMo Relay Node bindings, registers
- * OpenClaw service/lifecycle/gateway surfaces, and forwards hooks to the replay
- * backend once runtime state is ready.
- */
 import type {
   OpenClawPluginApi,
   OpenClawPluginServiceContext,
@@ -16,11 +9,8 @@ import type {
 } from 'openclaw/plugin-sdk/plugin-entry';
 
 import { parseConfig } from './config.js';
-import type { NemoRelayHookBackendConfig } from './config.js';
-import { createHealthSnapshot, type HookReplayBackendStatus } from './health.js';
-import type { HookReplayCounters } from './hook-replay/session.js';
-import { HookReplayBackend } from './hooks-backend.js';
-import type { PluginAgentToolCallMiddlewareContext } from './openclaw-hook-types.js';
+import type { RuntimeStatus } from './health.js';
+import { LiveLineageCoordinator } from './lineage.js';
 import {
   defaultNemoRelayModuleLoader,
   type ConfigDiagnostic,
@@ -28,533 +18,295 @@ import {
   type NemoRelayModuleLoader,
   type PluginHostActivation,
 } from './modules.js';
+import { NemoRelayProvider, registerNemoRelayProvider } from './provider.js';
 import type { RuntimeStateOptions, StartContext } from './types.js';
 
-const SERVICE_ID = 'nemo-relay-observability';
-const LIFECYCLE_ID = 'nemo-relay-observability-cleanup';
+const SERVICE_ID = 'nemo-relay-runtime';
+const LIFECYCLE_ID = 'nemo-relay-runtime-cleanup';
 const STATUS_METHOD = 'nemoRelay.status';
-type RuntimeCleanupContext = Parameters<NonNullable<PluginRuntimeLifecycleRegistration['cleanup']>>[0];
-type ToolCallMiddlewareOptions = {
-  runtimes?: string[];
-  priority?: number;
-};
-type ToolCallMiddlewareApi = {
-  registerAgentToolCallMiddleware?: (
-    handler: (ctx: PluginAgentToolCallMiddlewareContext) => Promise<unknown>,
-    options?: ToolCallMiddlewareOptions,
-  ) => void;
-};
+type CleanupContext = Parameters<NonNullable<PluginRuntimeLifecycleRegistration['cleanup']>>[0];
 
-/** Owns one plugin runtime instance across OpenClaw service start/stop cycles. */
+/** Owns one in-process Relay runtime and its live OpenClaw lineage state. */
 export class NemoRelayRuntimeState {
   private readonly api: OpenClawPluginApi;
-  private readonly config: NemoRelayHookBackendConfig;
+  private readonly config: ReturnType<typeof parseConfig>;
   private readonly moduleLoader: NemoRelayModuleLoader;
-  private loadPromise: Promise<NemoRelayModules> | undefined;
-  private startPromise: Promise<void> | undefined;
-  private statusValue: HookReplayBackendStatus = { state: 'not_initialized' };
-  private pluginHostActivation: PluginHostActivation | undefined;
-  private backendValue: HookReplayBackend | undefined;
-  private initializedPluginHost = false;
-  private pluginHostOutputsHealthy = false;
+  private statusValue: RuntimeStatus = { state: 'not_initialized' };
+  private loadPromise?: Promise<NemoRelayModules>;
+  private pluginHostActivation?: PluginHostActivation;
+  private lineage?: LiveLineageCoordinator;
+  private readonly provider: NemoRelayProvider;
+  private startPromise?: Promise<void>;
   private started = false;
-  private beforeExitListener?: () => void;
-  private unavailableLogged = false;
-  private missingStartContextLogged = false;
+  private pluginHostInitialized = false;
   private lastStartContext?: StartContext;
-  private lastCounters?: HookReplayCounters;
+  private beforeExitListener?: () => void;
 
   constructor(options: RuntimeStateOptions) {
     this.api = options.api;
     this.config = options.config;
     this.moduleLoader = options.moduleLoader ?? defaultNemoRelayModuleLoader;
+    this.provider = new NemoRelayProvider(this.api, this.config);
   }
 
-  /** Return the current coarse backend status. */
-  status(): HookReplayBackendStatus {
-    return this.statusValue;
+  getProvider(): NemoRelayProvider {
+    return this.provider;
   }
 
-  /** Build the operator-facing health payload served through the gateway method. */
   health() {
-    const backendState = this.backendValue?.state();
-    return createHealthSnapshot({
+    return {
       status: this.statusValue,
-      initializedPluginHost: this.initializedPluginHost,
-      pluginHostOutputsHealthy: this.pluginHostOutputsHealthy,
-      config: this.config,
-      ...(backendState === undefined
-        ? this.lastCounters === undefined
-          ? {}
-          : { counters: this.lastCounters }
-        : {
-            counters: backendState.counters,
-          }),
-    });
+      inProcess: true as const,
+      providerPrefix: 'nemo-relay' as const,
+      gateway: false as const,
+      toolExecutionIntercepts: false as const,
+      pluginHostInitialized: this.pluginHostInitialized,
+      ...(this.lineage === undefined ? {} : { lineage: this.lineage.status() }),
+    };
   }
 
-  /** Start NeMo Relay modules, generic plugins, and the hook replay backend. */
   async start(ctx: StartContext): Promise<void> {
-    this.lastStartContext = copyStartContext(ctx);
-    this.missingStartContextLogged = false;
-
-    if (this.started || this.statusValue.state === 'ready' || this.statusValue.state === 'degraded') {
-      return;
-    }
-
-    if (this.startPromise) {
-      await this.startPromise;
-      return;
-    }
-
+    this.lastStartContext = { ...ctx };
+    if (this.started) return;
+    if (this.startPromise) return await this.startPromise;
     this.startPromise = this.startInternal(ctx);
     try {
       await this.startPromise;
     } finally {
-      this.startPromise = undefined;
+      delete this.startPromise;
     }
   }
 
-  /** Do the startup work behind a single-flight guard. */
   private async startInternal(ctx: StartContext): Promise<void> {
-    delete this.lastCounters;
-    this.initializedPluginHost = false;
-    this.pluginHostOutputsHealthy = false;
-
     let modules: NemoRelayModules;
     try {
       this.loadPromise ??= this.moduleLoader();
       modules = await this.loadPromise;
     } catch (error) {
-      this.loadPromise = undefined;
+      delete this.loadPromise;
       this.statusValue = { state: 'degraded', reason: `failed to load nemo-relay-node: ${toMessage(error)}` };
-      if (!this.unavailableLogged) {
-        ctx.logger.warn?.(this.statusValue.reason);
-        this.unavailableLogged = true;
-      }
+      ctx.logger.warn?.(this.statusValue.reason);
       return;
     }
 
-    const hostConfig = this.config.plugins as Parameters<NemoRelayModules['pluginHost']['validate']>[0];
-    let degradedReason;
-
-    const validationReport = validatePluginHostConfig(modules, hostConfig, ctx.logger);
-
-    if (!validationReport.ok) {
-      degradedReason = validationReport.reason;
-      ctx.logger.warn?.(degradedReason);
-    } else if (validationReport.report.config.diagnostics.some((diagnostic) => diagnostic.level === 'error')) {
-      degradedReason = 'NeMo Relay plugin host config validation failed';
-    } else {
-      if (
-        validationReport.report.config.diagnostics.some((diagnostic) => diagnostic.level === 'warning') &&
-        degradedReason === undefined
-      ) {
-        degradedReason = 'NeMo Relay plugin host config validation produced warnings';
-      }
-
-      try {
-        this.pluginHostActivation = await modules.pluginHost.initialize(hostConfig);
+    let degradedReason: string | undefined;
+    try {
+      const validation = modules.pluginHost.validate(
+        this.config.plugins as Parameters<NemoRelayModules['pluginHost']['validate']>[0],
+      );
+      logDiagnostics(ctx.logger, validation.config.diagnostics);
+      if (validation.config.diagnostics.some((item) => item.level === 'error')) {
+        degradedReason = 'NeMo Relay plugin host configuration contains errors';
+      } else {
+        this.pluginHostActivation = await modules.pluginHost.initialize(
+          this.config.plugins as Parameters<NemoRelayModules['pluginHost']['initialize']>[0],
+        );
         const activationDiagnostics = this.pluginHostActivation.report.config.diagnostics;
         logDiagnostics(ctx.logger, activationDiagnostics);
-        this.initializedPluginHost = true;
-        const hasInitializationErrors = activationDiagnostics.some((diagnostic) => diagnostic.level === 'error');
-        this.pluginHostOutputsHealthy = !hasInitializationErrors;
-        if (hasInitializationErrors) {
-          degradedReason ??= 'NeMo Relay plugin host initialization reported errors';
+        this.pluginHostInitialized = true;
+        if (activationDiagnostics.some((item) => item.level === 'error')) {
+          degradedReason = 'NeMo Relay plugin host initialization contains errors';
         }
-      } catch (error) {
-        degradedReason = `failed to initialize NeMo Relay plugin host: ${toMessage(error)}`;
-        ctx.logger.warn?.(degradedReason);
       }
-    }
-
-    this.backendValue = new HookReplayBackend({
-      nf: modules.nf,
-      config: this.config,
-      logger: ctx.logger,
-      agentVersion: ctx.agentVersion,
-    });
-    this.registerBeforeExit(ctx.logger);
-    this.started = true;
-    this.statusValue =
-      degradedReason === undefined ? { state: 'ready' } : { state: 'degraded', reason: degradedReason };
-  }
-
-  /** Stop the runtime because OpenClaw service or gateway shutdown is happening. */
-  async stop(reason: string, logger?: PluginLogger): Promise<void> {
-    await this.stopWithStatus(reason, logger, { state: 'stopped', reason });
-  }
-
-  /** Apply conditional-execution guardrails before an OpenClaw tool call proceeds. */
-  async guardToolCall(ctx: PluginAgentToolCallMiddlewareContext): Promise<void> {
-    const backend = await this.backendForHook(ctx.workspaceDir);
-    if (!backend) {
-      return;
-    }
-    await backend.onBeforeToolCall(
-      {
-        toolName: ctx.toolName,
-        params: ctx.params,
-        runId: ctx.runId,
-        toolCallId: ctx.toolCallId,
-      },
-      ctx,
-    );
-  }
-
-  /** Shared stop implementation that controls the final health status. */
-  private async stopWithStatus(
-    reason: string,
-    logger: PluginLogger | undefined,
-    finalStatus: HookReplayBackendStatus,
-  ): Promise<void> {
-    if (
-      this.statusValue.state === 'stopped' ||
-      this.statusValue.state === 'disabled' ||
-      this.statusValue.state === 'stopping'
-    ) {
-      return;
-    }
-
-    if (this.startPromise) {
-      await this.startPromise.catch((error) => {
-        const log = logger ?? this.api.logger;
-        log.warn?.(`failed to finish NeMo Relay startup before stop: ${toMessage(error)}`);
-      });
-    }
-
-    this.statusValue = { state: 'stopping' };
-    const log = logger ?? this.api.logger;
-    this.removeBeforeExitListener();
-
-    try {
-      await this.backendValue?.drainForGatewayStop(reason);
     } catch (error) {
-      log.warn?.(`failed to stop NeMo Relay hook backend: ${toMessage(error)}`);
+      degradedReason = `failed to initialize NeMo Relay plugin host: ${toMessage(error)}`;
+      ctx.logger.warn?.(degradedReason);
     }
-    const backendState = this.backendValue?.state();
-    if (backendState) {
-      this.lastCounters = { ...backendState.counters };
-    }
-    this.backendValue = undefined;
 
+    this.lineage = new LiveLineageCoordinator(modules.nf, this.config, ctx.logger);
+    this.provider.attachRuntime(modules.nf, this.lineage);
+    this.started = true;
+    this.statusValue = degradedReason ? { state: 'degraded', reason: degradedReason } : { state: 'ready' };
+    this.registerBeforeExit(ctx.logger);
+  }
+
+  async stop(reason: string, logger = this.api.logger): Promise<void> {
+    if (['stopped', 'stopping', 'disabled'].includes(this.statusValue.state)) return;
+    if (this.startPromise) await this.startPromise.catch(() => undefined);
+    this.statusValue = { state: 'stopping', reason };
+    this.removeBeforeExitListener();
+    try {
+      await this.lineage?.drain(reason);
+    } catch (error) {
+      logger.warn?.(`failed to drain NeMo Relay live lineage: ${toMessage(error)}`);
+    }
     let pluginHostCloseFailure: string | undefined;
     if (this.pluginHostActivation) {
       try {
         await this.pluginHostActivation.close();
+        delete this.pluginHostActivation;
+        this.pluginHostInitialized = false;
       } catch (error) {
         pluginHostCloseFailure = `failed to close NeMo Relay plugin host: ${toMessage(error)}`;
-        log.warn?.(pluginHostCloseFailure);
-      }
-      if (pluginHostCloseFailure === undefined) {
-        this.pluginHostActivation = undefined;
-        this.initializedPluginHost = false;
-        this.pluginHostOutputsHealthy = false;
+        logger.warn?.(pluginHostCloseFailure);
       }
     }
-
     this.started = false;
+    delete this.lineage;
+    this.provider.detachRuntime();
     this.statusValue =
-      pluginHostCloseFailure === undefined ? finalStatus : { state: 'degraded', reason: pluginHostCloseFailure };
+      pluginHostCloseFailure === undefined
+        ? { state: 'stopped', reason }
+        : { state: 'degraded', reason: pluginHostCloseFailure };
   }
 
-  /** Handle OpenClaw runtime lifecycle cleanup for either a session or the backend. */
-  async cleanup(ctx: RuntimeCleanupContext): Promise<void> {
-    if (ctx.sessionKey !== undefined || ctx.runId !== undefined) {
-      await this.backendValue?.cleanupSession({
-        reason: ctx.reason,
-        ...(ctx.sessionKey === undefined ? {} : { sessionKey: ctx.sessionKey }),
-        ...(ctx.runId === undefined ? {} : { runId: ctx.runId }),
-      });
-      return;
-    }
+  async cleanup(ctx: CleanupContext): Promise<void> {
+    if (ctx.runId || ctx.sessionKey) return;
+    await this.stop(ctx.reason);
+  }
 
-    await this.stopWithStatus(
-      ctx.reason,
-      this.api.logger,
-      ctx.reason === 'restart'
-        ? { state: 'not_initialized', reason: 'restart' }
-        : { state: 'stopped', reason: ctx.reason },
+  registerHooks(): void {
+    this.api.on('gateway_start', async (_event, ctx) => {
+      await this.ensureStarted(ctx.workspaceDir);
+    });
+    this.api.on('gateway_stop', async (event) => {
+      await this.stop(event.reason ?? 'gateway_stop');
+    });
+    this.api.on('session_start', async (event) => {
+      await this.failOpen('session_start', undefined, (lineage) => lineage.sessionStart(event));
+    });
+    this.api.on('session_end', async (event) => {
+      await this.failOpen('session_end', undefined, (lineage) => lineage.sessionEnd(event));
+    });
+    this.api.on('before_agent_run', async (_event, ctx) => {
+      const lineage = await this.ensureLineage(ctx.workspaceDir);
+      if (!lineage) {
+        return ctx.modelProviderId === 'nemo-relay'
+          ? {
+              outcome: 'block' as const,
+              reason: 'NeMo Relay runtime unavailable',
+              message: 'NeMo Relay is unavailable, so managed execution was not started.',
+            }
+          : { outcome: 'pass' as const };
+      }
+      return await lineage.beforeAgentRun(ctx);
+    });
+    this.api.on('agent_end', async (event, ctx) => {
+      await this.failOpen('agent_end', ctx.workspaceDir, (lineage) => lineage.agentEnd(event, ctx));
+    });
+    this.api.on('before_tool_call', async (event, ctx) => {
+      const lineage = await this.ensureLineage();
+      if (!lineage) {
+        return { block: true, blockReason: 'NeMo Relay tool policy runtime is unavailable' };
+      }
+      return await lineage.beforeToolCall(event, ctx);
+    });
+    this.api.on('after_tool_call', async (event) => {
+      await this.failOpen('after_tool_call', undefined, (lineage) => lineage.afterToolCall(event));
+    });
+    this.api.on('llm_input', async (event, ctx) => {
+      await this.failOpen('llm_input', ctx.workspaceDir, (lineage) => lineage.fallbackInput(event));
+    });
+    this.api.on('llm_output', async (event, ctx) => {
+      await this.failOpen('llm_output', ctx.workspaceDir, (lineage) => lineage.fallbackOutput(event));
+    });
+    this.api.on('subagent_spawned', async (event, ctx) => {
+      await this.failOpen('subagent_spawned', undefined, (lineage) => lineage.subagentSpawned(event, ctx));
+    });
+    this.api.on('subagent_ended', async (event) => {
+      await this.failOpen('subagent_ended', undefined, (lineage) => lineage.subagentEnded(event));
+    });
+  }
+
+  private async failOpen(
+    label: string,
+    workspaceDir: string | undefined,
+    callback: (lineage: LiveLineageCoordinator) => void | Promise<void>,
+  ): Promise<void> {
+    const lineage = await this.ensureLineage(workspaceDir);
+    if (!lineage) return;
+    try {
+      await callback(lineage);
+    } catch (error) {
+      this.api.logger.warn?.(`nemo-relay ${label} instrumentation failed open: ${toMessage(error)}`);
+    }
+  }
+
+  private async ensureLineage(workspaceDir?: string): Promise<LiveLineageCoordinator | undefined> {
+    if (!this.lineage && this.statusValue.state !== 'stopping') await this.ensureStarted(workspaceDir);
+    return this.lineage;
+  }
+
+  private async ensureStarted(workspaceDir?: string): Promise<void> {
+    if (this.started) return;
+    const existing = this.lastStartContext;
+    await this.start(
+      existing ?? {
+        stateDir: this.api.runtime.state.resolveStateDir(),
+        logger: this.api.logger,
+        agentVersion: this.api.version ?? 'unknown',
+        ...(workspaceDir === undefined ? {} : { workspaceDir }),
+      },
     );
   }
 
-  /** Return a backend for a hook, lazily starting from runtime context if needed. */
-  private async backendForHook(workspaceDir?: string): Promise<HookReplayBackend | undefined> {
-    if (this.backendValue) {
-      return this.backendValue;
-    }
-
-    if (this.statusValue.state === 'disabled' || this.statusValue.state === 'stopping') {
-      return undefined;
-    }
-
-    const startContext = this.lastStartContext ?? this.startContextFromRuntime(workspaceDir);
-    if (!startContext) {
-      if (!this.missingStartContextLogged) {
-        this.api.logger.warn?.('nemo-relay skipped hook replay because OpenClaw service start context is unavailable');
-        this.missingStartContextLogged = true;
-      }
-      return undefined;
-    }
-
-    await this.start(startContext);
-    return this.backendValue;
-  }
-
-  /** Run a synchronous hook against the backend with fail-open replay handling. */
-  private async replayWithBackend(
-    label: string,
-    workspaceDir: string | undefined,
-    emit: (backend: HookReplayBackend) => void,
-  ): Promise<void> {
-    const backend = await this.backendForHook(workspaceDir);
-    if (!backend) {
-      return;
-    }
-
-    backend.safeReplay(label, undefined, () => emit(backend));
-  }
-
-  /** Run an asynchronous hook against the backend with fail-open replay handling. */
-  private async replayWithBackendAsync(
-    label: string,
-    workspaceDir: string | undefined,
-    emit: (backend: HookReplayBackend) => Promise<void>,
-  ): Promise<void> {
-    const backend = await this.backendForHook(workspaceDir);
-    if (!backend) {
-      return;
-    }
-
-    await backend.safeReplayAsync(label, undefined, () => emit(backend));
-  }
-
-  /** Register every OpenClaw hook used by the observability backend. */
-  registerHooks(): void {
-    this.api.on('gateway_start', async (event, ctx) => {
-      await this.replayWithBackend('gateway_start', ctx.workspaceDir, (backend) => backend.onGatewayStart(event, ctx));
-    });
-
-    this.api.on('gateway_stop', async (event) => {
-      await this.stop(event.reason ?? 'gateway_stop', this.api.logger);
-    });
-
-    this.api.on('session_start', async (event, ctx) => {
-      await this.replayWithBackend('session_start', undefined, (backend) => backend.onSessionStart(event, ctx));
-    });
-
-    this.api.on('session_end', async (event, ctx) => {
-      await this.replayWithBackendAsync('session_end', undefined, (backend) => backend.onSessionEnd(event, ctx));
-    });
-
-    this.api.on('llm_input', async (event, ctx) => {
-      await this.replayWithBackend('llm_input', ctx.workspaceDir, (backend) => backend.onLlmInput(event, ctx));
-    });
-
-    this.api.on('llm_output', async (event, ctx) => {
-      await this.replayWithBackend('llm_output', ctx.workspaceDir, (backend) => backend.onLlmOutput(event, ctx));
-    });
-
-    this.api.on('model_call_started', async (event, ctx) => {
-      await this.replayWithBackend('model_call_started', ctx.workspaceDir, (backend) =>
-        backend.onModelCallStarted(event, ctx),
-      );
-    });
-
-    this.api.on('model_call_ended', async (event, ctx) => {
-      await this.replayWithBackend('model_call_ended', ctx.workspaceDir, (backend) =>
-        backend.onModelCallEnded(event, ctx),
-      );
-    });
-
-    this.api.on('after_tool_call', async (event, ctx) => {
-      await this.replayWithBackend('after_tool_call', undefined, (backend) => backend.onAfterToolCall(event, ctx));
-    });
-
-    this.api.on('before_message_write', (event, ctx) => {
-      const backend = this.backendValue;
-      if (!backend) {
-        return;
-      }
-      backend.safeReplay('before_message_write', undefined, () => backend.onBeforeMessageWrite(event, ctx));
-    });
-
-    this.api.on('agent_end', async (event, ctx) => {
-      await this.replayWithBackend('agent_end', ctx.workspaceDir, (backend) => backend.onAgentEnd(event, ctx));
-    });
-
-    this.api.on('before_agent_finalize', async (event, ctx) => {
-      await this.replayWithBackend('before_agent_finalize', ctx.workspaceDir, (backend) =>
-        backend.onBeforeAgentFinalize(event, ctx),
-      );
-    });
-
-    this.api.on('subagent_spawned', async (event, ctx) => {
-      await this.replayWithBackend('subagent_spawned', undefined, (backend) => backend.onSubagentSpawned(event, ctx));
-    });
-
-    this.api.on('subagent_ended', async (event, ctx) => {
-      await this.replayWithBackend('subagent_ended', undefined, (backend) => backend.onSubagentEnded(event, ctx));
-    });
-  }
-
-  /** Reconstruct enough service-start context for hooks that arrive before service start. */
-  private startContextFromRuntime(workspaceDir?: string): StartContext | undefined {
-    try {
-      const stateDir = this.api.runtime.state.resolveStateDir();
-      return {
-        stateDir,
-        logger: this.api.logger,
-        resolvePath: this.api.resolvePath,
-        agentVersion: this.api.version ?? 'unknown',
-        ...(workspaceDir === undefined ? {} : { workspaceDir }),
-      };
-    } catch (error) {
-      this.api.logger.warn?.(`nemo-relay could not resolve OpenClaw runtime state dir: ${toMessage(error)}`);
-      return undefined;
-    }
-  }
-
-  /** Register a process beforeExit cleanup guard for local OpenClaw shutdown paths. */
   private registerBeforeExit(logger: PluginLogger): void {
-    if (this.beforeExitListener) {
-      return;
-    }
-    const listener = () => {
-      void this.stop('beforeExit', logger).catch((error) => {
-        logger.warn?.(`nemo-relay beforeExit cleanup failed: ${toMessage(error)}`);
-      });
+    if (this.beforeExitListener) return;
+    this.beforeExitListener = () => {
+      void this.stop('beforeExit', logger);
     };
-    process.on('beforeExit', listener);
-    this.beforeExitListener = listener;
+    process.on('beforeExit', this.beforeExitListener);
   }
 
-  /** Remove the beforeExit listener once normal shutdown begins. */
   private removeBeforeExitListener(): void {
-    if (!this.beforeExitListener) {
-      return;
-    }
+    if (!this.beforeExitListener) return;
     process.removeListener('beforeExit', this.beforeExitListener);
     delete this.beforeExitListener;
   }
 }
 
-/** Register the NeMo Relay observability plugin with the OpenClaw plugin API. */
+/** Register the in-process provider, lifecycle hooks, service, and status method. */
 export function registerNemoRelayPlugin(api: OpenClawPluginApi, moduleLoader?: NemoRelayModuleLoader): void {
-  if (api.registrationMode !== 'full') {
-    return;
-  }
-
-  let config;
+  if (api.registrationMode !== 'full') return;
+  let config: ReturnType<typeof parseConfig>;
   try {
     config = parseConfig(api.pluginConfig);
   } catch (error) {
-    api.logger.warn?.(`nemo-relay observability disabled because plugin config is invalid: ${toMessage(error)}`);
+    api.logger.warn?.(`nemo-relay disabled because plugin config is invalid: ${toMessage(error)}`);
     return;
   }
-
   if (!config.enabled) {
-    api.logger.info?.('nemo-relay observability disabled by plugin config');
+    api.logger.info?.('nemo-relay disabled by plugin config');
     return;
+  }
+  for (const field of config.deprecatedFields) {
+    api.logger.warn?.(`nemo-relay config.${field} is deprecated and ignored`);
   }
 
   const runtime = new NemoRelayRuntimeState(
     moduleLoader === undefined ? { api, config } : { api, config, moduleLoader },
   );
-
+  registerNemoRelayProvider(api, config, () => runtime.getProvider());
   api.registerService({
     id: SERVICE_ID,
     start: (ctx: OpenClawPluginServiceContext) =>
       runtime.start({
         stateDir: ctx.stateDir,
         logger: ctx.logger,
-        resolvePath: api.resolvePath,
         agentVersion: api.version ?? 'unknown',
         ...(ctx.workspaceDir === undefined ? {} : { workspaceDir: ctx.workspaceDir }),
       }),
     stop: (ctx: OpenClawPluginServiceContext) => runtime.stop('service_stop', ctx.logger),
   });
-
   api.registerRuntimeLifecycle({
     id: LIFECYCLE_ID,
-    description: 'Clean up NeMo Relay OpenClaw observability plugin state',
+    description: 'Drain NeMo Relay live handles in leaf-to-root order',
     cleanup: (ctx) => runtime.cleanup(ctx),
   });
-
-  api.registerGatewayMethod?.(
-    STATUS_METHOD,
-    ({ respond }) => {
-      respond(true, runtime.health());
-    },
-    {
-      scope: 'operator.admin',
-    },
-  );
-
+  api.registerGatewayMethod?.(STATUS_METHOD, ({ respond }) => respond(true, runtime.health()), {
+    scope: 'operator.admin',
+  });
   runtime.registerHooks();
-  registerToolCallMiddleware(api, runtime);
 }
 
-function registerToolCallMiddleware(api: OpenClawPluginApi, runtime: NemoRelayRuntimeState): void {
-  const register = (api as OpenClawPluginApi & ToolCallMiddlewareApi).registerAgentToolCallMiddleware;
-  if (typeof register !== 'function') {
-    return;
-  }
-
-  register.call(
-    api,
-    async (ctx: PluginAgentToolCallMiddlewareContext) => {
-      await runtime.guardToolCall(ctx);
-      return await ctx.execute(ctx.params);
-    },
-    { runtimes: ['pi'], priority: 100 },
-  );
-}
-
-/** Validate the NeMo Relay plugin-host config and log diagnostics. */
-function validatePluginHostConfig(
-  modules: NemoRelayModules,
-  config: Parameters<NemoRelayModules['pluginHost']['validate']>[0],
-  logger: PluginLogger,
-): { ok: true; report: ReturnType<NemoRelayModules['pluginHost']['validate']> } | { ok: false; reason: string } {
-  try {
-    const report = modules.pluginHost.validate(config);
-    logDiagnostics(logger, report.config.diagnostics);
-    return { ok: true, report };
-  } catch (error) {
-    return {
-      ok: false,
-      reason: `failed to validate NeMo Relay plugin host config: ${toMessage(error)}`,
-    };
-  }
-}
-
-/** Log plugin-host diagnostics at warning or info level based on severity. */
 function logDiagnostics(logger: PluginLogger, diagnostics: ConfigDiagnostic[]): void {
   for (const diagnostic of diagnostics) {
-    const prefix = diagnostic.component ? `${diagnostic.component}: ` : '';
-    const message = `${prefix}${diagnostic.code}: ${diagnostic.message}`;
-    if (diagnostic.level === 'error') {
-      logger.warn?.(message);
-    } else {
-      logger.info?.(message);
-    }
+    const message = `${diagnostic.component ? `${diagnostic.component}: ` : ''}${diagnostic.code}: ${diagnostic.message}`;
+    if (diagnostic.level === 'error') logger.warn?.(message);
+    else logger.info?.(message);
   }
 }
 
-/** Copy service-start context so later lazy hook startup cannot mutate it. */
-function copyStartContext(ctx: StartContext): StartContext {
-  return {
-    stateDir: ctx.stateDir,
-    logger: ctx.logger,
-    resolvePath: ctx.resolvePath,
-    agentVersion: ctx.agentVersion,
-    ...(ctx.workspaceDir === undefined ? {} : { workspaceDir: ctx.workspaceDir }),
-  };
-}
-
-/** Convert thrown values into stable log strings. */
 function toMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }

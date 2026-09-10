@@ -248,6 +248,7 @@ async function typedLlmStreamExecute(name, request, func, collector, finalizer, 
     const req = wrapper.__nemo_relay_native;
     const streamId = wrapper.__nemo_relay_stream_id;
     (async () => {
+      let producerError;
       try {
         iterator = func(req)[Symbol.asyncIterator]();
         resolveIterator(iterator);
@@ -256,17 +257,23 @@ async function typedLlmStreamExecute(name, request, func, collector, finalizer, 
           if (done) {
             break;
           }
-          if (!lib.pushStreamChunk(streamId, chunkJsonCodec.toJson(typedChunk))) {
+          if (!(await lib.pushStreamChunkAsync(streamId, chunkJsonCodec.toJson(typedChunk)))) {
             await iterator.return?.();
             break;
           }
         }
+      } catch (error) {
+        producerError = error instanceof Error ? error.message : String(error);
       } finally {
         resolveIterator(iterator);
         try {
           await iterator?.return?.();
         } finally {
-          lib.endStream(streamId);
+          if (producerError === undefined) {
+            lib.endStream(streamId);
+          } else {
+            lib.failStream(streamId, producerError);
+          }
         }
       }
     })();

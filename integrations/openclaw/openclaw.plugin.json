@@ -1,13 +1,11 @@
 {
   "id": "nemo-relay",
-  "name": "NeMo Relay Observability",
-  "description": "ATIF and typed OpenTelemetry telemetry through NeMo Relay.",
+  "name": "NeMo Relay",
+  "description": "In-process Relay routing, middleware, lineage, and observability for OpenClaw.",
   "activation": {
     "onStartup": true
   },
-  "contracts": {
-    "agentToolCallMiddleware": ["pi"]
-  },
+  "providers": ["nemo-relay"],
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -15,69 +13,47 @@
       "enabled": {
         "type": "boolean",
         "default": true,
-        "description": "Enables the NeMo Relay OpenClaw hook replay plugin."
+        "description": "Enables the NeMo Relay provider and lifecycle integration."
+      },
+      "plugins": {
+        "$ref": "#/$defs/nemoRelayPluginConfig",
+        "description": "Generic NeMo Relay plugin configuration for guardrails, intercepts, adaptive behavior, and observability."
+      },
+      "routing": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "favorites": {
+            "type": "array",
+            "items": { "type": "string" },
+            "default": [],
+            "description": "Upstream provider/model references published as nemo-relay model favorites."
+          }
+        },
+        "description": "Configuration for programmatic nemo-relay/provider/model aliases."
+      },
+      "fallback": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true,
+            "description": "Emits live lifecycle events for unprefixed provider calls."
+          }
+        }
       },
       "backend": {
         "type": "string",
         "enum": ["hooks"],
-        "default": "hooks",
-        "description": "Hook replay backend implementation. Only the hook-backed backend is supported."
-      },
-      "plugins": {
-        "$ref": "#/$defs/nemoRelayPluginConfig",
-        "description": "Generic NeMo Relay plugin configuration document. Use the observability component to configure ATIF and typed OpenTelemetry exporters."
-      },
-      "capture": {
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-          "includePrompts": {
-            "type": "boolean",
-            "default": true,
-            "description": "Includes LLM prompt text in replayed telemetry when true."
-          },
-          "includeResponses": {
-            "type": "boolean",
-            "default": true,
-            "description": "Includes LLM response text in replayed telemetry when true."
-          },
-          "stripToolArgs": {
-            "type": "boolean",
-            "default": true,
-            "description": "Strips tool arguments from replayed tool spans by default."
-          },
-          "stripToolResults": {
-            "type": "boolean",
-            "default": true,
-            "description": "Strips tool results from replayed tool spans by default."
-          }
-        },
-        "description": "Controls sensitive payload capture for replayed LLM and tool telemetry."
+        "deprecated": true,
+        "description": "Deprecated compatibility field; ignored."
       },
       "correlation": {
         "type": "object",
-        "additionalProperties": false,
-        "properties": {
-          "llmOutputGraceMs": {
-            "type": "integer",
-            "minimum": 0,
-            "default": 250,
-            "description": "Milliseconds to wait for a matching llm_input before replaying an llm_output with a placeholder request."
-          },
-          "recordTtlMs": {
-            "type": "integer",
-            "minimum": 0,
-            "default": 600000,
-            "description": "Maximum age in milliseconds for buffered correlation records."
-          },
-          "maxRecordsPerKey": {
-            "type": "integer",
-            "minimum": 1,
-            "default": 32,
-            "description": "Maximum buffered records per correlation key."
-          }
-        },
-        "description": "Bounded correlation settings for matching OpenClaw hook events into replay spans."
+        "additionalProperties": true,
+        "deprecated": true,
+        "description": "Deprecated compatibility field; ignored."
       }
     },
     "$defs": {
@@ -85,63 +61,33 @@
         "type": "object",
         "additionalProperties": true,
         "properties": {
-          "version": {
-            "type": "integer",
-            "default": 1,
-            "description": "NeMo Relay generic plugin config version."
-          },
+          "version": { "type": "integer", "default": 1 },
           "components": {
             "type": "array",
-            "items": {
-              "$ref": "#/$defs/pluginComponent"
-            },
-            "default": [],
-            "description": "NeMo Relay plugin components to validate and initialize."
+            "items": { "$ref": "#/$defs/pluginComponent" },
+            "default": []
           },
-          "policy": {
-            "$ref": "#/$defs/pluginPolicy",
-            "description": "Policy for unknown or unsupported plugin configuration."
-          }
+          "policy": { "$ref": "#/$defs/pluginPolicy" }
         },
-        "default": {
-          "version": 1,
-          "components": []
-        }
+        "default": { "version": 1, "components": [] }
       },
       "pluginComponent": {
         "type": "object",
         "required": ["kind"],
         "additionalProperties": false,
         "properties": {
-          "kind": {
-            "type": "string",
-            "description": "Registered NeMo Relay plugin kind."
-          },
-          "enabled": {
-            "type": "boolean",
-            "default": true,
-            "description": "Whether this component should be initialized."
-          },
-          "config": {
-            "type": "object",
-            "additionalProperties": true,
-            "description": "Component-local plugin configuration."
-          }
+          "kind": { "type": "string" },
+          "enabled": { "type": "boolean", "default": true },
+          "config": { "type": "object", "additionalProperties": true }
         }
       },
       "pluginPolicy": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "unknown_component": {
-            "$ref": "#/$defs/unsupportedBehavior"
-          },
-          "unknown_field": {
-            "$ref": "#/$defs/unsupportedBehavior"
-          },
-          "unsupported_value": {
-            "$ref": "#/$defs/unsupportedBehavior"
-          }
+          "unknown_component": { "$ref": "#/$defs/unsupportedBehavior" },
+          "unknown_field": { "$ref": "#/$defs/unsupportedBehavior" },
+          "unsupported_value": { "$ref": "#/$defs/unsupportedBehavior" }
         }
       },
       "unsupportedBehavior": {
@@ -149,6 +95,6 @@
         "enum": ["ignore", "warn", "error"]
       }
     },
-    "description": "Configuration for the NeMo Relay OpenClaw hook replay plugin."
+    "description": "Configuration for the in-process NeMo Relay OpenClaw integration."
   }
 }

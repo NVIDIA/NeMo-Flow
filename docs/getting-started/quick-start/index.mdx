@@ -66,7 +66,7 @@ not yet know which guide owns the working path.
 | Plugin-managed runtime setup | You need process-level exporter or plugin behavior from `plugins.toml` | [Plugin Configuration Files](/configure-plugins/plugin-configuration-files) | The selected plugin path activates and writes the expected output or behavior. |
 | Managed middleware | You want policy, redaction, routing, or execution wrapping around managed calls | [Add Middleware](/instrument-applications/advanced-guide) | One allowed request succeeds, one rejected request stops before execution, and observed payloads match the policy. |
 | Framework integrations | A framework such as LangChain, LangGraph, or Deep Agents owns callbacks or scheduling | [Supported Integrations](/supported-integrations/about) | The integration guide's verify step confirms the expected framework-owned output. |
-| OpenClaw plugin path | OpenClaw owns plugin setup and Relay observes the OpenClaw-managed boundary | [OpenClaw](/supported-integrations/openclaw-plugin) | The OpenClaw guide's verify step confirms plugin setup and runtime output. |
+| OpenClaw plugin path | OpenClaw owns plugin setup and upstream transport while Relay wraps managed model calls in process | [OpenClaw](/supported-integrations/openclaw-plugin) | The OpenClaw guide's verify step confirms provider routing, live lineage, and runtime output. |
 | Manual or CI workflows | You need explicit config files, deterministic commands, or non-interactive automation | [CLI Basic Usage](/nemo-relay-cli/basic-usage) and [Plugin Configuration Files](/configure-plugins/plugin-configuration-files) | The explicit command uses the intended config files without interactive setup. |
 
 ## Local Coding-Agent Runs
