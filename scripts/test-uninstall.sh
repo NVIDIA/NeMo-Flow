@@ -353,6 +353,29 @@ EOF
     return 0
 }
 
+test_active_installation_path_with_spaces() {
+    tests_run=$((tests_run + 1))
+    install_dir="${test_root}/space bin"
+    mkdir -p "$install_dir"
+    build_relay_fixture "$install_dir/nemo-relay"
+    "$install_dir/nemo-relay" daemon &
+    active_session_pid=$!
+    sleep 1
+    kill -0 "$active_session_pid" || fail 'space-path fixture did not start'
+    for option in '' --force --dry-run; do
+        run_command sh "$uninstaller" --install-dir "$install_dir" $option
+        assert_failure
+        assert_contains "$run_output" 'active managed daemon deployment'
+        assert_not_contains "$run_output" 'Would remove NeMo Relay CLI'
+        [ -e "$install_dir/nemo-relay" ] || fail 'active binary was removed'
+        kill -0 "$active_session_pid" || fail 'managed process was terminated'
+    done
+    kill "$active_session_pid"
+    wait "$active_session_pid" 2>/dev/null || true
+    active_session_pid=""
+}
+
+test_active_installation_path_with_spaces
 test_interface_validation
 test_default_installation_removal
 test_custom_installation_dry_run_and_removal

@@ -109,7 +109,8 @@ is_mcp_command() {
 
 active_relay_process_pids() {
     for process_pid in $(ps -axww -o pid=,command= | awk -v name="$binary_name" '
-        $2 == name || $2 ~ ("/" name "$") { print $1 }
+        # Inspect the full command: an executable path may contain spaces.
+        $0 ~ ("(^|[[:space:]]|/)" name "([[:space:]]|$)") { print $1 }
     '); do
         if is_installed_relay_process "$process_pid"; then
             printf '%s\n' "$process_pid"
