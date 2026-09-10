@@ -1020,93 +1020,212 @@ async fn nests_agent_subagent_and_tool_lifecycle() {
 }
 
 #[tokio::test]
-async fn claude_tool_start_carries_gen_ai_execution_metadata() {
-    assert_claude_tool_execution_metadata(false).await;
+async fn claude_paired_tool_execution_metadata() {
+    assert_harness_tool_execution_metadata(AgentKind::ClaudeCode, false).await;
 }
 
 #[tokio::test]
-async fn claude_post_only_tool_carries_gen_ai_execution_metadata() {
-    assert_claude_tool_execution_metadata(true).await;
+async fn claude_post_only_tool_execution_metadata() {
+    assert_harness_tool_execution_metadata(AgentKind::ClaudeCode, true).await;
 }
 
-async fn assert_claude_tool_execution_metadata(post_only: bool) {
-    let session_id = if post_only {
-        "claude-gen-ai-post-only"
-    } else {
-        "claude-gen-ai-tool-metadata"
-    };
-    let subscriber_name = session_id;
+#[tokio::test]
+async fn codex_paired_tool_execution_metadata() {
+    assert_harness_tool_execution_metadata(AgentKind::Codex, false).await;
+}
+
+#[tokio::test]
+async fn codex_post_only_tool_execution_metadata() {
+    assert_harness_tool_execution_metadata(AgentKind::Codex, true).await;
+}
+
+#[tokio::test]
+async fn pi_paired_tool_execution_metadata() {
+    assert_harness_tool_execution_metadata(AgentKind::Pi, false).await;
+}
+
+#[tokio::test]
+async fn pi_post_only_tool_execution_metadata() {
+    assert_harness_tool_execution_metadata(AgentKind::Pi, true).await;
+}
+
+async fn assert_harness_tool_execution_metadata(kind: AgentKind, post_only: bool) {
+    let session_id = format!("genai-{}-{post_only}", kind.as_str());
     let captured = Arc::new(StdMutex::new(Vec::<Event>::new()));
     let events = Arc::clone(&captured);
     register_filtered_session_subscriber(
-        subscriber_name,
-        tracked_sessions(&[session_id]),
+        &session_id,
+        tracked_sessions(&[&session_id]),
         Arc::new(move |event| events.lock().unwrap().push(event.clone())),
     );
     let manager = SessionManager::new(session_test_config());
-    let tool = ToolEvent {
-        session_id: session_id.into(),
-        agent_kind: AgentKind::ClaudeCode,
-        event_name: "PreToolUse".into(),
-        tool_call_id: "gen-ai-call-1".into(),
-        tool_name: "Bash".into(),
-        subagent_id: None,
-        arguments: json!({"command": "pwd", "description": "per-call description"}),
-        result: Value::Null,
-        status: None,
-        payload: json!({}),
-        metadata: json!({}),
+    let (start, end, shutdown, id_key, args_key) = match kind {
+        AgentKind::ClaudeCode => (
+            "PreToolUse",
+            "PostToolUse",
+            "SessionEnd",
+            "tool_use_id",
+            "tool_input",
+        ),
+        AgentKind::Codex => (
+            "preToolUse",
+            "postToolUse",
+            "sessionEnd",
+            "tool_call_id",
+            "arguments",
+        ),
+        AgentKind::Pi => (
+            "tool_call",
+            "tool_execution_end",
+            "session_shutdown",
+            "toolCallId",
+            "input",
+        ),
+        AgentKind::Gateway => unreachable!(),
     };
-    manager
-        .apply_events(
-            &HeaderMap::new(),
-            vec![
-                NormalizedEvent::AgentStarted(SessionEvent {
-                    session_id: session_id.into(),
-                    agent_kind: AgentKind::ClaudeCode,
-                    event_name: "SessionStart".into(),
-                    payload: json!({}),
-                    metadata: json!({}),
-                }),
-                NormalizedEvent::ToolStarted(tool.clone()),
-                NormalizedEvent::ToolEnded(ToolEvent {
-                    event_name: "PostToolUse".into(),
-                    result: json!({"stdout": "/tmp"}),
-                    status: Some("success".into()),
-                    ..tool
-                }),
-                NormalizedEvent::AgentEnded(SessionEvent {
-                    session_id: session_id.into(),
-                    agent_kind: AgentKind::ClaudeCode,
-                    event_name: "SessionEnd".into(),
-                    payload: json!({}),
-                    metadata: json!({}),
-                }),
-            ]
-            .into_iter()
-            .filter(|event| !post_only || !matches!(event, NormalizedEvent::ToolStarted(_)))
-            .collect(),
-        )
-        .await
-        .unwrap();
+    let session_start = if kind == AgentKind::Pi {
+        "session_start"
+    } else {
+        "SessionStart"
+    };
+    let hooks = [session_start, start, end, shutdown];
+    for hook in hooks {
+        if post_only && hook == start {
+            continue;
+        }
+        let mut payload = json!({
+            "session_id": session_id, "hook_event_name": hook,
+            "tool_name": "shell", "result": {"stdout": "/tmp"},
+            "status": "success"
+        });
+        payload[id_key] = json!("gen-ai-call-1");
+        payload[args_key] =
+            json!({"command": "pwd", "description": "private invocation description"});
+        let headers = HeaderMap::new();
+        let outcome = match kind {
+            AgentKind::ClaudeCode => {
+                crate::agents::shared::adapters::claude_code::adapt(payload, &headers)
+            }
+            AgentKind::Codex => crate::agents::shared::adapters::codex::adapt(payload, &headers),
+            AgentKind::Pi => crate::agents::shared::adapters::pi::adapt(payload, &headers),
+            AgentKind::Gateway => unreachable!(),
+        };
+        manager
+            .apply_events(&headers, outcome.events)
+            .await
+            .unwrap();
+    }
     flush_subscribers().unwrap();
     let events = captured.lock().unwrap();
-    let start = events
+    let tool_events: Vec<_> = events
         .iter()
-        .find(|event| {
-            event.tool_call_id() == Some("gen-ai-call-1")
-                && event.scope_category() == Some(ScopeCategory::Start)
-        })
+        .filter(|event| event.tool_call_id() == Some("gen-ai-call-1"))
+        .collect();
+    let start = tool_events
+        .iter()
+        .find(|event| event.scope_category() == Some(ScopeCategory::Start))
         .unwrap();
-    let metadata = start.metadata().unwrap();
-    assert_eq!(metadata["gen_ai.tool.type"], "function");
+    let end = tool_events
+        .iter()
+        .find(|event| event.scope_category() == Some(ScopeCategory::End))
+        .unwrap();
     assert_eq!(
-        metadata["gen_ai.agent.name"],
-        AgentKind::ClaudeCode.as_str()
+        tool_events.len(),
+        2,
+        "one start/end pair, including post-only hooks"
     );
+    assert_eq!(start.uuid(), end.uuid());
+    assert_eq!(start.parent_uuid(), end.parent_uuid());
+    assert!(start.parent_uuid().is_some());
+    let metadata = start.metadata().unwrap();
+    assert_eq!(
+        metadata["gen_ai.tool.type"],
+        "function",
+        "{}",
+        kind.as_str()
+    );
+    assert_eq!(metadata["gen_ai.agent.name"], kind.as_str());
     assert!(metadata.get("gen_ai.tool.description").is_none());
+    assert_harness_genai_tool_span(kind, &events);
     drop(events);
-    assert!(deregister_subscriber(subscriber_name).unwrap());
+    assert!(deregister_subscriber(&session_id).unwrap());
+}
+
+fn assert_harness_genai_tool_span(kind: AgentKind, events: &[Event]) {
+    let exporter = InMemorySpanExporterBuilder::new().build();
+    let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+        .with_simple_exporter(exporter.clone())
+        .build();
+    let subscriber = OpenTelemetrySubscriber::from_tracer_provider_with_type(
+        provider,
+        "harness-tool-metadata",
+        OpenTelemetryType::GenAi,
+    );
+    for event in events {
+        subscriber.subscriber()(event);
+    }
+    subscriber.force_flush().unwrap();
+    let spans = exporter.get_finished_spans().unwrap();
+    let tool = spans
+        .iter()
+        .find(|span| span.name == "execute_tool shell")
+        .unwrap();
+    let attrs = attr_map(&tool.attributes);
+    assert_eq!(attrs["gen_ai.agent.name"], kind.as_str());
+    assert_eq!(attrs["gen_ai.tool.type"], "function");
+    assert_eq!(attrs["gen_ai.tool.call.id"], "gen-ai-call-1");
+    assert_eq!(
+        serde_json::from_str::<Value>(&attrs["gen_ai.tool.call.arguments"]).unwrap()["command"],
+        "pwd"
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(&attrs["gen_ai.tool.call.result"]).unwrap()["stdout"],
+        "/tmp"
+    );
+    assert!(
+        spans
+            .iter()
+            .any(|span| span.span_context.span_id() == tool.parent_span_id)
+    );
+    subscriber.shutdown().unwrap();
+}
+
+#[test]
+fn tool_execution_metadata_preserves_explicit_values_and_subagent_identity() {
+    for kind in [
+        AgentKind::ClaudeCode,
+        AgentKind::Codex,
+        AgentKind::Pi,
+        AgentKind::Gateway,
+    ] {
+        let session = Session::new("metadata-policy".into(), kind, SessionConfig::default());
+        let mut explicit = json!({"gen_ai.tool.type": "extension", "gen_ai.agent.name": "custom-agent", "gen_ai.tool.description": "explicit"});
+        let expected = explicit.clone();
+        session.apply_tool_execution_metadata(&mut explicit, Some("worker-1"));
+        assert_eq!(explicit, expected);
+        let mut metadata = json!({});
+        session.apply_tool_execution_metadata(&mut metadata, Some("worker-1"));
+        assert_eq!(metadata["gen_ai.agent.name"], "subagent:worker-1");
+        assert_eq!(
+            metadata.get("gen_ai.tool.type").and_then(Value::as_str),
+            kind.tool_execution_type()
+        );
+        let mut absent = Value::Null;
+        session.apply_tool_execution_metadata(&mut absent, None);
+        assert!(absent.is_null());
+    }
+    let gateway = Session::new(
+        "gateway-policy".into(),
+        AgentKind::Gateway,
+        SessionConfig::default(),
+    );
+    let mut metadata = json!({});
+    gateway.apply_tool_execution_metadata(&mut metadata, None);
+    assert_eq!(
+        metadata,
+        json!({}),
+        "generic gateway must not invent execution semantics"
+    );
 }
 
 #[tokio::test]

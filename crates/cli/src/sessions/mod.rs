@@ -1896,22 +1896,25 @@ impl Session {
 
     // Apply execution defaults equally to pre-hook and synthesized post-only starts.
     fn apply_tool_execution_metadata(&self, metadata: &mut Value, subagent_id: Option<&str>) {
-        if self.agent_kind == AgentKind::ClaudeCode {
-            // Claude proposes arguments and the local harness executes the
-            // function (including dispatch to MCP). Do not infer descriptions
-            // from a tool argument such as Bash's per-invocation description.
-            if let Some(metadata) = metadata.as_object_mut() {
-                metadata
-                    .entry("gen_ai.tool.type")
-                    .or_insert(json!("function"));
-                let agent_name = subagent_id.map_or_else(
-                    || self.agent_kind.as_str().to_string(),
-                    |id| format!("subagent:{id}"),
-                );
-                metadata
-                    .entry("gen_ai.agent.name")
-                    .or_insert(json!(agent_name));
-            }
+        let Some(metadata) = metadata.as_object_mut() else {
+            return;
+        };
+        // Execution classification is a harness capability, not an inference
+        // from tool arguments or names. Explicit instrumentation takes precedence.
+        if let Some(tool_type) = self.agent_kind.tool_execution_type() {
+            metadata
+                .entry("gen_ai.tool.type")
+                .or_insert(json!(tool_type));
+        }
+        // Identity is independent of classification. Gateway alone does not
+        // identify an executing agent, but a known subagent still does.
+        let agent_name = subagent_id.map(|id| format!("subagent:{id}")).or_else(|| {
+            (self.agent_kind != AgentKind::Gateway).then(|| self.agent_kind.as_str().to_string())
+        });
+        if let Some(agent_name) = agent_name {
+            metadata
+                .entry("gen_ai.agent.name")
+                .or_insert(json!(agent_name));
         }
     }
 
