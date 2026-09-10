@@ -190,18 +190,6 @@ export default function managedNemoRelayPi(pi: ExtensionAPI): void {
     };
   }
 
-  function payload(
-    context: ExtensionContext,
-    hookEventName: string,
-    fields: Record<string, unknown> = {},
-  ): Record<string, unknown> {
-    return {
-      session_id: sessionId(context),
-      hook_event_name: hookEventName,
-      ...fields,
-    };
-  }
-
   async function sendObservation(body: Record<string, unknown>): Promise<void> {
     try {
       const active = await runtime();
@@ -652,7 +640,7 @@ function createSharedLease(config: DeploymentConfig, credential: string, removeF
     credential,
     ensureReady(): Promise<void> {
       if (released) return Promise.reject(new Error('managed Pi MCP lease was released'));
-      if (initialized && child && child.exitCode === null && child.signalCode === null) {
+      if (initialized && child?.exitCode === null && child.signalCode === null) {
         return Promise.resolve();
       }
       if (starting) return starting;
@@ -982,6 +970,47 @@ function jsonType(value: unknown): string {
   return typeof value;
 }
 
+function payload(
+  context: ExtensionContext,
+  hookEventName: string,
+  fields: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    session_id: sessionId(context),
+    hook_event_name: hookEventName,
+    ...fields,
+  };
+}
+
+function objectShapeViolation(current: unknown, next: unknown, path: string): string | null {
+  const currentRecord = current as Record<string, unknown>;
+  const nextRecord = next as Record<string, unknown>;
+  const currentKeys = Object.keys(currentRecord).sort((left, right) => left.localeCompare(right));
+  const nextKeys = Object.keys(nextRecord).sort((left, right) => left.localeCompare(right));
+  const added = nextKeys.filter((key) => !currentKeys.includes(key));
+  const removed = currentKeys.filter((key) => !nextKeys.includes(key));
+  if (added.length > 0) return `${path} added ${added.join(', ')}`;
+  if (removed.length > 0) return `${path} removed ${removed.join(', ')}`;
+  for (const key of currentKeys) {
+    const violation = shapeViolation(currentRecord[key], nextRecord[key], `${path}.${key}`);
+    if (violation) return violation;
+  }
+  return null;
+}
+
+function arrayShapeViolation(current: unknown, next: unknown, path: string): string | null {
+  const currentItems = current as unknown[];
+  const nextItems = next as unknown[];
+  if (currentItems.length !== nextItems.length) {
+    return `${path} changed length from ${currentItems.length} to ${nextItems.length}`;
+  }
+  for (const [index, item] of currentItems.entries()) {
+    const violation = shapeViolation(item, nextItems[index], `${path}[${index}]`);
+    if (violation) return violation;
+  }
+  return null;
+}
+
 function shapeViolation(current: unknown, next: unknown, path = 'input'): string | null {
   const currentType = jsonType(current);
   const nextType = jsonType(next);
@@ -989,29 +1018,10 @@ function shapeViolation(current: unknown, next: unknown, path = 'input'): string
     return `${path} changed type from ${currentType} to ${nextType}`;
   }
   if (currentType === 'object') {
-    const currentRecord = current as Record<string, unknown>;
-    const nextRecord = next as Record<string, unknown>;
-    const currentKeys = Object.keys(currentRecord).sort((left, right) => left.localeCompare(right));
-    const nextKeys = Object.keys(nextRecord).sort((left, right) => left.localeCompare(right));
-    const added = nextKeys.filter((key) => !currentKeys.includes(key));
-    const removed = currentKeys.filter((key) => !nextKeys.includes(key));
-    if (added.length > 0) return `${path} added ${added.join(', ')}`;
-    if (removed.length > 0) return `${path} removed ${removed.join(', ')}`;
-    for (const key of currentKeys) {
-      const violation = shapeViolation(currentRecord[key], nextRecord[key], `${path}.${key}`);
-      if (violation) return violation;
-    }
+    return objectShapeViolation(current, next, path);
   }
   if (currentType === 'array') {
-    const currentItems = current as unknown[];
-    const nextItems = next as unknown[];
-    if (currentItems.length !== nextItems.length) {
-      return `${path} changed length from ${currentItems.length} to ${nextItems.length}`;
-    }
-    for (const [index, item] of currentItems.entries()) {
-      const violation = shapeViolation(item, nextItems[index], `${path}[${index}]`);
-      if (violation) return violation;
-    }
+    return arrayShapeViolation(current, next, path);
   }
   return null;
 }
@@ -1052,8 +1062,9 @@ export function summarizeManagedToolResult(result: unknown, isError: boolean): R
   if (isRecord(result)) {
     const content = result.content ?? result.output ?? result.text;
     const text = toolResultText(content);
+    const outcome = isError ? 'failed' : 'completed';
     return {
-      content: text === null ? `Tool ${isError ? 'failed' : 'completed'}.` : text,
+      content: text ?? `Tool ${outcome}.`,
       result_keys: Object.keys(result).slice(0, 20),
     };
   }
@@ -1096,13 +1107,17 @@ function toolResultText(content: unknown): string | null {
 
 function sliceAtCodePointBoundary(value: string, limit: number): string {
   let end = Math.min(value.length, limit);
+  const previousCodeUnit = value.slice(end - 1, end).codePointAt(0);
+  const nextCodeUnit = value.slice(end, end + 1).codePointAt(0);
   if (
     end > 0 &&
     end < value.length &&
-    value.charCodeAt(end - 1) >= 0xd800 &&
-    value.charCodeAt(end - 1) <= 0xdbff &&
-    value.charCodeAt(end) >= 0xdc00 &&
-    value.charCodeAt(end) <= 0xdfff
+    previousCodeUnit !== undefined &&
+    previousCodeUnit >= 0xd800 &&
+    previousCodeUnit <= 0xdbff &&
+    nextCodeUnit !== undefined &&
+    nextCodeUnit >= 0xdc00 &&
+    nextCodeUnit <= 0xdfff
   ) {
     end -= 1;
   }

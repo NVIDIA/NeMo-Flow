@@ -50,18 +50,18 @@ test('managed Pi MCP lease becomes ready, restarts, and releases without another
   const dispatcher = join(directory, 'dispatcher.mjs');
   await writeFile(
     dispatcher,
-    `#!/usr/bin/env node
+    String.raw`#!/usr/bin/env node
 import { appendFileSync, readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
-appendFileSync(${JSON.stringify(launches)}, 'launch\\n');
-const launchCount = readFileSync(${JSON.stringify(launches)}, 'utf8').trim().split('\\n').length;
+appendFileSync(${JSON.stringify(launches)}, 'launch\n');
+const launchCount = readFileSync(${JSON.stringify(launches)}, 'utf8').trim().split('\n').length;
 const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
 lines.on('line', (line) => {
   const request = JSON.parse(line);
   if (request.method === 'initialize') {
     process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: {
       protocolVersion: '2025-11-25', capabilities: {}, serverInfo: { name: 'nemo-relay', version: 'test' }
-    } }) + '\\n');
+    } }) + '\n');
   } else if (request.method === 'notifications/initialized' && launchCount === 1) {
     setTimeout(() => process.exit(0), 10);
   }
