@@ -905,6 +905,36 @@ impl SessionManager {
     }
 }
 
+// Keep defaulting consistent with the exporter's canonical and legacy string aliases.
+fn set_tool_metadata_default(
+    metadata: &mut Map<String, Value>,
+    canonical: &str,
+    alias: &str,
+    default: &str,
+) {
+    if [canonical, alias].iter().any(|key| {
+        metadata
+            .get(*key)
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+    }) {
+        return;
+    }
+    metadata.insert(canonical.to_string(), json!(default));
+    // The exporter uses value-matched provenance to distinguish fallbacks from
+    // explicit instrumentation when completion brings better information.
+    let defaults = metadata
+        .entry("nemo_relay.tool.execution.defaults")
+        .or_insert_with(|| json!({}));
+    if !defaults.is_object() {
+        *defaults = json!({});
+    }
+    defaults
+        .as_object_mut()
+        .expect("defaults was normalized to an object")
+        .insert(canonical.to_string(), json!(default));
+}
+
 impl Session {
     // Constructs per-session runtime state without creating a scope yet. The root agent scope is
     // opened lazily on the first event or gateway LLM call so sessions created from hints and pure
@@ -1882,13 +1912,14 @@ impl Session {
         let active_tool_arguments = arguments.clone();
         let active_tool_name = event.tool_name.clone();
         let active_tool_owner_subagent_id = owner.subagent_id.clone();
-        let metadata = tool_correlation_metadata(
+        let mut metadata = tool_correlation_metadata(
             self.event_identity_metadata(event.metadata),
             owner.status,
             owner.source.as_deref(),
             owner.subagent_id.as_deref(),
             owner.hint.as_ref(),
         );
+        self.apply_tool_execution_metadata(&mut metadata, owner.subagent_id.as_deref());
         self.set_last_tool_owner(owner.subagent_id.clone());
         let handle = tool_call(
             ToolCallParams::builder()
@@ -1921,6 +1952,26 @@ impl Session {
         Ok(())
     }
 
+    // Apply execution defaults equally to pre-hook and synthesized post-only starts.
+    fn apply_tool_execution_metadata(&self, metadata: &mut Value, subagent_id: Option<&str>) {
+        let Some(metadata) = metadata.as_object_mut() else {
+            return;
+        };
+        // Execution classification is a harness capability, not an inference
+        // from tool arguments or names. Explicit instrumentation takes precedence.
+        if let Some(tool_type) = self.agent_kind.tool_execution_type() {
+            set_tool_metadata_default(metadata, "gen_ai.tool.type", "tool_type", tool_type);
+        }
+        // Identity is independent of classification. Gateway alone does not
+        // identify an executing agent, but a known subagent still does.
+        let agent_name = subagent_id.map(|id| format!("subagent:{id}")).or_else(|| {
+            (self.agent_kind != AgentKind::Gateway).then(|| self.agent_kind.as_str().to_string())
+        });
+        if let Some(agent_name) = agent_name {
+            set_tool_metadata_default(metadata, "gen_ai.agent.name", "agent_name", &agent_name);
+        }
+    }
+
     // Ends a tool call, synthesizing a start if no matching handle exists. This keeps post-only
     // hooks observable and preserves the final result/status instead of dropping orphaned endings.
     async fn end_tool(&mut self, event: ToolEvent) -> Result<Option<SubscriberDelivery>, CliError> {
@@ -1944,13 +1995,14 @@ impl Session {
                 } else {
                     event.arguments
                 };
-                let metadata = tool_correlation_metadata(
+                let mut metadata = tool_correlation_metadata(
                     event_metadata.clone(),
                     owner.status,
                     owner.source.as_deref(),
                     owner.subagent_id.as_deref(),
                     owner.hint.as_ref(),
                 );
+                self.apply_tool_execution_metadata(&mut metadata, owner.subagent_id.as_deref());
                 self.set_last_tool_owner(owner.subagent_id.clone());
                 tool_call(
                     ToolCallParams::builder()
