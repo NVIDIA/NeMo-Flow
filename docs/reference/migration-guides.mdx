@@ -25,6 +25,9 @@ set `attestation = "integrity_only"` or `"signature_if_present"` under
 the resolved policy and artifact evidence before deployment with
 `nemo-relay plugins validate <plugin-id>`.
 
+`integrity_only` skips signature verification only. It still requires a valid
+`source.artifact` and matching `integrity.sha256` digest.
+
 ## Related Release Information
 
 For release highlights, compatibility updates, and current known issues, refer

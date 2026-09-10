@@ -137,6 +137,8 @@ fn trust_failures_have_stable_codes_messages_and_structured_errors() {
     let missing_signature = DynamicPluginTrustFailure::MissingSignature.display("fixture.trust");
     assert!(missing_signature.contains("configure trusted_public_keys"));
     assert!(missing_signature.contains("[plugins.policy.defaults]"));
+    assert!(missing_signature.contains("integrity_only"));
+    assert!(missing_signature.contains("signature_if_present"));
 
     let without_parse_errors = DynamicPluginTrustFailure::SignatureVerification {
         path: PathBuf::from("artifact.sig"),
