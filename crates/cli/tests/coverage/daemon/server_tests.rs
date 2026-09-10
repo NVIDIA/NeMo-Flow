@@ -1579,9 +1579,12 @@ async fn worker_handlers_cover_bad_sequence_and_already_published_readiness() {
     )
     .unwrap();
     assert_eq!(
-        ready_worker(State(state), Json(ready)).await.status(),
+        ready_worker(State(state.clone()), Json(ready))
+            .await
+            .status(),
         StatusCode::BAD_GATEWAY
     );
+    assert!(lock(&state.worker_sessions).contains_key("staged"));
 }
 
 #[tokio::test]

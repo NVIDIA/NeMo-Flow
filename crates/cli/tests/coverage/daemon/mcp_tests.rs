@@ -332,3 +332,65 @@ fn test_lease(daemon_origin: String) -> McpSession {
         sequence: 0,
     }
 }
+
+#[tokio::test]
+async fn worker_activation_failure_sends_sequence_one_and_propagates_socket_rejection() {
+    use crate::daemon::common::socket::Request;
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let message = socket.next().await.unwrap().unwrap();
+        let request: Request = serde_json::from_str(message.to_text().unwrap()).unwrap();
+        let ControlCommand::ActivationFailed(payload) = request.command else {
+            panic!("activation failure expected")
+        };
+        assert_eq!(payload.sequence, 1);
+        assert_eq!(payload.session_id, "mcp-test-session");
+        assert_eq!(payload.payload.activation_id, "failed-activation");
+        assert!(!payload.payload.reason.is_empty());
+        assert!(payload.validate_payload_hash());
+        let response = Event::Reply {
+            request_id: request.request_id,
+            status: 500,
+            payload: serde_json::json!({"error":{"message":"activation failure rejected"}}),
+        };
+        socket
+            .send(Message::Text(
+                serde_json::to_string(&response).unwrap().into(),
+            ))
+            .await
+            .unwrap();
+    });
+    let mut lease = test_lease(origin);
+    lease
+        .client
+        .connect(&lease.daemon_origin, ComponentRole::Mcp)
+        .await
+        .unwrap();
+    // The unit-test executable rejects the worker CLI arguments and exits before readiness.
+    let directive = BrokerDirective::LaunchWorker {
+        activation_id: "failed-activation".into(),
+        activation_token: SensitiveString::new("secret").unwrap(),
+        deadline_unix_ms: u64::MAX,
+        bind_ip: Ipv4Addr::LOCALHOST,
+        port: 0,
+        advertise_address: None,
+    };
+    let error = tokio::time::timeout(
+        Duration::from_secs(5),
+        make_route_ready(&mut lease, directive),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("activation failure rejected"),
+        "{error}"
+    );
+    server.await.unwrap();
+}

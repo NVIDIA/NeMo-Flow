@@ -171,15 +171,20 @@ async fn replacement_connection_fences_old_callbacks_and_grace_expires_once() {
         1
     );
     tokio::time::advance(Duration::from_secs(2)).await;
-    tokio::task::yield_now().await;
-    assert_eq!(
-        state
+    tokio::time::resume();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while state
             .registry
             .snapshot(identity.fingerprint())
             .unwrap()
-            .reference_count,
-        0
-    );
+            .reference_count
+            != 0
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("disconnected session expires");
     task.abort();
 }
 #[tokio::test]
