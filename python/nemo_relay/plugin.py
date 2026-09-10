@@ -447,13 +447,12 @@ async def initialize(
 ) -> PluginHostActivation:
     """Initialize the core-owned static and dynamic plugin host.
 
-    Programmatic configuration is the lowest-precedence layer. An optional
-    explicit ``plugins.toml`` replaces user-file discovery, and the system
-    file overlays either source. The returned handle owns every activated
-    plugin.
+    An optional explicit ``plugins.toml`` replaces user-file discovery. Relay
+    merges the selected file with the system file, then applies programmatic
+    configuration. The returned handle owns every activated plugin.
 
     Args:
-        config: Lowest-precedence programmatic plugin configuration.
+        config: Programmatic plugin configuration. It overrides file values.
         additional_plugins_toml: Optional explicit configuration layer.
 
     Returns:
@@ -474,7 +473,7 @@ async def activate(
     beyond one ``async with`` block.
 
     Args:
-        config: Lowest-precedence programmatic plugin configuration.
+        config: Programmatic plugin configuration. It overrides file values.
         additional_plugins_toml: Optional explicit configuration layer.
 
     Returns:
@@ -497,7 +496,7 @@ def validate(
     loading plugin code or acquiring the process-wide activation lease.
 
     Args:
-        config: Lowest-precedence programmatic plugin configuration.
+        config: Programmatic plugin configuration. It overrides file values.
         additional_plugins_toml: Optional explicit configuration layer.
 
     Returns:

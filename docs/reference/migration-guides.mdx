@@ -6,12 +6,16 @@ position: 6
 {/* SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0 */}
 
-Use this page to plan an upgrade to NeMo Relay 0.9. It will collect required
-upgrade actions as they are identified during the 0.9 development cycle.
+Use this page to plan an upgrade to NeMo Relay 0.9.
 
 ## Upgrade to NeMo Relay 0.9
 
-No migration actions have been recorded for NeMo Relay 0.9 yet.
+Plugin-host APIs changed in NeMo Relay 0.9. Earlier global initialization,
+validation, report, clear, and dynamic activation-spec APIs are removed.
+
+Use [Configure and Initialize Plugins](/configure-plugins/initialize-plugins)
+to migrate to `initialize`, `validate`, and exact validation. Keep the returned
+activation handle for the full plugin lifetime and close it during shutdown.
 
 ## Related Release Information
 

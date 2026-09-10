@@ -32,8 +32,8 @@ All three hosts include the same disabled-by-default configuration group:
 ```
 
 The atomic tests confirm that the default is valid, each required value has a
-field-specific diagnostic, enabling the group registers the expected gate, and clearing
-the plugin restores the target for future snapshots. The host must replace the example
+field-specific diagnostic, enabling the group registers the expected gate, and closing
+the activation restores the target for future snapshots. The host must replace the example
 target with an effective name discovered in the current activation before enabling the
 group against application middleware.
 
@@ -50,9 +50,8 @@ Run and inspect the Python host as follows:
    uv run python main.py
    ```
 
-2. Confirm that the async context clears configuration even when the representative work
-   raises. The example deliberately uses `clear_async` rather than blocking the running
-   event loop.
+2. Confirm that the activation closes even when the representative work raises. The
+   example awaits `activation.close()` in its cleanup path.
 
 Success has the same observable report and call behavior as the Rust host, followed by a
 clean report and successful deregistration.
@@ -74,7 +73,7 @@ Run and inspect the Node.js host as follows:
    `annotated`, and stream output preserves chunk order. The host uses the public
    `nemo-relay-node/typed` stream wrapper, which owns the native stream bridge; plugin
    callbacks receive an array of downstream chunks rather than a lazy downstream stream.
-   Before it clears the component, it awaits `relay.flushSubscribers()` so queued scope-end
+   Before it closes the activation, it awaits `relay.flushSubscribers()` so queued scope-end
    sanitizers finish before their callbacks are deregistered.
 
 ## Rust Host

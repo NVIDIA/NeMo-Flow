@@ -157,7 +157,7 @@ fn lock_plugin_activation(
 /// `plugins.toml` discovery.
 ///
 /// `additional_plugins_toml` may be null. When supplied it replaces user-file
-/// discovery, above programmatic configuration and below the system file.
+/// discovery. Relay merges it with the system file, then applies `config_json`.
 /// The returned handle owns all activated plugin registrations and runtimes.
 ///
 /// # Safety
