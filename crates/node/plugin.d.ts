@@ -100,6 +100,10 @@ export interface PluginHostActivation extends AsyncDisposable {
 export interface PluginHostReport {
   config: ConfigReport;
   dynamic_plugins: DynamicPluginValidationReport[];
+  /** Existing plugins.toml files that contributed to the resolved configuration. */
+  config_paths: string[];
+  /** Fully merged plugin configuration with sensitive values redacted. */
+  resolved_config: Json;
 }
 
 export type DynamicPluginCheckState = 'unknown' | 'valid' | 'invalid';
@@ -409,10 +413,10 @@ export declare function ComponentSpec(
 /**
  * Initialize the core-owned static and dynamic plugin host.
  *
- * Resolves programmatic config with either an explicit or discovered user
- * file, then the system configuration, and activates one owned lifetime.
+ * Resolves an explicit or discovered user file with the system configuration,
+ * then applies programmatic config and activates one owned lifetime.
  *
- * @param config - Lowest-precedence programmatic configuration.
+ * @param config - Programmatic configuration. It overrides file values.
  * @param additionalPluginsToml - Optional explicit `plugins.toml` layer.
  * @returns An owned activation with the unified host report.
  * @remarks Keep the returned activation alive while callbacks may run and call
@@ -425,7 +429,7 @@ export declare function initialize(config: PluginConfig, additionalPluginsToml?:
  * Resolves the same layered configuration and trust policy used by activation
  * while leaving the process-wide host lease untouched.
  *
- * @param config - Lowest-precedence programmatic configuration.
+ * @param config - Programmatic configuration. It overrides file values.
  * @param additionalPluginsToml - Optional explicit `plugins.toml` layer.
  * @returns Structured static and dynamic validation report.
  * @remarks Validation performs no activation and does not acquire the host lease.

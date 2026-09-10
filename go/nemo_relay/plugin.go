@@ -276,6 +276,8 @@ type PluginHostActivation struct {
 type PluginHostReport struct {
 	Config         ConfigReport                    `json:"config"`
 	DynamicPlugins []DynamicPluginValidationReport `json:"dynamic_plugins"`
+	ConfigPaths    []string                        `json:"config_paths"`
+	ResolvedConfig map[string]any                  `json:"resolved_config"`
 }
 
 // DynamicPluginCheckState is the result of one validation check.
@@ -412,8 +414,8 @@ func marshalPluginHostActivationConfig(config PluginConfig) ([]byte, error) {
 }
 
 // Initialize activates the core-owned static and dynamic plugin host.
-// Programmatic config is lowest precedence. An optional explicit file replaces
-// user-file discovery, and the system file overlays either source.
+// An optional explicit file replaces user-file discovery. Relay merges the
+// selected file with the system file, then applies programmatic config.
 func Initialize(config PluginConfig, additionalPluginsTOML *string) (*PluginHostActivation, PluginHostReport, error) {
 	configPayload, err := marshalPluginHostActivationConfig(config)
 	if err != nil {
