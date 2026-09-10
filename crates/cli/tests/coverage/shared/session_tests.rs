@@ -3,6 +3,7 @@
 
 use axum::http::HeaderMap;
 use nemo_relay::api::event::{Event, ScopeCategory};
+use nemo_relay::api::llm::{LlmCallExecuteParams, llm_call_execute};
 use nemo_relay::api::runtime::EventSubscriberFn;
 use nemo_relay::api::subscriber::{deregister_subscriber, flush_subscribers, register_subscriber};
 use nemo_relay::observability::OpenTelemetryType;
@@ -2524,6 +2525,151 @@ async fn coding_agent_gen_ai_llm_spans_carry_conversation_identity() {
         conversations_by_model.get("gpt-test").map(String::as_str),
         Some("codex-session")
     );
+}
+
+#[tokio::test]
+async fn managed_gateway_gen_ai_llm_spans_carry_merged_conversation_identity() {
+    let _guard = PLUGIN_CONFIG_TEST_LOCK.lock().await;
+    let subscriber_name = "cli-managed-gateway-gen-ai-conversation-test";
+    let _ = deregister_subscriber(subscriber_name);
+    let (subscriber, exporter) = make_gen_ai_test_subscriber("managed-gen-ai-test-scope");
+    subscriber.register(subscriber_name).unwrap();
+    let manager = SessionManager::new(session_test_config());
+
+    let mut claude_start =
+        llm_start_with_messages_task("managed-claude-session", "Inspect the repository.");
+    claude_start.conversation_id = Some("managed-claude-conversation".into());
+    claude_start.metadata = json!({
+        "session_id": "untrusted-claude-session",
+        "conversation_id": "untrusted-claude-conversation",
+        "merge_marker": "claude-preserved"
+    });
+    let claude_prep = manager
+        .prepare_gateway_call(&HeaderMap::new(), claude_start)
+        .await
+        .unwrap();
+    assert_eq!(
+        claude_prep.metadata["session_id"],
+        json!("managed-claude-session")
+    );
+    assert_eq!(
+        claude_prep.metadata["conversation_id"],
+        json!("managed-claude-conversation")
+    );
+    assert_eq!(claude_prep.metadata["agent_kind"], json!("claude-code"));
+    assert_eq!(
+        claude_prep.metadata["merge_marker"],
+        json!("claude-preserved")
+    );
+    execute_prepared_llm(
+        &manager,
+        claude_prep,
+        json!({
+            "model": "claude-test",
+            "content": [{"type": "text", "text": "Done."}],
+            "stop_reason": "end_turn"
+        }),
+    )
+    .await;
+
+    let mut codex_start =
+        llm_start_with_responses_task("managed-codex-session", "Inspect the repository.");
+    codex_start.metadata = json!({
+        "session_id": "untrusted-codex-session",
+        "merge_marker": "codex-preserved"
+    });
+    let codex_prep = manager
+        .prepare_gateway_call(&HeaderMap::new(), codex_start)
+        .await
+        .unwrap();
+    assert_eq!(
+        codex_prep.metadata["session_id"],
+        json!("managed-codex-session")
+    );
+    assert!(codex_prep.metadata.get("conversation_id").is_none());
+    assert_eq!(codex_prep.metadata["agent_kind"], json!("codex"));
+    assert_eq!(
+        codex_prep.metadata["merge_marker"],
+        json!("codex-preserved")
+    );
+    execute_prepared_llm(
+        &manager,
+        codex_prep,
+        json!({
+            "id": "codex-response",
+            "model": "gpt-test",
+            "status": "completed",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Done."}]
+            }]
+        }),
+    )
+    .await;
+
+    manager.close_all("test_shutdown").await.unwrap();
+    flush_subscribers().unwrap();
+    subscriber.force_flush().unwrap();
+    assert!(subscriber.deregister(subscriber_name).unwrap());
+
+    let spans = exporter.get_finished_spans().unwrap();
+    let conversations_by_model = spans
+        .iter()
+        .filter_map(|span| {
+            let attributes = attr_map(&span.attributes);
+            Some((
+                attributes.get("gen_ai.request.model")?.clone(),
+                attributes.get("gen_ai.conversation.id")?.clone(),
+            ))
+        })
+        .collect::<HashMap<_, _>>();
+    assert_eq!(
+        conversations_by_model
+            .get("claude-test")
+            .map(String::as_str),
+        Some("managed-claude-conversation")
+    );
+    assert_eq!(
+        conversations_by_model.get("gpt-test").map(String::as_str),
+        Some("managed-codex-session")
+    );
+}
+
+async fn execute_prepared_llm(manager: &SessionManager, prep: GatewayCallPrep, response: Value) {
+    let GatewayCallPrep {
+        scope_stack,
+        session_id,
+        provider_name,
+        request,
+        parent,
+        attributes,
+        metadata,
+        model_name,
+        owner_subagent_id: _,
+        bypass_managed_pipeline: _,
+        session_finish,
+    } = prep;
+    let func = Arc::new(move |_request| {
+        let response = response.clone();
+        Box::pin(async move { Ok(response) }) as _
+    });
+    let params = LlmCallExecuteParams::builder()
+        .name(provider_name)
+        .request(request)
+        .func(func)
+        .parent_opt(parent)
+        .attributes(attributes)
+        .metadata(metadata)
+        .model_name_opt(model_name)
+        .build();
+    TASK_SCOPE_STACK
+        .scope(scope_stack, async move { llm_call_execute(params).await })
+        .await
+        .unwrap();
+    manager
+        .finish_gateway_call(&session_id, session_finish)
+        .await;
 }
 
 #[tokio::test]
