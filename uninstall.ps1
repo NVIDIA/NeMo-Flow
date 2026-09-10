@@ -34,6 +34,9 @@ Examples:
 This removes only the installed CLI binary. It does not remove PATH entries,
 Relay configuration, observability output, or coding-agent integrations. It
 refuses removal while this CLI has active Relay processes unless -Force is used.
+Active managed daemon processes always block removal, including with -Force.
+Stop managed deployments through their administrative lifecycle first. Managed
+bundles, daemon identity/trust state, and deployment services are preserved.
 '@ | Write-Output
 }
 
@@ -49,7 +52,7 @@ function Test-RelayMcpProcess([string]$CommandLine) {
     return $CommandLine -match '(?i)(?:^|\s)mcp(?:\s|$)'
 }
 
-function Get-ActiveRelayShutdownTargets([string]$Destination) {
+function Get-ActiveRelayShutdownTargets([string]$Destination, [switch]$ManagedOnly) {
     if ($env:OS -ne 'Windows_NT') {
         return @()
     }
@@ -72,6 +75,13 @@ function Get-ActiveRelayShutdownTargets([string]$Destination) {
         $usesInstalledCli = $executablePath.Equals($Destination, [System.StringComparison]::OrdinalIgnoreCase) -or
             ($hasExpectedName -and $commandLine.IndexOf($Destination, [System.StringComparison]::OrdinalIgnoreCase) -ge 0)
         if (-not $usesInstalledCli) {
+            continue
+        }
+
+        if ($ManagedOnly) {
+            if ($commandLine -match '(?i)(?:^|\s)daemon(?:\s|$)') {
+                $targets[[string]$relayProcess.ProcessId] = $relayProcess
+            }
             continue
         }
 
@@ -157,13 +167,31 @@ function Stop-ConfirmedProcessTree($Process, [string]$Destination) {
     if (-not (Test-ActiveRelayShutdownTarget $Process $Destination)) {
         Fail "process $($Process.ProcessId) changed after confirmation; refusing to terminate it"
     }
+    Assert-NoManagedRelayProcesses $Destination
     & taskkill.exe /PID $Process.ProcessId /T /F | Out-Null
     if ($LASTEXITCODE -ne 0) {
         Fail "could not terminate process $($Process.ProcessId)"
     }
 }
 
+function Assert-NoManagedRelayProcesses([string]$Destination) {
+    # Managed workers can serve sessions outside their local process tree.
+    $managedProcesses = @(Get-ActiveRelayShutdownTargets $Destination -ManagedOnly)
+    if ($managedProcesses.Count -gt 0) {
+        foreach ($process in $managedProcesses) {
+            [Console]::Error.WriteLine((Format-ProcessDescription $process))
+        }
+        $message = 'active managed daemon deployment; stop it through its administrative lifecycle first. -Force cannot override this restriction'
+        if ($DryRun) {
+            [Console]::Error.WriteLine("Dry run would refuse removal: $message")
+            return
+        }
+        Fail $message
+    }
+}
+
 function Stop-ActiveRelayProcesses([string]$Destination) {
+    Assert-NoManagedRelayProcesses $Destination
     $activeTargets = @(Get-ActiveRelayShutdownTargets $Destination)
     if ($activeTargets.Count -eq 0) {
         return

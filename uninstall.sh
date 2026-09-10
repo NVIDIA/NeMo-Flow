@@ -26,6 +26,9 @@ Examples:
 This removes only the installed CLI binary. It does not remove PATH entries,
 Relay configuration, observability output, or coding-agent integrations. It
 refuses removal while this CLI has active Relay processes unless --force is used.
+Active managed daemon processes always block removal, including with --force.
+Stop managed deployments through their administrative lifecycle first. Managed
+bundles, daemon identity/trust state, and deployment services are preserved.
 EOF
 }
 
@@ -222,7 +225,25 @@ process_is_running() {
     kill -0 "$1" 2>/dev/null
 }
 
+check_managed_relay_processes() {
+    # Managed workers can serve sessions outside their local process tree.
+    # Check before mapping MCP processes to agents or requesting any shutdown.
+    for relay_pid in $(active_relay_process_pids); do
+        case " $(process_command "$relay_pid") " in
+            *" daemon "*)
+                describe_process "$relay_pid" >&2
+                if [ "$dry_run" -eq 1 ]; then
+                    printf '%s\n' 'Dry run would refuse removal: active managed daemon deployment; stop it through its administrative lifecycle first. --force cannot override this restriction.' >&2
+                    return 0
+                fi
+                error 'active managed daemon deployment; stop it through its administrative lifecycle first. --force cannot override this restriction'
+                ;;
+        esac
+    done
+}
+
 stop_active_relay_processes() {
+    check_managed_relay_processes
     active_targets=$(active_shutdown_target_pids)
     [ -n "$active_targets" ] || return 0
 
@@ -253,6 +274,7 @@ stop_active_relay_processes() {
         if ! active_shutdown_target_exists "$active_pid"; then
             error "process ${active_pid} changed after confirmation; refusing to terminate it"
         fi
+        check_managed_relay_processes
         terminate_process_tree "$active_pid"
         wait_for_process_exit "$active_pid"
     done

@@ -198,6 +198,38 @@ test_active_relay_process_refuses_removal() {
     return 0
 }
 
+test_managed_daemon_refuses_force() {
+    install_dir="${test_root}/managed-bin"
+    relay_binary="${install_dir}/nemo-relay"
+    mkdir -p "$install_dir"
+    build_relay_fixture "$relay_binary"
+    for role in broker mcp worker hook; do
+        tests_run=$((tests_run + 1))
+        if [ "$role" = broker ]; then
+            "$relay_binary" daemon &
+        else
+            "$relay_binary" daemon "$role" &
+        fi
+        active_session_pid=$!
+        sleep 1
+        for option in '' --force --dry-run; do
+            run_command sh "$uninstaller" --install-dir "$install_dir" $option
+            if [ "$option" = --dry-run ]; then
+                assert_success
+            else
+                assert_failure
+            fi
+            assert_contains "$run_output" 'active managed daemon deployment'
+            assert_contains "$run_output" '--force cannot override'
+            [ -e "$relay_binary" ] || fail 'managed binary was removed'
+            kill -0 "$active_session_pid" || fail 'managed process was terminated'
+        done
+        kill "$active_session_pid"
+        wait "$active_session_pid" 2>/dev/null || true
+        active_session_pid=""
+    done
+}
+
 test_force_confirmation_controls_shutdown() {
     tests_run=$((tests_run + 1))
     install_dir="${test_root}/force-bin"
@@ -315,6 +347,7 @@ test_custom_installation_dry_run_and_removal
 test_absent_installation_is_idempotent
 test_active_relay_process_refuses_removal
 test_force_confirmation_controls_shutdown
+test_managed_daemon_refuses_force
 test_mcp_owner_is_prompted_once
 test_force_refuses_its_own_agent_tree
 

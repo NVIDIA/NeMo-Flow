@@ -53,6 +53,47 @@ function Assert-Failure {
 try {
     New-Item -ItemType Directory -Force -Path $TestRoot | Out-Null
 
+    # Exercise Windows process classification on every host without signaling
+    # real processes. Keep the real Windows executable tests below as well.
+    & {
+        $originalOS = $env:OS
+        try {
+            $env:OS = 'Windows_NT'
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile($Uninstaller, [ref]$null, [ref]$null)
+            foreach ($definition in $ast.FindAll({
+                param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst]
+            }, $false)) {
+                . ([scriptblock]::Create($definition.Extent.Text))
+            }
+            $destination = 'C:\relay\nemo-relay.exe'
+            $agent = [pscustomobject]@{ ProcessId = 10; ParentProcessId = 1; Name = 'codex.exe'; ExecutablePath = 'C:\codex.exe'; CommandLine = 'codex' }
+            $relay = [pscustomobject]@{ ProcessId = 11; ParentProcessId = 10; Name = 'nemo-relay.exe'; ExecutablePath = $destination; CommandLine = "$destination mcp" }
+            function Get-CimInstance { @($agent, $relay) }
+            function Read-Host { throw 'unexpected shutdown prompt' }
+            $Force = $true
+            $DryRun = $false
+            Assert-True ((Get-ActiveRelayShutdownTargets $destination).ProcessId -eq 10) 'personal MCP did not select its agent'
+            foreach ($role in @('daemon', 'daemon mcp', 'daemon worker', 'daemon hook')) {
+                $relay.CommandLine = "$destination $role"
+                try {
+                    Stop-ActiveRelayProcesses $destination
+                    throw 'managed uninstall unexpectedly succeeded'
+                }
+                catch {
+                    Assert-Contains $_.Exception.Message 'active managed daemon deployment'
+                }
+            }
+            $relay.ExecutablePath = 'C:\other\nemo-relay.exe'
+            $relay.CommandLine = 'C:\other\nemo-relay.exe daemon'
+            Assert-True (@(Get-ActiveRelayShutdownTargets $destination -ManagedOnly).Count -eq 0) 'unrelated installation blocked uninstall'
+        }
+        finally {
+            $env:OS = $originalOS
+        }
+    }
+    $TestsRun += 6
+
     $TestsRun++
     Invoke-Uninstaller -Arguments @('-Help')
     Assert-Success
@@ -97,6 +138,38 @@ try {
     Assert-Contains $RunOutput "NeMo Relay CLI is not installed at $AbsentDestination"
 
     if ($env:OS -eq 'Windows_NT') {
+        foreach ($role in @('daemon', 'daemon mcp', 'daemon worker', 'daemon hook')) {
+            $TestsRun++
+            $ManagedDir = Join-Path $TestRoot ('managed-' + $TestsRun)
+            $ManagedDestination = Join-Path $ManagedDir 'nemo-relay.exe'
+            New-Item -ItemType Directory -Path $ManagedDir | Out-Null
+            Copy-Item -LiteralPath $env:ComSpec -Destination $ManagedDestination
+            # Keep a real executable alive with the managed command tokens in argv.
+            $ManagedProcess = Start-Process -FilePath $ManagedDestination -ArgumentList @(
+                '/d', '/c', "timeout /t 30 /nobreak >NUL & rem $role"
+            ) -PassThru
+            try {
+                Start-Sleep -Milliseconds 500
+                foreach ($mode in @('normal', 'force', 'dry-run')) {
+                    $arguments = @('-InstallDir', $ManagedDir)
+                    if ($mode -eq 'force') { $arguments += '-Force' }
+                    if ($mode -eq 'dry-run') { $arguments += '-DryRun' }
+                    Invoke-Uninstaller -Arguments $arguments -InputText 'y'
+                    if ($mode -eq 'dry-run') { Assert-Success } else { Assert-Failure }
+                    Assert-Contains $RunOutput 'active managed daemon deployment'
+                    Assert-Contains $RunOutput '-Force cannot override'
+                    Assert-True (-not $ManagedProcess.HasExited) 'managed process was terminated'
+                    Assert-True (Test-Path -LiteralPath $ManagedDestination) 'managed binary was removed'
+                }
+            }
+            finally {
+                if (-not $ManagedProcess.HasExited) {
+                    Stop-Process -Id $ManagedProcess.Id -Force
+                    $ManagedProcess.WaitForExit()
+                }
+            }
+        }
+
         $TestsRun++
         $ActiveDir = Join-Path $TestRoot 'active-bin'
         $ActiveDestination = Join-Path $ActiveDir 'nemo-relay.exe'
