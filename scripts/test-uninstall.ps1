@@ -38,10 +38,10 @@ function Invoke-Uninstaller {
     )
 
     if ($null -eq $InputText) {
-        $script:RunOutput = (& $PowerShell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $Uninstaller @Arguments 2>&1 | Out-String)
+        $script:RunOutput = (& $PowerShell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $Uninstaller @Arguments 2>&1 | Out-String -Width 4096)
     }
     else {
-        $script:RunOutput = ($InputText | & $PowerShell -NoProfile -ExecutionPolicy Bypass -File $Uninstaller @Arguments 2>&1 | Out-String)
+        $script:RunOutput = ($InputText | & $PowerShell -NoProfile -ExecutionPolicy Bypass -File $Uninstaller @Arguments 2>&1 | Out-String -Width 4096)
     }
     $script:RunStatus = $LASTEXITCODE
 }
