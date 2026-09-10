@@ -18,7 +18,7 @@ use tokio_tungstenite::tungstenite::{Message, protocol::WebSocketConfig};
 
 pub(crate) const MCP_SOCKET_PATH: &str = "/_nemo-relay/control/v2/mcp";
 pub(crate) const WORKER_SOCKET_PATH: &str = "/_nemo-relay/control/v2/worker";
-pub(crate) const QUEUE_CAPACITY: usize = 64;
+pub(crate) const QUEUE_CAPACITY: usize = 1024;
 pub(crate) const GRACE: Duration = Duration::from_secs(30);
 pub(crate) const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
 

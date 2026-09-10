@@ -245,7 +245,7 @@ connection cannot invalidate its successor. Each control command also has a
 five-second deadline, including time waiting to be sent.
 
 Control messages are limited to 256 KiB. Outbound queues and client event queues
-hold at most 64 messages; clients also bound outstanding replies to 64. Queue
+hold at most 1,024 messages; clients also bound outstanding replies to 1,024. Queue
 overflow closes the connection and triggers normal recovery. These limits are
 independent of HTTP body streaming and have no CLI configuration.
 
