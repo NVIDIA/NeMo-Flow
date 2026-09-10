@@ -108,7 +108,8 @@ is_mcp_command() {
 }
 
 active_relay_process_pids() {
-    for process_pid in $(ps -axww -o pid=,command= | awk -v name="$binary_name" '
+    process_snapshot=$(ps -axww -o pid=,command=) || return 1
+    for process_pid in $(printf '%s\n' "$process_snapshot" | awk -v name="$binary_name" '
         # Inspect the full command: an executable path may contain spaces.
         $0 ~ ("(^|[[:space:]]|/)" name "([[:space:]]|$)") { print $1 }
     '); do
@@ -141,14 +142,16 @@ shutdown_target_pid() {
 }
 
 active_shutdown_target_pids() {
-    for relay_pid in $(active_relay_process_pids); do
+    relay_pids=$(active_relay_process_pids) || return 1
+    for relay_pid in $relay_pids; do
         shutdown_target_pid "$relay_pid"
     done | awk 'NF && !seen[$0]++ { print }'
 }
 
 active_shutdown_target_exists() {
     expected_pid=$1
-    for relay_pid in $(active_relay_process_pids); do
+    relay_pids=$(active_relay_process_pids) || error 'could not inspect active processes before uninstall'
+    for relay_pid in $relay_pids; do
         [ "$(shutdown_target_pid "$relay_pid")" = "$expected_pid" ] && return 0
     done
     return 1
@@ -229,7 +232,8 @@ process_is_running() {
 check_managed_relay_processes() {
     # Managed workers can serve sessions outside their local process tree.
     # Check before mapping MCP processes to agents or requesting any shutdown.
-    for relay_pid in $(active_relay_process_pids); do
+    relay_pids=$(active_relay_process_pids) || error 'could not inspect active processes before uninstall'
+    for relay_pid in $relay_pids; do
         case " $(process_command "$relay_pid") " in
             *" daemon "*)
                 describe_process "$relay_pid" >&2
@@ -244,7 +248,7 @@ check_managed_relay_processes() {
 
 stop_active_relay_processes() {
     check_managed_relay_processes
-    active_targets=$(active_shutdown_target_pids)
+    active_targets=$(active_shutdown_target_pids) || error 'could not inspect active processes before uninstall'
     [ -n "$active_targets" ] || return 0
 
     printf '%s\n' 'Active Relay processes prevent uninstallation:' >&2
@@ -278,7 +282,7 @@ stop_active_relay_processes() {
         wait_for_process_exit "$active_pid"
     done
 
-    remaining_targets=$(active_shutdown_target_pids)
+    remaining_targets=$(active_shutdown_target_pids) || error 'could not inspect active processes before uninstall'
     [ -z "$remaining_targets" ] || error "refusing to uninstall because Relay processes remain active"
 }
 

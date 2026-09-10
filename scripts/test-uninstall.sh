@@ -375,6 +375,37 @@ test_active_installation_path_with_spaces() {
     active_session_pid=""
 }
 
+test_process_inspection_failure_refuses_removal() {
+    tests_run=$((tests_run + 1))
+    install_dir="${test_root}/inspection-bin"
+    mock_dir="${test_root}/inspection-mocks"
+    mkdir -p "$install_dir" "$mock_dir"
+    : >"$install_dir/nemo-relay"
+    cat >"$mock_dir/ps" <<'EOF'
+#!/bin/sh
+count=0
+[ ! -f "$PS_COUNT_FILE" ] || count=$(cat "$PS_COUNT_FILE")
+count=$((count + 1))
+printf '%s\n' "$count" >"$PS_COUNT_FILE"
+[ "$count" -lt "$PS_FAIL_AT" ] || exit 1
+exit 0
+EOF
+    chmod +x "$mock_dir/ps"
+    # Fail both the managed precheck and the subsequent shutdown-target scan.
+    for fail_at in 1 2; do
+        for option in '' --force --dry-run; do
+            rm -f "$mock_dir/count"
+            run_command env PATH="$mock_dir:$PATH" PS_COUNT_FILE="$mock_dir/count" \
+                PS_FAIL_AT="$fail_at" sh "$uninstaller" --install-dir "$install_dir" $option
+            assert_failure
+            assert_contains "$run_output" 'could not inspect active processes'
+            assert_not_contains "$run_output" 'Would remove NeMo Relay CLI'
+            [ -e "$install_dir/nemo-relay" ] || fail 'inspection failure removed binary'
+        done
+    done
+}
+
+test_process_inspection_failure_refuses_removal
 test_active_installation_path_with_spaces
 test_interface_validation
 test_default_installation_removal
