@@ -656,6 +656,14 @@ with high-cardinality attributes.
 
 ## GenAI Projection
 
+Set an OpenTelemetry endpoint's `type` to `gen_ai` to select this projection:
+
+```toml
+[[components.config.opentelemetry.endpoints]]
+type = "gen_ai"
+endpoint = "http://localhost:4318/v1/traces"
+```
+
 The `gen_ai` endpoint uses these operation names:
 
 | Relay scope | OpenTelemetry operation |
@@ -695,6 +703,8 @@ type as identity; recognized Gemini native tool groups emit an identity for each
 tool in the group. Explicit native names are preserved. Unknown unnamed native
 definitions are omitted rather than assigned invented identities.
 
+### Tool Identity
+
 Tool identity comes from instrumentation metadata and the typed tool-call ID,
 never from similarly named fields in tool arguments or results. Nonblank string
 metadata supports `gen_ai.tool.name`, `gen_ai.tool.type` / `tool_type`,
@@ -717,12 +727,6 @@ refine inferred tool type and agent name, including through their aliases.
 Explicit start metadata and typed tool-call IDs remain authoritative; later
 inferred values cannot replace them. This provenance is not exported as a GenAI
 attribute.
-
-```toml
-[[components.config.opentelemetry.endpoints]]
-type = "gen_ai"
-endpoint = "http://localhost:4318/v1/traces"
-```
 
 ### Error Type Mapping
 
