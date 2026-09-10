@@ -41,6 +41,15 @@ mode. See the [0.9 migration guidance](/reference/migration-guides).
 
 </Warning>
 
+### Compatibility changes
+
+- Python plugin-host activation now raises `ValueError` for invalid static
+  configuration and `FileNotFoundError` for unavailable plugin configuration
+  or resources. Code that caught `RuntimeError` from
+  `nemo_relay.plugin.initialize()` or `nemo_relay.plugin.activate()` must
+  update its exception handlers. Use the [0.9 migration guide](/reference/migration-guides)
+  for the recommended validation workflow.
+
 ## Known Issues in 0.9
 
 - OTLP collectors can return a successful response while rejecting individual

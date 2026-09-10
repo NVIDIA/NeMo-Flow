@@ -28,6 +28,16 @@ the resolved policy and artifact evidence before deployment with
 `integrity_only` skips signature verification only. It still requires a valid
 `source.artifact` and matching `integrity.sha256` digest.
 
+### Update Python plugin-host exception handlers
+
+`nemo_relay.plugin.initialize()` and `nemo_relay.plugin.activate()` now raise
+`ValueError` when static plugin configuration is invalid, and
+`FileNotFoundError` when a referenced plugin configuration or resource is
+unavailable. Earlier releases surfaced these failures as `RuntimeError`.
+Update exception handlers accordingly. Use `nemo_relay.plugin.validate()` or
+`nemo_relay.plugin.validate_exact()` to inspect static configuration diagnostics
+without activating plugins.
+
 ## Related Release Information
 
 For release highlights, compatibility updates, and current known issues, refer
