@@ -16,31 +16,66 @@ not the stop command for a managed daemon service.
 Run these checks before rollout and after an upgrade. Use a test session and a
 non-sensitive prompt. Keep the harness open throughout the request checks.
 
-1. Run `nemo-relay doctor --managed-bundle <installed-bundle-path> --managed-bundle-sha256 <trusted-digest>`
-   in the user's prepared environment. Expect bundle and environment validation
-   to succeed. This does not prove live daemon or worker readiness.
-2. Start the managed harness. Check its MCP status and stderr logs. With
-   info-level JSONL logging enabled, expect `configuration_resolved` with
-   `mode = "managed_worker"`, followed by `worker_ready` (message: `Daemon worker
-   is ready`). Confirm the MCP handshake in the harness status view. For a reused
-   worker, find its earlier ready event and confirm the worker still exists.
-3. Confirm that the worker's endpoint is on the client computer and reachable
-   from the daemon. Use the listener and network checks in your runbook. A
-   process listing alone is insufficient.
-4. Send a model request through the harness. Confirm streaming output arrives
-   before completion and that the selected provider URL is the daemon origin.
-   Trigger a harmless tool operation to exercise a managed hook.
-5. Check an observable result from your configured worker plugin: for example,
-   new ATOF records in the approved collector for this session, or the expected
-   outcome of a test policy. Confirm both model and hook activity where supported.
-6. Open a second harness for the same user-machine identity. Confirm it reuses
-   the worker. Close both sessions, allow up to two minutes for accepted requests
-   to drain, and confirm the worker exits. If a process disappeared without
-   unregistering, allow the MCP lease-expiry interval first.
+<Steps>
 
+<Step title="Validate the Bundle">
+
+Run `nemo-relay doctor --managed-bundle <installed-bundle-path> --managed-bundle-sha256 <trusted-digest>`
+in the user's prepared environment. Expect bundle and environment validation
+to succeed. This does not prove live daemon or worker readiness.
+
+</Step>
+
+<Step title="Confirm Worker Readiness">
+
+Start the managed harness. Check its MCP status and stderr logs. With
+info-level JSONL logging enabled, expect `configuration_resolved` with
+`mode = "managed_worker"`, followed by `worker_ready` (message: `Daemon worker
+is ready`). Confirm the MCP handshake in the harness status view. For a reused
+worker, find its earlier ready event and confirm the worker still exists.
+
+</Step>
+
+<Step title="Check Worker Reachability">
+
+Confirm that the worker's endpoint is on the client computer and reachable
+from the daemon. Use the listener and network checks in your runbook. A
+process listing alone is insufficient.
+
+</Step>
+
+<Step title="Exercise Model Requests and Hooks">
+
+Send a model request through the harness. Confirm streaming output arrives
+before completion and that the selected provider URL is the daemon origin.
+Trigger a harmless tool operation to exercise a managed hook.
+
+</Step>
+
+<Step title="Check Plugin Results">
+
+Check an observable result from your configured worker plugin: for example,
+new ATOF records in the approved collector for this session, or the expected
+outcome of a test policy. Confirm both model and hook activity where supported.
+
+</Step>
+
+<Step title="Verify Sharing and Shutdown">
+
+Open a second harness for the same user-machine identity. Confirm it reuses
+the worker. Close both sessions, allow up to two minutes for accepted requests
+to drain, and confirm the worker exits. If a process disappeared without
+unregistering, allow the MCP lease-expiry interval first.
+
+</Step>
+
+</Steps>
+
+<Warning>
 A successful provider response or `daemon_mcp_ready` event **does not prove worker
 execution**. Pass-through can also produce both. Do not accept a deployment until
 the worker and expected plugin behavior have been observed.
+</Warning>
 
 For a remote deployment, also test a planned daemon restart and a VPN reconnect.
 Verify recovery or start a fresh harness if the old one cannot restore its lease.
@@ -99,9 +134,17 @@ MCP process with a nonzero status.
 
 ## Keep Identity State
 
-The state base is `XDG_CONFIG_HOME` when set, otherwise `$HOME/.config` or
-`%USERPROFILE%\.config`. Relay stores daemon state below `nemo-relay/daemon`.
-The runbooks give system services a persistent, private base directory.
+The state base is `XDG_CONFIG_HOME` when set. Otherwise Relay uses `HOME/.config`
+if `HOME` is set, then `USERPROFILE/.config` if `USERPROFILE` is set. This order
+also applies on Windows: `HOME` wins over `USERPROFILE`. Relay stores daemon
+state below `nemo-relay/daemon` in that base directory.
+
+<Note>
+Before backup or recovery, check these variables in the environment of the
+account and process that owns the state. An interactive shell can differ from a
+service or managed harness. The runbooks give system services an explicit,
+persistent `XDG_CONFIG_HOME`; client processes can use a different base.
+</Note>
 
 `daemon-identity.pk8` is the daemon signing key. `machine-identity.pk8` identifies
 the client machine-user. Trust pins are stored under `pins` and are scoped to the
@@ -124,17 +167,45 @@ a local token file revokes a binding from the running broker.
 
 ## Upgrade and Roll Back
 
-1. Schedule a maintenance window. Save the approved binary version, service
-   definition, configuration, and separately trusted bundle digest.
-2. Ask users to close affected harnesses. Let accepted requests drain and wait
-   for workers to exit. A service-manager stop can interrupt active streams.
-3. Stop the daemon with the matching service manager. On clients, ensure no MCP
-   or worker process still uses the binary, especially on Windows.
-4. Install the verified replacement binary at the same administrator-owned path.
-   Keep identity state and existing immutable bundle bytes. Do not use personal
-   `nemo-relay install` or `integrations refresh` to regenerate this bundle.
-5. Start the service, validate the bundle digest, and complete worker-backed
-   verification with one client before reopening the deployment.
+<Steps>
+
+<Step title="Prepare the Upgrade">
+
+Schedule a maintenance window. Save the approved binary version, service
+definition, configuration, and separately trusted bundle digest.
+
+</Step>
+
+<Step title="Drain Sessions">
+
+Ask users to close affected harnesses. Let accepted requests drain and wait
+for workers to exit. A service-manager stop can interrupt active streams.
+
+</Step>
+
+<Step title="Stop Processes">
+
+Stop the daemon with the matching service manager. On clients, ensure no MCP
+or worker process still uses the binary, especially on Windows.
+
+</Step>
+
+<Step title="Replace the Binary">
+
+Install the verified replacement binary at the same administrator-owned path.
+Keep identity state and existing immutable bundle bytes. Do not use personal
+`nemo-relay install` or `integrations refresh` to regenerate this bundle.
+
+</Step>
+
+<Step title="Verify Before Rollout">
+
+Start the service, validate the bundle digest, and complete worker-backed
+verification with one client before reopening the deployment.
+
+</Step>
+
+</Steps>
 
 For rollback, stop affected processes and restore the previous verified binary
 and compatible service/configuration files. Keep the same persistent identities

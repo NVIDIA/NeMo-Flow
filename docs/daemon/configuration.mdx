@@ -17,12 +17,23 @@ starting the service runbook for your platform.
 | --- | --- | --- |
 | Runtime configuration | `/etc/nemo-relay/config.toml` | `%ProgramData%\nemo-relay\config.toml` |
 | Plugin manifest | `/etc/nemo-relay/plugins.toml` | `%ProgramData%\nemo-relay\plugins.toml` |
-| Default identity state | `$HOME/.config/nemo-relay/daemon` | `%USERPROFILE%\.config\nemo-relay\daemon` |
+| Identity state | See the resolution order below. | See the resolution order below. |
 
-`XDG_CONFIG_HOME`, when set, replaces the `.config` base for identity state on all
-platforms. It does not change the managed worker's system configuration path.
-The service runbooks set an explicit state base for the daemon. Client identities
-stay with the user and must not be shared or copied into a machine image.
+Relay resolves identity state in this order on every platform, including Windows:
+
+1. If `XDG_CONFIG_HOME` is set, use `<XDG_CONFIG_HOME>/nemo-relay/daemon`.
+2. Otherwise, if `HOME` is set, use `<HOME>/.config/nemo-relay/daemon`.
+3. Otherwise, if `USERPROFILE` is set, use `<USERPROFILE>/.config/nemo-relay/daemon`.
+
+<Note>
+On Windows, `HOME` takes precedence over `USERPROFILE`. Check the environment of
+the actual daemon or client process before backing up its keys and trust pins.
+The service runbooks set an explicit `XDG_CONFIG_HOME` for the daemon. It does
+not change the managed worker's system configuration path.
+</Note>
+
+Client identities stay with the user and must not be shared or copied into a
+machine image.
 
 For a new deployment, create `config.toml` with these contents:
 
@@ -94,7 +105,12 @@ regenerate it on every login. A token is not a model-provider key and does not
 replace the user's normal provider login.
 
 Your enterprise secret service can provision the token directly. For a small
-Unix deployment, this example creates a private local bootstrap file once, without
+deployment, choose the commands for your platform.
+
+<Tabs>
+<Tab title="Linux and macOS">
+
+This example creates a private local bootstrap file once, without
 printing the token. It requires Python 3 and fails if the file already exists:
 
 ```bash
@@ -113,7 +129,10 @@ export NEMO_RELAY_CLIENT_TOKEN="$(cat "$HOME/.config/nemo-relay-bootstrap/client
 export ANTHROPIC_CUSTOM_HEADERS="x-nemo-relay-client-token: ${NEMO_RELAY_CLIENT_TOKEN}"
 ```
 
-On Windows, create a protected bootstrap directory as the target user and generate
+</Tab>
+<Tab title="Windows PowerShell">
+
+Create a protected bootstrap directory as the target user and generate
 the token once. Do not run this block again for an existing credential:
 
 ```powershell
@@ -132,6 +151,9 @@ $RelayToken = [Convert]::ToBase64String($RelayBytes).TrimEnd('=').Replace('+','-
 $env:NEMO_RELAY_CLIENT_TOKEN = [System.IO.File]::ReadAllText($RelayTokenFile).Trim()
 $env:ANTHROPIC_CUSTOM_HEADERS = "x-nemo-relay-client-token: $env:NEMO_RELAY_CLIENT_TOKEN"
 ```
+
+</Tab>
+</Tabs>
 
 For later launches, run only the environment-loading lines, using the existing
 file. Use an administrator-provided launcher or login-environment mechanism to

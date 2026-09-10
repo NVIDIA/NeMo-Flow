@@ -387,7 +387,7 @@ reference baselines.
 | `NEMO_RELAY_DAEMON_OBSERVATION_CAPTURE_BYTES` | Worker observation | Positive capture limit in bytes; defaults to 4 MiB, without limiting delivered streams. |
 | `NEMO_RELAY_LOG` | Operational logger | Explicit log level, such as `info`; managed MCP and hooks skip ambient logging files. |
 | `NEMO_RELAY_LOG_STDERR_FORMAT` | Operational logger | Explicit stderr format, such as `jsonl`. |
-| `XDG_CONFIG_HOME` | Identity-state resolver | Overrides the per-account `.config` base; does not relocate managed system configuration. |
+| `XDG_CONFIG_HOME` | Identity-state resolver | First choice for identity state; otherwise Relay uses `HOME/.config`, then `USERPROFILE/.config`, on every platform. Does not relocate managed system configuration. |
 
 The MCP process removes the public route token from the worker's launch environment.
 Worker activation uses the protected inherited channel, not an environment variable.
