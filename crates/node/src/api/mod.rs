@@ -3905,18 +3905,15 @@ napi_intercept_tool_api!(
 
 /// Register a tool execution intercept following the middleware chain pattern.
 ///
-/// The `callable` receives the args and a `next` function. Call `next(args)` to invoke
-/// the next intercept or original implementation; skip calling `next` to short-circuit
-/// the chain. `next` may be called repeatedly or concurrently while `callable` is
-/// pending; each call receives an isolated scope-stack branch, and unfinished or
-/// later calls reject after `callable` settles.
+/// The `callable` receives a `ToolExecutionContext` and a `next` function.
+/// Call `next(context.args)` to invoke the remaining chain.
 #[napi]
 pub fn register_tool_execution_intercept(
     env: Env,
     name: String,
     priority: i32,
     #[napi(
-        ts_arg_type = "(args: Json, next: (args: Json) => ToolExecutionResult | Promise<ToolExecutionResult>) => { result: Json; annotation?: Json; pendingMarks?: Array<import('./plugin').PendingMarkSpec> } | Promise<{ result: Json; annotation?: Json; pendingMarks?: Array<import('./plugin').PendingMarkSpec> }>"
+        ts_arg_type = "(context: import('./plugin').ToolExecutionContext, next: (args: Json) => ToolExecutionResult | Promise<ToolExecutionResult>) => { result: Json; annotation?: Json; pendingMarks?: Array<import('./plugin').PendingMarkSpec> } | Promise<{ result: Json; annotation?: Json; pendingMarks?: Array<import('./plugin').PendingMarkSpec> }>"
     )]
     callable: JsFunction,
 ) -> Result<()> {
@@ -3936,7 +3933,8 @@ pub fn register_tool_execution_intercept(
 
 /// Deregister a tool execution intercept by name.
 ///
-/// Returns `true` if an intercept with that name was found and removed.
+/// Removes an intercept registered through either registration shape. Returns
+/// `true` if an intercept with that name was found and removed.
 #[napi]
 pub fn deregister_tool_execution_intercept(name: String) -> Result<bool> {
     core_registry_api::deregister_tool_execution_intercept(&name).map_err(to_napi_err)
@@ -4514,11 +4512,7 @@ napi_scope_intercept_tool_api!(
 
 /// Register a scope-local tool execution intercept following the middleware chain pattern.
 ///
-/// The `callable` receives the args and a `next` function. Call `next(args)` to invoke
-/// the next intercept or original implementation; skip calling `next` to short-circuit
-/// the chain. `next` may be called repeatedly or concurrently while `callable` is
-/// pending; each call receives an isolated scope-stack branch, and unfinished or
-/// later calls reject after `callable` settles.
+/// The `callable` receives a `ToolExecutionContext` and a `next` function.
 #[napi]
 pub fn scope_register_tool_execution_intercept(
     env: Env,
@@ -4526,7 +4520,7 @@ pub fn scope_register_tool_execution_intercept(
     name: String,
     priority: i32,
     #[napi(
-        ts_arg_type = "(args: Json, next: (args: Json) => ToolExecutionResult | Promise<ToolExecutionResult>) => { result: Json; annotation?: Json; pendingMarks?: Array<import('./plugin').PendingMarkSpec> } | Promise<{ result: Json; annotation?: Json; pendingMarks?: Array<import('./plugin').PendingMarkSpec> }>"
+        ts_arg_type = "(context: import('./plugin').ToolExecutionContext, next: (args: Json) => ToolExecutionResult | Promise<ToolExecutionResult>) => { result: Json; annotation?: Json; pendingMarks?: Array<import('./plugin').PendingMarkSpec> } | Promise<{ result: Json; annotation?: Json; pendingMarks?: Array<import('./plugin').PendingMarkSpec> }>"
     )]
     callable: JsFunction,
 ) -> Result<()> {
@@ -4549,7 +4543,9 @@ pub fn scope_register_tool_execution_intercept(
 
 /// Deregister a scope-local tool execution intercept by name.
 ///
-/// Returns `true` if an intercept with that name was found and removed from the specified scope.
+/// Removes an intercept registered through either registration shape. Returns
+/// `true` if an intercept with that name was found and removed from the
+/// specified scope.
 #[napi]
 pub fn scope_deregister_tool_execution_intercept(scope_uuid: String, name: String) -> Result<bool> {
     let uuid = uuid::Uuid::parse_str(&scope_uuid)

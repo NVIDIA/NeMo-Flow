@@ -2120,6 +2120,12 @@ describe('LLM intercepts', () => {
       2,
       'global and scope-local tool intercept declarations must expose canonical tool results',
     );
+    assert.equal(
+      declarations.split("context: import('./plugin').ToolExecutionContext").length - 1,
+      2,
+      'global and scope-local context intercept declarations must expose the tool execution context',
+    );
+    assert.doesNotMatch(declarations, /registerToolExecutionInterceptV2|scopeRegisterToolExecutionInterceptV2/);
   });
 
   it('plugin declarations expose Promise middleware and the implemented stream contract', () => {

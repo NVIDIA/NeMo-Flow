@@ -83,7 +83,8 @@ use crate::api::runtime::subscriber_dispatcher::{
 use crate::api::runtime::{
     EventMetadataInjectorFn, EventSanitizeFn, LlmCodecIdentity, LlmExecutionNextFn, LlmJsonStream,
     LlmSanitizeRequestContext, LlmSanitizeResponseContext, LlmStreamExecutionNextFn,
-    MiddlewareContinuationContext, ToolExecutionNextFn, current_scope_stack, with_scope_stack,
+    MiddlewareContinuationContext, ToolExecutionContext, ToolExecutionNextFn, current_scope_stack,
+    with_scope_stack,
 };
 use crate::api::scope::{
     EmitMarkEventParams, PopScopeParams, PushScopeParams, ScopeAttributes, ScopeHandle, ScopeType,
@@ -103,6 +104,7 @@ use super::{
     DynamicPluginKind, DynamicPluginManifest, DynamicPluginManifestLoad,
     DynamicPluginTeardownOutcome, WorkerRuntime, deregister_tracked_registrations_checked,
     validate_annotated_request_consumer_compatibility, validate_dynamic_plugin_relay_compatibility,
+    validate_tool_execution_context_compatibility,
 };
 
 const JSON_SCHEMA: &str = "nemo.relay.Json@1";
@@ -681,6 +683,12 @@ fn load_one_worker_plugin(
             .is_ok_and(|surface| surface == RegistrationSurface::LlmRequestIntercept)
     }) {
         validate_annotated_request_consumer_compatibility(&relay_compat, &spec.plugin_id)?;
+    }
+    if registrations.iter().any(|registration| {
+        RegistrationSurface::try_from(registration.surface)
+            .is_ok_and(|surface| surface == RegistrationSurface::ToolExecutionIntercept)
+    }) {
+        validate_tool_execution_context_compatibility(&relay_compat, &spec.plugin_id)?;
     }
 
     log::info!(
@@ -1325,13 +1333,21 @@ impl WorkerPluginInstance {
             RegistrationSurface::ToolExecutionIntercept => ctx.register_tool_execution_intercept(
                 name,
                 priority,
-                Arc::new(move |tool_name, value, next| {
+                Arc::new(move |context: ToolExecutionContext, next| {
                     let instance = instance.clone();
                     let callback_name = callback_name.clone();
-                    let tool_name = tool_name.to_owned();
+                    let tool_name = context.tool_name().to_owned();
+                    let tool_call_id = context.tool_call_id().map(str::to_owned);
+                    let value = context.into_args();
                     Box::pin(async move {
                         instance
-                            .invoke_tool_execution(&callback_name, &tool_name, value, next)
+                            .invoke_tool_execution(
+                                &callback_name,
+                                &tool_name,
+                                value,
+                                tool_call_id.as_deref(),
+                                next,
+                            )
                             .await
                     })
                 }),
@@ -1711,7 +1727,7 @@ impl WorkerPluginCallback {
             registration_name,
             surface,
             continuation_id,
-            Some(invoke_request_payload_tool(tool_name, value)),
+            Some(invoke_request_payload_tool(tool_name, value, None)),
         );
         json_from_invoke_response(self.invoke_async(request).await?)
     }
@@ -1726,7 +1742,7 @@ impl WorkerPluginCallback {
             registration_name,
             RegistrationSurface::ToolConditionalExecutionGuardrail,
             None,
-            Some(invoke_request_payload_tool(tool_name, value)),
+            Some(invoke_request_payload_tool(tool_name, value, None)),
         );
         guardrail_from_invoke_response(self.invoke_async(request).await?)
     }
@@ -1736,6 +1752,7 @@ impl WorkerPluginCallback {
         registration_name: &str,
         tool_name: &str,
         value: Json,
+        tool_call_id: Option<&str>,
         next: ToolExecutionNextFn,
     ) -> FlowResult<ToolExecutionInterceptOutcome> {
         let continuation_id = self
@@ -1745,7 +1762,7 @@ impl WorkerPluginCallback {
             registration_name,
             RegistrationSurface::ToolExecutionIntercept,
             Some(continuation_id),
-            Some(invoke_request_payload_tool(tool_name, value)),
+            Some(invoke_request_payload_tool(tool_name, value, tool_call_id)),
         );
         let response = self.invoke_async(request).await?;
         match response.result {
@@ -3451,10 +3468,15 @@ fn invoke_request_payload_event(event: &Event) -> invoke_request_payload::Payloa
     invoke_request_payload::Payload::Event(json_envelope_infallible(EVENT_SCHEMA, event))
 }
 
-fn invoke_request_payload_tool(tool_name: &str, value: Json) -> invoke_request_payload::Payload {
+fn invoke_request_payload_tool(
+    tool_name: &str,
+    value: Json,
+    tool_call_id: Option<&str>,
+) -> invoke_request_payload::Payload {
     invoke_request_payload::Payload::Tool(ToolInvocation {
         tool_name: tool_name.into(),
         value: Some(json_envelope_infallible(JSON_SCHEMA, &value)),
+        tool_call_id: tool_call_id.map(Into::into),
     })
 }
 

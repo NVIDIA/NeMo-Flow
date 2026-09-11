@@ -501,7 +501,7 @@ class TestScopeLocalExecutionIntercept:
                 handle,
                 "sl_exec_intercept",
                 1,
-                lambda name, args, next_fn: ToolExecutionInterceptOutcome({"from": "intercept"}),
+                lambda context, next_call: ToolExecutionInterceptOutcome({"from": "intercept"}),
             )
             result = await tools.execute("exec_int_tool", {}, my_tool)
 
@@ -510,8 +510,8 @@ class TestScopeLocalExecutionIntercept:
     async def test_execution_intercept_calls_next(self):
         """A scope-local execution intercept can modify args and return a result.
 
-        NOTE: Calling ``next_fn`` from a synchronous execution intercept is
-        not yet supported because ``next_fn`` returns an asyncio Future that
+        NOTE: Calling ``next_call`` from a synchronous execution intercept is
+        not yet supported because ``next_call`` returns an asyncio Future that
         cannot be awaited inside a sync callback. Instead, this test modifies
         the args and returns a computed result directly (similar to
         ``test_execution_intercept_replaces_function``).
@@ -520,10 +520,10 @@ class TestScopeLocalExecutionIntercept:
         def my_tool(args):
             return ToolExecutionResult({"value": args["x"] * 2})
 
-        def intercept_fn(name, args, next_fn):
-            # Cannot call next_fn here — it returns a Future.
-            args["x"] = args["x"] + 1
-            return ToolExecutionInterceptOutcome({"value": args["x"] * 2, "intercepted": True})
+        def intercept_fn(context, next_call):
+            # Cannot call next_call here — it returns a Future.
+            arguments = {**context.args, "x": context.args["x"] + 1}
+            return ToolExecutionInterceptOutcome({"value": arguments["x"] * 2, "intercepted": True})
 
         with scope.scope("exec_next_scope", ScopeType.Agent) as handle:
             scope_local.register_tool_execution(handle, "sl_exec_next", 1, intercept_fn)
@@ -532,6 +532,31 @@ class TestScopeLocalExecutionIntercept:
         # Intercept receives x=5, adds 1 -> x=6, returns value=12
         assert result.result["value"] == 12
         assert result.result["intercepted"] is True
+
+    async def test_execution_intercept_receives_tool_call_id(self):
+        seen = {}
+
+        async def context_intercept(context, next_call):
+            seen["tool_name"] = context.tool_name
+            seen["tool_call_id"] = context.tool_call_id
+            seen["arguments"] = context.args
+            downstream = await next_call(context.args)
+            return ToolExecutionInterceptOutcome(downstream.result)
+
+        with scope.scope("exec_ctx_scope", ScopeType.Agent) as handle:
+            scope_local.register_tool_execution(handle, "sl_exec_ctx", 1, context_intercept)
+            result = await tools.execute(
+                "exec_ctx_tool",
+                {"x": 5},
+                lambda args: ToolExecutionResult(args),
+                tool_call_id="scope-call-77",
+            )
+            assert scope_local.deregister_tool_execution(handle, "sl_exec_ctx")
+
+        assert result.result == {"x": 5}
+        assert seen["tool_name"] == "exec_ctx_tool"
+        assert seen["tool_call_id"] == "scope-call-77"
+        assert seen["arguments"] == {"x": 5}
 
 
 # ---------------------------------------------------------------------------
@@ -617,7 +642,7 @@ class TestScopeLocalLlmWrappers:
                 handle,
                 "sl_tool_exec_cov",
                 1,
-                lambda name, args, next_fn: ToolExecutionInterceptOutcome(args),
+                lambda context, next_call: ToolExecutionInterceptOutcome(context.args),
             )
             assert scope_local.deregister_tool_execution(handle, "sl_tool_exec_cov") is True
 
