@@ -304,8 +304,10 @@ Claude Code's `--safe-mode`, `--bare`, `CLAUDE_CODE_SAFE_MODE`, and
 even when model traffic still goes through `ANTHROPIC_BASE_URL`. This can leave
 observability incomplete and degrade Relay's execution state.
 
-When Relay starts Claude Code through `nemo-relay claude` or
+When Relay starts a normal Claude Code session through `nemo-relay claude` or
 `nemo-relay run --agent claude`, it warns if it detects one of these settings.
+Informational commands such as `--help` and `--version` exit without this
+warning.
 This is a best-effort check: `--bare` may still load explicitly supplied
 plugins, and Relay cannot detect settings such as `disableAllHooks` or
 environment changes made inside a wrapper script.
