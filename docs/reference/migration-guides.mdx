@@ -7,8 +7,7 @@ position: 6
 SPDX-License-Identifier: Apache-2.0 */}
 
 Use this page to upgrade from NeMo Relay 0.8.x to 0.9. Each section covers
-one part of the upgrade. NeMo Relay 0.9 is under development. This guide
-reflects the current `main` branch.
+one part of the upgrade. This guide reflects the current `main` branch.
 
 If you skip releases, read each release's migration guide and release notes
 in order.
@@ -243,7 +242,9 @@ payloads whose structure Relay cannot safely interpret. For details, refer to
 
 Direct subscribers can now read header values from environment variables
 through `header_env`, or `headerEnv` in Node.js. Set each variable before
-creating the subscriber. Create a new subscriber to use a changed value.
+creating the subscriber. Creation fails if a referenced variable is unset,
+empty, or contains only whitespace. Values with leading or trailing whitespace
+also cause failure. Create a new subscriber to use a changed value.
 Do not define the same header in both `headers` and `header_env`. Relay ignores
 ASCII case when it compares header names. For details, refer to
 [Direct Subscribers](/configure-plugins/observability/opentelemetry#direct-subscribers).
@@ -263,6 +264,12 @@ unless an exact string name and value match `metric_string_attribute_allowlist`.
 The preset also drops numeric and boolean attributes. Add only fixed values
 or values from a limited list that your dashboards need. A string array is
 kept only if every value is allowed.
+
+Set `builtin.preset = "trajectory_context"` before using
+`metric_string_attribute_allowlist` or `custom_mark_payload_policy`.
+Do not combine `builtin.preset` with `action`, `detector`, `pattern`,
+`target_paths`, `target_path_globs`, `mask_char`, `unmasked_prefix`, or
+`unmasked_suffix` in the same `builtin` settings.
 
 Review code that reads opaque custom-mark payloads, routing metadata, or
 detailed records of how prices were determined. The stricter preset removes

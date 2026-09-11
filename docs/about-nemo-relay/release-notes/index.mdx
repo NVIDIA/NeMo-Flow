@@ -30,8 +30,8 @@ For the full release history, including individual pull requests, refer to
 
 ## Release 0.9.0
 
-NeMo Relay 0.9 is under development. These notes cover changes from 0.8.4
-through the current `main` branch.
+These notes cover changes in NeMo Relay 0.9 from 0.8.4 through the current
+`main` branch.
 
 ### Highlights
 
@@ -68,8 +68,10 @@ Daemon mode supports the following shared-service features:
   recovery messages. Model and hook traffic uses separate HTTP connections.
   Responses stream back as data arrives.
 - Local deployments support Windows, macOS, and Linux. Remote deployments use
-  HTTPS, and the daemon must be able to reach client workers. For setup,
-  service management, upgrades, and troubleshooting, refer to
+  HTTPS. Clients must reach the daemon, and the daemon must reach each client
+  worker. Proxies must support WebSocket upgrades, keep those connections open,
+  and forward frames in both directions. For setup, service management,
+  upgrades, and troubleshooting, refer to
   [Daemon](/daemon/about).
 
 ### Coding-Agent and Framework Support
