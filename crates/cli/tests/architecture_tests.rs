@@ -535,6 +535,7 @@ fn operational_direct_stderr_is_limited_to_emergency_and_ui_boundaries() {
         "src/hooks/response.rs",
         "src/plugins/lifecycle/render.rs",
         "src/daemon/hook/mod.rs",
+        "src/process/launcher.rs",
     ];
     for path in rust_files(&crate_root.join("src")) {
         let source = fs::read_to_string(&path).unwrap();
