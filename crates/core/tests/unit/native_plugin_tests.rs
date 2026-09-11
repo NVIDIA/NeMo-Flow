@@ -4586,6 +4586,74 @@ unsafe extern "C" fn noop_tool_execution_context(
     NemoRelayStatus::Ok
 }
 
+#[cfg(unix)]
+unsafe extern "C" fn tool_execution_context_round_trip(
+    user_data: *mut c_void,
+    context_json: *const NemoRelayNativeString,
+    next_fn: NemoRelayNativeToolNextFn,
+    next_ctx: *mut c_void,
+    out_outcome_json: *mut *mut NemoRelayNativeString,
+) -> NemoRelayStatus {
+    let context = match read_native_string(context_json)
+        .ok()
+        .and_then(|value| serde_json::from_str::<Json>(&value).ok())
+    {
+        Some(context) => context,
+        None => return NemoRelayStatus::InvalidArg,
+    };
+    unsafe { &*(user_data as *const Mutex<Option<Json>>) }
+        .lock()
+        .unwrap()
+        .replace(context.clone());
+
+    let args = match native_string_from_json(&context["args"]) {
+        Some(args) => args,
+        None => return NemoRelayStatus::Internal,
+    };
+    let mut result = ptr::null_mut();
+    let status = unsafe { next_fn(args, next_ctx, &mut result) };
+    unsafe { native_string_free(args) };
+    if status != NemoRelayStatus::Ok {
+        return status;
+    }
+
+    let mut outcome = match take_json_from_native_string(result, "missing tool result") {
+        Ok(outcome) => outcome,
+        Err(_) => return NemoRelayStatus::Internal,
+    };
+    outcome["pending_marks"] = json!([]);
+    let Some(outcome) = native_string_from_json(&outcome) else {
+        return NemoRelayStatus::Internal;
+    };
+    unsafe { *out_outcome_json = outcome };
+    NemoRelayStatus::Ok
+}
+
+#[cfg(unix)]
+unsafe extern "C" fn tool_execution_context_error(
+    _user_data: *mut c_void,
+    _context_json: *const NemoRelayNativeString,
+    _next_fn: NemoRelayNativeToolNextFn,
+    _next_ctx: *mut c_void,
+    out_outcome_json: *mut *mut NemoRelayNativeString,
+) -> NemoRelayStatus {
+    unsafe { *out_outcome_json = native_string(r#"{"discarded":true}"#) };
+    set_native_last_error("tool execution context failed");
+    NemoRelayStatus::InvalidArg
+}
+
+#[cfg(unix)]
+unsafe extern "C" fn tool_execution_context_malformed_outcome(
+    _user_data: *mut c_void,
+    _context_json: *const NemoRelayNativeString,
+    _next_fn: NemoRelayNativeToolNextFn,
+    _next_ctx: *mut c_void,
+    out_outcome_json: *mut *mut NemoRelayNativeString,
+) -> NemoRelayStatus {
+    unsafe { *out_outcome_json = native_string(r#"{"pending_marks":[]}"#) };
+    NemoRelayStatus::Ok
+}
+
 unsafe extern "C" fn noop_llm_request(
     _user_data: *mut c_void,
     _request_json: *const NemoRelayNativeString,
@@ -6285,6 +6353,78 @@ async fn native_callback_wrappers_release_error_outputs_and_preserve_reasons() {
             .expect("native stream callback should fail")
             .to_string()
             .contains("LLM stream execution failed")
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn native_tool_execution_context_preserves_fields_and_callback_boundaries() {
+    let instance = Arc::new(NativePluginInstance {
+        plugin_kind: "test.native.tool-execution-context".into(),
+        relay_compat: ">=0.9,<1.0".into(),
+        allows_multiple_components: false,
+        plugin: Mutex::new(NemoRelayNativePluginV1::default()),
+        _library: libloading::os::unix::Library::this().into(),
+    });
+    let observed_context = Mutex::new(None);
+    let context = ToolExecutionContext::new("lookup", json!({"query": "private"}))
+        .with_tool_call_id(Some("call-native-1".into()));
+    let debug = format!("{context:?}");
+    assert!(debug.contains("lookup"));
+    assert!(debug.contains("call-native-1"));
+    assert!(!debug.contains("private"));
+
+    let callback = wrap_tool_execution_context_fn(
+        Arc::clone(&instance),
+        tool_execution_context_round_trip,
+        ptr::from_ref(&observed_context).cast_mut().cast(),
+        None,
+    );
+    let outcome = callback(context, tool_next(Ok(json!({"answer": 42}))))
+        .await
+        .unwrap();
+    assert_eq!(outcome.result, json!({"answer": 42}));
+    assert_eq!(
+        observed_context.lock().unwrap().as_ref(),
+        Some(&json!({
+            "tool_name": "lookup",
+            "args": {"query": "private"},
+            "tool_call_id": "call-native-1",
+        }))
+    );
+
+    let callback = wrap_tool_execution_context_fn(
+        Arc::clone(&instance),
+        tool_execution_context_error,
+        ptr::null_mut(),
+        None,
+    );
+    assert!(
+        callback(
+            ToolExecutionContext::new("lookup", json!({})),
+            tool_next(Ok(Json::Null)),
+        )
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("tool execution context failed")
+    );
+
+    let callback = wrap_tool_execution_context_fn(
+        instance,
+        tool_execution_context_malformed_outcome,
+        ptr::null_mut(),
+        None,
+    );
+    assert!(
+        callback(
+            ToolExecutionContext::new("lookup", json!({})),
+            tool_next(Ok(Json::Null)),
+        )
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("invalid native tool execution outcome")
     );
 }
 
