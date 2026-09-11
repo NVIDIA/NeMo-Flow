@@ -231,6 +231,27 @@ fn trace_endpoint_log_identity(endpoint: &str) -> String {
     format!("{}://{host}:{port}", endpoint.scheme())
 }
 
+/// Require protected transport for remote OTLP trace exports, regardless of projection.
+pub(super) fn validate_trace_endpoint(endpoint: &str) -> Result<()> {
+    let protected = reqwest::Url::parse(endpoint).is_ok_and(|url| {
+        let host = url.host_str().unwrap_or_default();
+        let loopback = host.eq_ignore_ascii_case("localhost")
+            || host
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback());
+        url.scheme() == "https" || (url.scheme() == "http" && loopback)
+    });
+    if !protected {
+        return Err(OpenTelemetryError::ExporterBuild(
+            "OTLP trace endpoints require HTTPS; HTTP is allowed only for localhost or loopback IP addresses"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Configuration for the OpenTelemetry subscriber.
 #[derive(Debug, Clone)]
 pub struct OpenTelemetryConfig {
@@ -574,6 +595,7 @@ impl OpenTelemetrySubscriber {
                 "endpoint must be a nonblank string".to_string(),
             ));
         }
+        validate_trace_endpoint(&config.endpoint)?;
         if config.completed_span_context_ttl.is_zero() {
             return Err(OpenTelemetryError::ExporterBuild(
                 "completed_span_context_ttl must be greater than 0".to_string(),
@@ -1008,8 +1030,23 @@ fn build_tracer_provider_with_resource(
 ) -> Result<SdkTracerProvider> {
     let exporter = match config.transport {
         OtlpTransport::HttpBinary => {
+            // Construct the blocking client outside any caller-owned async runtime,
+            // matching the OTLP exporter's default client construction behavior.
+            let timeout = config.timeout;
+            let client = thread::spawn(move || {
+                reqwest_otel::blocking::Client::builder()
+                    .timeout(timeout)
+                    .redirect(reqwest_otel::redirect::Policy::none())
+                    .build()
+            })
+            .join()
+            .map_err(|_| {
+                OpenTelemetryError::ExporterBuild("OTLP HTTP client construction panicked".into())
+            })?
+            .map_err(|error| OpenTelemetryError::ExporterBuild(error.to_string()))?;
             let mut builder = OtlpSpanExporter::builder()
                 .with_http()
+                .with_http_client(client)
                 .with_protocol(Protocol::HttpBinary)
                 .with_timeout(config.timeout);
             builder =
@@ -1328,6 +1365,7 @@ pub(super) struct ActiveSpan {
     start_model_name: Option<String>,
     projected_attributes: Vec<KeyValue>,
     projection_attribute_keys: HashSet<String>,
+    inferred_tool_attribute_keys: HashSet<String>,
     start_promoted_metadata: Vec<KeyValue>,
     descendant_error_type: Option<String>,
     descendant_exception_type: Option<String>,
@@ -1794,6 +1832,13 @@ impl OtelEventProcessor {
                 start_model_name,
                 projected_attributes,
                 projection_attribute_keys,
+                inferred_tool_attribute_keys: if self.otel_type == OpenTelemetryType::GenAi
+                    && event.scope_type() == Some(ScopeType::Tool)
+                {
+                    super::otel_genai::inferred_tool_attribute_keys(event)
+                } else {
+                    HashSet::new()
+                },
                 start_promoted_metadata,
                 descendant_error_type: None,
                 descendant_exception_type: None,
@@ -1819,6 +1864,28 @@ impl OtelEventProcessor {
             OpenTelemetryType::OpenInference => super::openinference::end_attributes(event),
         };
         let is_error = metadata_string(event, "otel.status_code") == Some("ERROR");
+        if self.otel_type == OpenTelemetryType::GenAi && event.scope_type() == Some(ScopeType::Tool)
+        {
+            // Explicit start identity (especially a typed call ID) remains
+            // authoritative. Only inferred defaults can be refined by explicit
+            // completion metadata, never by another inferred default.
+            let inferred_end_keys = super::otel_genai::inferred_tool_attribute_keys(event);
+            attributes.retain(|attribute| {
+                !matches!(
+                    attribute.key.as_str(),
+                    "gen_ai.tool.call.id"
+                        | "gen_ai.tool.type"
+                        | "gen_ai.tool.description"
+                        | "gen_ai.agent.name"
+                ) || !active_span
+                    .projection_attribute_keys
+                    .contains(attribute.key.as_str())
+                    || (active_span
+                        .inferred_tool_attribute_keys
+                        .contains(attribute.key.as_str())
+                        && !inferred_end_keys.contains(attribute.key.as_str()))
+            });
+        }
         let explicit_error_type = metadata_string(event, "error.type");
         let error_type = is_error.then(|| {
             explicit_error_type

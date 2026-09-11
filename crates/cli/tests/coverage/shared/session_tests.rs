@@ -1073,6 +1073,278 @@ async fn nests_agent_subagent_and_tool_lifecycle() {
 }
 
 #[tokio::test]
+async fn claude_paired_tool_execution_metadata() {
+    assert_harness_tool_execution_metadata(AgentKind::ClaudeCode, false).await;
+}
+
+#[tokio::test]
+async fn claude_post_only_tool_execution_metadata() {
+    assert_harness_tool_execution_metadata(AgentKind::ClaudeCode, true).await;
+}
+
+#[tokio::test]
+async fn codex_paired_tool_execution_metadata() {
+    assert_harness_tool_execution_metadata(AgentKind::Codex, false).await;
+}
+
+#[tokio::test]
+async fn codex_post_only_tool_execution_metadata() {
+    assert_harness_tool_execution_metadata(AgentKind::Codex, true).await;
+}
+
+#[tokio::test]
+async fn pi_paired_tool_execution_metadata() {
+    assert_harness_tool_execution_metadata(AgentKind::Pi, false).await;
+}
+
+#[tokio::test]
+async fn pi_post_only_tool_execution_metadata() {
+    assert_harness_tool_execution_metadata(AgentKind::Pi, true).await;
+}
+
+async fn assert_harness_tool_execution_metadata(kind: AgentKind, post_only: bool) {
+    let session_id = format!("genai-{}-{post_only}", kind.as_str());
+    let captured = Arc::new(StdMutex::new(Vec::<Event>::new()));
+    let events = Arc::clone(&captured);
+    register_filtered_session_subscriber(
+        &session_id,
+        tracked_sessions(&[&session_id]),
+        Arc::new(move |event| events.lock().unwrap().push(event.clone())),
+    );
+    let manager = SessionManager::new(session_test_config());
+    let (start, end, shutdown, id_key, args_key) = match kind {
+        AgentKind::ClaudeCode => (
+            "PreToolUse",
+            "PostToolUse",
+            "SessionEnd",
+            "tool_use_id",
+            "tool_input",
+        ),
+        AgentKind::Codex => (
+            "preToolUse",
+            "postToolUse",
+            "sessionEnd",
+            "tool_call_id",
+            "arguments",
+        ),
+        AgentKind::Pi => (
+            "tool_call",
+            "tool_execution_end",
+            "session_shutdown",
+            "toolCallId",
+            "input",
+        ),
+        AgentKind::Gateway => unreachable!(),
+    };
+    let session_start = if kind == AgentKind::Pi {
+        "session_start"
+    } else {
+        "SessionStart"
+    };
+    let hooks = [session_start, start, end, shutdown];
+    for hook in hooks {
+        if post_only && hook == start {
+            continue;
+        }
+        let mut payload = json!({
+            "session_id": session_id, "hook_event_name": hook,
+            "tool_name": "shell", "result": {"stdout": "/tmp"},
+            "status": "success"
+        });
+        payload[id_key] = json!("gen-ai-call-1");
+        payload[args_key] =
+            json!({"command": "pwd", "description": "private invocation description"});
+        let headers = HeaderMap::new();
+        let outcome = match kind {
+            AgentKind::ClaudeCode => {
+                crate::agents::shared::adapters::claude_code::adapt(payload, &headers)
+            }
+            AgentKind::Codex => crate::agents::shared::adapters::codex::adapt(payload, &headers),
+            AgentKind::Pi => crate::agents::shared::adapters::pi::adapt(payload, &headers),
+            AgentKind::Gateway => unreachable!(),
+        };
+        manager
+            .apply_events(&headers, outcome.events)
+            .await
+            .unwrap();
+    }
+    flush_subscribers().unwrap();
+    let events = captured.lock().unwrap();
+    let tool_events: Vec<_> = events
+        .iter()
+        .filter(|event| event.tool_call_id() == Some("gen-ai-call-1"))
+        .collect();
+    let start = tool_events
+        .iter()
+        .find(|event| event.scope_category() == Some(ScopeCategory::Start))
+        .unwrap();
+    let end = tool_events
+        .iter()
+        .find(|event| event.scope_category() == Some(ScopeCategory::End))
+        .unwrap();
+    assert_eq!(
+        tool_events.len(),
+        2,
+        "one start/end pair, including post-only hooks"
+    );
+    assert_eq!(start.uuid(), end.uuid());
+    assert_eq!(start.parent_uuid(), end.parent_uuid());
+    assert!(start.parent_uuid().is_some());
+    let metadata = start.metadata().unwrap();
+    assert_eq!(
+        metadata["gen_ai.tool.type"],
+        "function",
+        "{}",
+        kind.as_str()
+    );
+    assert_eq!(metadata["gen_ai.agent.name"], kind.as_str());
+    assert_eq!(
+        metadata["nemo_relay.tool.execution.defaults"]["gen_ai.tool.type"],
+        "function"
+    );
+    assert_eq!(
+        metadata["nemo_relay.tool.execution.defaults"]["gen_ai.agent.name"],
+        kind.as_str()
+    );
+    assert!(metadata.get("gen_ai.tool.description").is_none());
+    assert_harness_genai_tool_span(kind, &events);
+    drop(events);
+    assert!(deregister_subscriber(&session_id).unwrap());
+}
+
+fn assert_harness_genai_tool_span(kind: AgentKind, events: &[Event]) {
+    let exporter = InMemorySpanExporterBuilder::new().build();
+    let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+        .with_simple_exporter(exporter.clone())
+        .build();
+    let subscriber = OpenTelemetrySubscriber::from_tracer_provider_with_type(
+        provider,
+        "harness-tool-metadata",
+        OpenTelemetryType::GenAi,
+    );
+    for event in events {
+        subscriber.subscriber()(event);
+    }
+    subscriber.force_flush().unwrap();
+    let spans = exporter.get_finished_spans().unwrap();
+    let tool = spans
+        .iter()
+        .find(|span| span.name == "execute_tool shell")
+        .unwrap();
+    let attrs = attr_map(&tool.attributes);
+    assert_eq!(attrs["gen_ai.agent.name"], kind.as_str());
+    assert_eq!(attrs["gen_ai.tool.type"], "function");
+    assert_eq!(attrs["gen_ai.tool.call.id"], "gen-ai-call-1");
+    assert_eq!(
+        serde_json::from_str::<Value>(&attrs["gen_ai.tool.call.arguments"]).unwrap()["command"],
+        "pwd"
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(&attrs["gen_ai.tool.call.result"]).unwrap()["stdout"],
+        "/tmp"
+    );
+    assert!(
+        spans
+            .iter()
+            .any(|span| span.span_context.span_id() == tool.parent_span_id)
+    );
+    subscriber.shutdown().unwrap();
+}
+
+#[test]
+fn tool_execution_metadata_preserves_explicit_values_and_subagent_identity() {
+    for kind in [
+        AgentKind::ClaudeCode,
+        AgentKind::Codex,
+        AgentKind::Pi,
+        AgentKind::Gateway,
+    ] {
+        let session = Session::new("metadata-policy".into(), kind, SessionConfig::default());
+        let mut explicit = json!({"gen_ai.tool.type": "extension", "gen_ai.agent.name": "custom-agent", "gen_ai.tool.description": "explicit"});
+        let expected = explicit.clone();
+        session.apply_tool_execution_metadata(&mut explicit, Some("worker-1"));
+        assert_eq!(explicit, expected);
+        let mut metadata = json!({});
+        session.apply_tool_execution_metadata(&mut metadata, Some("worker-1"));
+        assert_eq!(metadata["gen_ai.agent.name"], "subagent:worker-1");
+        assert_eq!(
+            metadata.get("gen_ai.tool.type").and_then(Value::as_str),
+            kind.tool_execution_type()
+        );
+        let mut absent = Value::Null;
+        session.apply_tool_execution_metadata(&mut absent, None);
+        assert!(absent.is_null());
+    }
+    let gateway = Session::new(
+        "gateway-policy".into(),
+        AgentKind::Gateway,
+        SessionConfig::default(),
+    );
+    let mut metadata = json!({});
+    gateway.apply_tool_execution_metadata(&mut metadata, None);
+    assert_eq!(
+        metadata,
+        json!({}),
+        "generic gateway must not invent execution semantics"
+    );
+}
+
+#[test]
+fn tool_execution_metadata_normalizes_default_provenance() {
+    for kind in [AgentKind::ClaudeCode, AgentKind::Codex, AgentKind::Pi] {
+        let session = Session::new("provenance-policy".into(), kind, SessionConfig::default());
+        for provenance in [
+            Value::Null,
+            json!(true),
+            json!(42),
+            json!("invalid"),
+            json!([]),
+            json!({"existing": "retained"}),
+        ] {
+            let mut metadata = json!({"nemo_relay.tool.execution.defaults": provenance});
+            session.apply_tool_execution_metadata(&mut metadata, None);
+            let defaults = &metadata["nemo_relay.tool.execution.defaults"];
+            assert_eq!(defaults["gen_ai.tool.type"], "function");
+            assert_eq!(defaults["gen_ai.agent.name"], kind.as_str());
+            if provenance.is_object() {
+                assert_eq!(defaults["existing"], "retained");
+            }
+        }
+        // Explicit values equal to the harness defaults must not gain provenance.
+        let mut explicit =
+            json!({"gen_ai.tool.type": "function", "gen_ai.agent.name": kind.as_str()});
+        let expected = explicit.clone();
+        session.apply_tool_execution_metadata(&mut explicit, None);
+        assert_eq!(explicit, expected);
+    }
+}
+
+#[test]
+fn tool_execution_metadata_respects_aliases_and_ignores_invalid_strings() {
+    for kind in [AgentKind::ClaudeCode, AgentKind::Codex, AgentKind::Pi] {
+        let session = Session::new("alias-policy".into(), kind, SessionConfig::default());
+        for canonical in [Value::Null, json!(""), json!("  "), json!(false)] {
+            let mut metadata = json!({
+                "gen_ai.tool.type": canonical,
+                "gen_ai.agent.name": canonical,
+                "tool_type": "datastore", "agent_name": "researcher"
+            });
+            let expected = metadata.clone();
+            session.apply_tool_execution_metadata(&mut metadata, None);
+            assert_eq!(metadata, expected);
+        }
+        let mut metadata = json!({"tool_type": "extension", "agent_name": "explicit"});
+        let expected = metadata.clone();
+        session.apply_tool_execution_metadata(&mut metadata, None);
+        assert_eq!(metadata, expected);
+        let mut invalid = json!({"gen_ai.tool.type": false, "agent_name": " "});
+        session.apply_tool_execution_metadata(&mut invalid, None);
+        assert_eq!(invalid["gen_ai.tool.type"], "function");
+        assert_eq!(invalid["gen_ai.agent.name"], kind.as_str());
+    }
+}
+
+#[tokio::test]
 async fn parallel_subagents_are_siblings_under_turn_scope() {
     let manager = SessionManager::new(session_test_config());
     manager

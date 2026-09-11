@@ -2265,14 +2265,14 @@ fn gen_ai_projection_is_fixed_and_preserves_all_scope_parentage() {
         Some(reranker_uuid),
         "web-search",
         ScopeType::Tool,
-        Some(json!({"query": "must-not-export"})),
+        Some(json!({"query": "exported-tool-input"})),
     ));
     processor.process(&make_end_event(
         tool_uuid,
         Some(reranker_uuid),
         "web-search",
         ScopeType::Tool,
-        Some(json!({"result": "must-not-export"})),
+        Some(json!({"result": "exported-tool-result"})),
     ));
     processor.process(&make_end_event(
         reranker_uuid,
@@ -2443,6 +2443,7 @@ fn gen_ai_projection_emits_only_span_specific_attributes() {
             "search",
             [
                 "gen_ai.operation.name",
+                "gen_ai.tool.call.arguments",
                 "gen_ai.tool.call.id",
                 "gen_ai.tool.description",
                 "gen_ai.tool.name",
@@ -2478,7 +2479,11 @@ fn gen_ai_projection_emits_only_span_specific_attributes() {
         ),
     ];
     for (scope_type, name, expected) in cases {
-        let event = make_start_event(Uuid::now_v7(), None, name, scope_type, Some(common.clone()));
+        let mut event =
+            make_start_event(Uuid::now_v7(), None, name, scope_type, Some(common.clone()));
+        if let Event::Scope(scope) = &mut event {
+            scope.base.metadata = Some(common.clone());
+        }
         let attributes = crate::observability::otel_genai::start_attributes(&event);
         let actual = attributes
             .iter()
@@ -2513,6 +2518,344 @@ fn gen_ai_projection_emits_only_span_specific_attributes() {
         Some(&"7".to_string())
     );
     assert!(!embed_attributes.contains_key("gen_ai.usage.output_tokens"));
+}
+
+#[test]
+fn all_trace_projections_require_protected_remote_transport() {
+    for endpoint in [
+        "https://collector.example/v1/traces",
+        "http://localhost:4318/v1/traces",
+        "http://127.0.0.1:4318/v1/traces",
+        "http://127.0.0.2:4318/v1/traces",
+        "http://[::1]:4318/v1/traces",
+    ] {
+        assert!(validate_trace_endpoint(endpoint).is_ok(), "{endpoint}");
+    }
+    for endpoint in [
+        "http://collector.example/v1/traces",
+        "http://10.0.0.1:4318",
+        "http://[::]:4318",
+        "http://localhost.example:4318",
+        "http://localhost@collector.example:4318",
+        "ftp://localhost/traces",
+        "not a URL",
+    ] {
+        for transport in [OtlpTransport::HttpBinary, OtlpTransport::Grpc] {
+            for otel_type in [
+                OpenTelemetryType::Full,
+                OpenTelemetryType::GenAi,
+                OpenTelemetryType::OpenInference,
+            ] {
+                let result = OpenTelemetrySubscriber::new(
+                    OpenTelemetryConfig::new(otel_type, endpoint).with_transport(transport),
+                );
+                assert!(
+                    result.err().unwrap().to_string().contains("require HTTPS"),
+                    "{endpoint}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn gen_ai_tool_content_is_captured_by_default_and_object_shaped() {
+    use crate::observability::otel_genai::{end_attributes, start_attributes};
+    for (payload, expected) in [
+        (
+            json!({"query": "sanitized"}),
+            Some(json!({"query": "sanitized"})),
+        ),
+        (
+            json!("{\"query\":\"sanitized\"}"),
+            Some(json!({"query": "sanitized"})),
+        ),
+        (json!({}), Some(json!({}))),
+        (json!("plain text"), None),
+        (json!("[1,2]"), None),
+        (json!([1, 2]), None),
+        (json!(null), None),
+        (json!(false), None),
+        (json!(42), None),
+    ] {
+        let start = make_start_event(
+            Uuid::now_v7(),
+            None,
+            "search",
+            ScopeType::Tool,
+            Some(payload.clone()),
+        );
+        let mut end = make_end_event(start.uuid(), None, "search", ScopeType::Tool, Some(payload));
+        for (attrs, key) in [
+            (start_attributes(&start), "gen_ai.tool.call.arguments"),
+            (end_attributes(&end), "gen_ai.tool.call.result"),
+        ] {
+            let attrs = attr_map(&attrs);
+            let actual = attrs
+                .get(key)
+                .map(|value| serde_json::from_str::<Json>(value).unwrap());
+            assert_eq!(actual, expected.clone());
+        }
+        if let Event::Scope(scope) = &mut end {
+            scope.base.metadata = Some(json!({"otel.status_code": "ERROR"}));
+        }
+        let attrs = attr_map(&end_attributes(&end));
+        assert!(attrs.contains_key("error.type"));
+        assert!(!attrs.contains_key("gen_ai.tool.call.result"));
+    }
+}
+
+#[test]
+fn gen_ai_tool_identity_ignores_payload_keys_and_blank_metadata() {
+    let mut event = make_start_event(
+        Uuid::now_v7(),
+        None,
+        "search",
+        ScopeType::Tool,
+        Some(json!({
+            "gen_ai.tool.name": "spoofed", "description": "private argument", "tool_type": "spoofed",
+            "tool_call_id": "spoofed", "gen_ai.agent.name": "spoofed"
+        })),
+    );
+    let attrs = attr_map(&crate::observability::otel_genai::start_attributes(&event));
+    assert_eq!(
+        attrs.get("gen_ai.tool.name").map(String::as_str),
+        Some("search")
+    );
+    assert_eq!(attrs.len(), 3);
+    if let Event::Scope(scope) = &mut event {
+        scope.base.metadata = Some(json!({
+            "gen_ai.tool.name": " ", "gen_ai.tool.call.id": "", "tool_call_id": "call-1",
+            "gen_ai.tool.type": false, "tool_type": "function", "tool_description": "Search docs",
+            "gen_ai.agent.name": "researcher"
+        }));
+    }
+    let attrs = attr_map(&crate::observability::otel_genai::start_attributes(&event));
+    assert_eq!(
+        attrs.get("gen_ai.tool.name").map(String::as_str),
+        Some("search")
+    );
+    assert_eq!(
+        attrs.get("gen_ai.tool.call.id").map(String::as_str),
+        Some("call-1")
+    );
+    assert_eq!(
+        attrs.get("gen_ai.tool.type").map(String::as_str),
+        Some("function")
+    );
+    assert_eq!(
+        attrs.get("gen_ai.tool.description").map(String::as_str),
+        Some("Search docs")
+    );
+    assert_eq!(
+        attrs.get("gen_ai.agent.name").map(String::as_str),
+        Some("researcher")
+    );
+}
+
+#[test]
+fn gen_ai_tool_content_is_exported_with_default_options() {
+    let (provider, exporter) = make_provider();
+    let subscriber = OpenTelemetrySubscriber::from_tracer_provider_with_type_and_options(
+        provider,
+        "tool-content",
+        OpenTelemetryType::GenAi,
+        OpenTelemetrySubscriberOptions::default(),
+    )
+    .unwrap();
+    let id = Uuid::now_v7();
+    let start = make_start_event(
+        id,
+        None,
+        "search",
+        ScopeType::Tool,
+        Some(json!({"q": "docs"})),
+    );
+    let end = make_end_event(
+        id,
+        None,
+        "search",
+        ScopeType::Tool,
+        Some(json!({"hits": []})),
+    );
+    (subscriber.inner.subscriber)(&start);
+    (subscriber.inner.subscriber)(&end);
+    subscriber.force_flush().unwrap();
+    let spans = exporter.get_finished_spans().unwrap();
+    assert_eq!(spans.len(), 1);
+    let attrs = attr_map(&spans[0].attributes);
+    assert!(attrs.contains_key("gen_ai.tool.call.arguments"));
+    assert!(attrs.contains_key("gen_ai.tool.call.result"));
+    subscriber.shutdown().unwrap();
+}
+
+#[test]
+fn gen_ai_tool_definitions_use_minimal_standard_schema() {
+    let request = serde_json::from_value::<AnnotatedLlmRequest>(json!({
+        "messages": [],
+        "tools": [
+            {"type": "function", "function": {
+                "name": "search", "description": "large private description",
+                "parameters": {"type": "object"}
+            }},
+            {"type": "provider_native", "provider": "anthropic", "kind": "web_search",
+             "value": {"type": "web_search_20250305", "name": "web_search", "private": "omitted"}},
+            {"type": "provider_native", "provider": "openai_responses", "kind": "web_search",
+             "value": {"type": "web_search"}},
+            {"type": "provider_native", "provider": "gemini", "kind": "codeExecution",
+             "value": {"codeExecution": {}, "googleSearch": {}, "unknownTool": {}}},
+            {"type": "provider_native", "provider": "unknown", "kind": "web_search",
+             "value": {"type": "web_search"}},
+            {"type": "provider_native", "provider": "openai_responses", "kind": "unknown",
+             "value": {"type": "unknown"}},
+            {"type": "function", "function": {"name": " "}}
+        ]
+    }))
+    .unwrap();
+    let event = make_scope_event_with_profile(
+        ScopeCategory::Start,
+        Uuid::now_v7(),
+        None,
+        "chat",
+        ScopeType::Llm,
+        None,
+        Some(
+            CategoryProfile::builder()
+                .annotated_request(Arc::new(request))
+                .build(),
+        ),
+    );
+    let enabled = attr_map(&crate::observability::otel_genai::start_attributes(&event));
+    let definitions: Json =
+        serde_json::from_str(enabled.get("gen_ai.tool.definitions").unwrap()).unwrap();
+    assert_eq!(
+        definitions,
+        json!([
+            {"type": "function", "name": "search"},
+            {"type": "web_search_20250305", "name": "web_search"},
+            {"type": "web_search", "name": "web_search"},
+            {"type": "codeExecution", "name": "codeExecution"},
+            {"type": "googleSearch", "name": "googleSearch"}
+        ])
+    );
+}
+
+#[test]
+fn gen_ai_tool_completion_fills_missing_metadata_without_replacing_start_identity() {
+    for initial_id in [None, Some("typed-id")] {
+        let (provider, exporter) = make_provider();
+        let subscriber = OpenTelemetrySubscriber::from_tracer_provider_with_type(
+            provider,
+            "tool-identity",
+            OpenTelemetryType::GenAi,
+        );
+        let id = Uuid::now_v7();
+        let start = make_scope_event_with_profile(
+            ScopeCategory::Start,
+            id,
+            None,
+            "search",
+            ScopeType::Tool,
+            None,
+            initial_id.map(|id| CategoryProfile::builder().tool_call_id(id).build()),
+        );
+        let mut end = make_end_event(id, None, "end-label", ScopeType::Tool, None);
+        if let Event::Scope(scope) = &mut end {
+            scope.base.metadata = Some(json!({
+                "tool_call_id": "late-id", "tool_description": "Search docs",
+                "gen_ai.tool.name": "late-name"
+            }));
+        }
+        (subscriber.inner.subscriber)(&start);
+        (subscriber.inner.subscriber)(&end);
+        subscriber.force_flush().unwrap();
+        let spans = exporter.get_finished_spans().unwrap();
+        let attrs = attr_map(&spans[0].attributes);
+        assert_eq!(
+            attrs.get("gen_ai.tool.call.id").map(String::as_str),
+            Some(initial_id.unwrap_or("late-id"))
+        );
+        assert_eq!(
+            attrs.get("gen_ai.tool.description").map(String::as_str),
+            Some("Search docs")
+        );
+        assert_eq!(
+            attrs.get("gen_ai.tool.name").map(String::as_str),
+            Some("search")
+        );
+        subscriber.shutdown().unwrap();
+    }
+}
+
+#[test]
+fn gen_ai_tool_completion_refines_only_inferred_identity() {
+    for inferred_start in [false, true] {
+        for completion in ["canonical", "alias", "inferred", "absent"] {
+            let (provider, exporter) = make_provider();
+            let subscriber = OpenTelemetrySubscriber::from_tracer_provider_with_type(
+                provider,
+                "identity-origin",
+                OpenTelemetryType::GenAi,
+            );
+            let id = Uuid::now_v7();
+            let mut start = make_scope_event_with_profile(
+                ScopeCategory::Start,
+                id,
+                None,
+                "search",
+                ScopeType::Tool,
+                None,
+                Some(CategoryProfile::builder().tool_call_id("typed-id").build()),
+            );
+            let mut metadata =
+                json!({"gen_ai.tool.type": "function", "gen_ai.agent.name": "codex"});
+            if inferred_start {
+                metadata["nemo_relay.tool.execution.defaults"] = metadata.clone();
+            }
+            if let Event::Scope(scope) = &mut start {
+                scope.base.metadata = Some(metadata.clone());
+            }
+            let mut end = make_end_event(id, None, "end-label", ScopeType::Tool, None);
+            match completion {
+                "canonical" => {
+                    metadata["gen_ai.tool.type"] = json!("extension");
+                    metadata["gen_ai.agent.name"] = json!("researcher");
+                }
+                "alias" => {
+                    metadata["tool_type"] = json!("extension");
+                    metadata["agent_name"] = json!("researcher");
+                }
+                "inferred" => {
+                    metadata = json!({"gen_ai.tool.type": "extension", "gen_ai.agent.name": "researcher",
+                        "nemo_relay.tool.execution.defaults": {"gen_ai.tool.type": "extension", "gen_ai.agent.name": "researcher"}});
+                }
+                "absent" => metadata = json!({}),
+                _ => unreachable!("unknown completion case"),
+            }
+            metadata["tool_call_id"] = json!("late-id");
+            if let Event::Scope(scope) = &mut end {
+                scope.base.metadata = Some(metadata);
+            }
+            subscriber.subscriber()(&start);
+            subscriber.subscriber()(&end);
+            subscriber.force_flush().unwrap();
+            let spans = exporter.get_finished_spans().unwrap();
+            let attrs = attr_map(&spans[0].attributes);
+            let refined = inferred_start && matches!(completion, "canonical" | "alias");
+            assert_eq!(
+                attrs["gen_ai.tool.type"],
+                if refined { "extension" } else { "function" },
+                "{inferred_start}/{completion}"
+            );
+            assert_eq!(
+                attrs["gen_ai.agent.name"],
+                if refined { "researcher" } else { "codex" }
+            );
+            assert_eq!(attrs["gen_ai.tool.call.id"], "typed-id");
+            assert!(!attrs.keys().any(|key| key.starts_with("nemo_relay.")));
+            subscriber.shutdown().unwrap();
+        }
+    }
 }
 
 #[test]
@@ -2957,13 +3300,10 @@ fn gen_ai_projection_prefers_standard_names_and_normalized_provider_details() {
         "invoke_agent semantic-agent"
     );
 
-    let tool = make_start_event(
-        Uuid::now_v7(),
-        None,
-        "fallback-tool",
-        ScopeType::Tool,
-        Some(json!({"gen_ai.tool.name": "semantic-tool"})),
-    );
+    let mut tool = make_start_event(Uuid::now_v7(), None, "fallback-tool", ScopeType::Tool, None);
+    if let Event::Scope(scope) = &mut tool {
+        scope.base.metadata = Some(json!({"gen_ai.tool.name": "semantic-tool"}));
+    }
     assert_eq!(
         crate::observability::otel_genai::span_name(&tool),
         "execute_tool semantic-tool"
@@ -3645,6 +3985,71 @@ fn has_promoted_resource_metadata(attributes: &[OtlpKeyValue]) -> bool {
                 Some(any_value::Value::StringValue(value)) if value == "child-tenant"
             )
     })
+}
+
+#[test]
+fn http_trace_exports_do_not_follow_redirects() {
+    let _guard = crate::observability::test_mutex().lock().unwrap();
+    reset_global();
+
+    for otel_type in [
+        OpenTelemetryType::Full,
+        OpenTelemetryType::GenAi,
+        OpenTelemetryType::OpenInference,
+    ] {
+        for status in [307, 308] {
+            let destination = TcpListener::bind("127.0.0.1:0").unwrap();
+            destination.set_nonblocking(true).unwrap();
+            let location = format!("http://{}/leak", destination.local_addr().unwrap());
+            let redirector = TcpListener::bind("127.0.0.1:0").unwrap();
+            let endpoint = format!("http://{}/v1/traces", redirector.local_addr().unwrap());
+            let server = thread::spawn(move || {
+                let (mut stream, _) = redirector.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let request = read_http_request(&mut stream);
+                write!(stream, "HTTP/1.1 {status} Redirect\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                request
+            });
+            let mut config =
+                OpenTelemetryConfig::new(otel_type, endpoint).with_timeout(Duration::from_secs(1));
+            config
+                .headers
+                .insert("x-collector-key".into(), "test-secret".into());
+            let subscriber = OpenTelemetrySubscriber::new(config).unwrap();
+            let callback = subscriber.subscriber();
+            let uuid = Uuid::now_v7();
+            callback(&make_start_event(
+                uuid,
+                None,
+                "redirect-test",
+                ScopeType::Agent,
+                None,
+            ));
+            callback(&make_end_event(
+                uuid,
+                None,
+                "redirect-test",
+                ScopeType::Agent,
+                None,
+            ));
+            assert!(
+                subscriber.force_flush().is_err(),
+                "redirect must fail export"
+            );
+            let request = server.join().unwrap();
+            assert!(
+                !request.body.is_empty(),
+                "initial collector must receive the export"
+            );
+            assert!(
+                matches!(destination.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+                "redirect destination must receive no connection, payload, or credentials"
+            );
+            subscriber.shutdown().unwrap();
+        }
+    }
 }
 
 #[test]

@@ -3308,6 +3308,8 @@ fn build_otel_config(
             "OpenTelemetry endpoint must be a nonblank string".to_string(),
         ));
     }
+    super::otel::validate_trace_endpoint(&section.endpoint)
+        .map_err(|error| PluginError::InvalidConfig(error.to_string()))?;
     let transport = match section.transport.as_str() {
         "http_binary" => OtlpTransport::HttpBinary,
         "grpc" => OtlpTransport::Grpc,
