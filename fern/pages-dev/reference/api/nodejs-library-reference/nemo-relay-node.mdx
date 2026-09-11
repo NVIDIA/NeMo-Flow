@@ -1276,17 +1276,17 @@ export declare function deregisterToolRequestIntercept(name: string): boolean
 
 Register a tool execution intercept following the middleware chain pattern.
 
-The `callable` receives the args and a `next` function. Call `next(args)` to invoke the next intercept or original implementation; skip calling `next` to short-circuit the chain. `next` may be called repeatedly or concurrently while `callable` is pending; each call receives an isolated scope-stack branch, and unfinished or later calls reject after `callable` settles.
+The `callable` receives a `ToolExecutionContext` and a `next` function. Call `next(context.args)` to invoke the remaining chain.
 
 ```ts
-export declare function registerToolExecutionIntercept(name: string, priority: number, callable: (args: Json, next: (args: Json) => ToolExecutionResult | Promise<ToolExecutionResult>) => { result: Json; annotation?: Json; pendingMarks?: Array<import('./plugin').PendingMarkSpec> } | Promise<{ result: Json; annotation?: Json; pendingMarks?: Array<import('./plugin').PendingMarkSpec> }>): void
+export declare function registerToolExecutionIntercept(name: string, priority: number, callable: (context: import('./plugin').ToolExecutionContext, next: (args: Json) => ToolExecutionResult | Promise<ToolExecutionResult>) => { result: Json; annotation?: Json; pendingMarks?: Array<import('./plugin').PendingMarkSpec> } | Promise<{ result: Json; annotation?: Json; pendingMarks?: Array<import('./plugin').PendingMarkSpec> }>): void
 ```
 
 ### `deregisterToolExecutionIntercept`
 
 Deregister a tool execution intercept by name.
 
-Returns `true` if an intercept with that name was found and removed.
+Removes an intercept registered through either registration shape. Returns `true` if an intercept with that name was found and removed.
 
 ```ts
 export declare function deregisterToolExecutionIntercept(name: string): boolean
@@ -1594,17 +1594,17 @@ export declare function scopeDeregisterToolRequestIntercept(scopeUuid: string, n
 
 Register a scope-local tool execution intercept following the middleware chain pattern.
 
-The `callable` receives the args and a `next` function. Call `next(args)` to invoke the next intercept or original implementation; skip calling `next` to short-circuit the chain. `next` may be called repeatedly or concurrently while `callable` is pending; each call receives an isolated scope-stack branch, and unfinished or later calls reject after `callable` settles.
+The `callable` receives a `ToolExecutionContext` and a `next` function.
 
 ```ts
-export declare function scopeRegisterToolExecutionIntercept(scopeUuid: string, name: string, priority: number, callable: (args: Json, next: (args: Json) => ToolExecutionResult | Promise<ToolExecutionResult>) => { result: Json; annotation?: Json; pendingMarks?: Array<import('./plugin').PendingMarkSpec> } | Promise<{ result: Json; annotation?: Json; pendingMarks?: Array<import('./plugin').PendingMarkSpec> }>): void
+export declare function scopeRegisterToolExecutionIntercept(scopeUuid: string, name: string, priority: number, callable: (context: import('./plugin').ToolExecutionContext, next: (args: Json) => ToolExecutionResult | Promise<ToolExecutionResult>) => { result: Json; annotation?: Json; pendingMarks?: Array<import('./plugin').PendingMarkSpec> } | Promise<{ result: Json; annotation?: Json; pendingMarks?: Array<import('./plugin').PendingMarkSpec> }>): void
 ```
 
 ### `scopeDeregisterToolExecutionIntercept`
 
 Deregister a scope-local tool execution intercept by name.
 
-Returns `true` if an intercept with that name was found and removed from the specified scope.
+Removes an intercept registered through either registration shape. Returns `true` if an intercept with that name was found and removed from the specified scope.
 
 ```ts
 export declare function scopeDeregisterToolExecutionIntercept(scopeUuid: string, name: string): boolean

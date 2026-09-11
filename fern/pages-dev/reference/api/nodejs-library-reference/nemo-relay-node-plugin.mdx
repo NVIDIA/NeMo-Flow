@@ -315,6 +315,20 @@ export interface ToolExecutionInterceptOutcome {
 }
 ```
 
+### `ToolExecutionContext`
+
+Per-call context delivered to a tool execution intercept.
+
+`toolCallId` is the provider-issued correlation identifier recorded on the managed tool call, or `null` when the call did not record one. It lets an intercept that completes execution without invoking the remaining chain associate its result with the originating tool call.
+
+```ts
+export interface ToolExecutionContext {
+  toolName: string;
+  args: Json;
+  toolCallId: string | null;
+}
+```
+
 ### `PluginContext`
 
 Component-scoped registration context passed to plugin handlers.
@@ -439,7 +453,7 @@ export interface PluginContext {
     name: string,
     priority: number,
     callback: (
-      args: Json,
+      context: ToolExecutionContext,
       next: (args: Json) => ToolExecutionResult | Promise<ToolExecutionResult>,
     ) => ToolExecutionInterceptOutcome | Promise<ToolExecutionInterceptOutcome>,
   ): void;

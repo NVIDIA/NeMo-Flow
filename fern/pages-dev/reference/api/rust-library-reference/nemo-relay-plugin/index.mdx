@@ -53,6 +53,7 @@ This crate intentionally does not depend on the `nemo-relay` runtime crate. Nati
 - [NemoRelayNativeHostApiV1](/reference/api/rust-library-reference/nemo-relay-plugin/struct-nemorelaynativehostapiv1): Versioned host API table passed to native plugin entry symbols.
 - [NemoRelayNativeHostApiV3](/reference/api/rust-library-reference/nemo-relay-plugin/struct-nemorelaynativehostapiv3): ABI-v3 host extension appended to [`NemoRelayNativeHostApiV1`](/reference/api/rust-library-reference/nemo-relay-plugin/struct-nemorelaynativehostapiv1).
 - [NemoRelayNativeHostApiV4](/reference/api/rust-library-reference/nemo-relay-plugin/struct-nemorelaynativehostapiv4): ABI-v4 host extension for typed asynchronous middleware, mark options, diagnostics, and activation-owned dynamic gate control.
+- [NemoRelayNativeHostApiV5](/reference/api/rust-library-reference/nemo-relay-plugin/struct-nemorelaynativehostapiv5): ABI-v5 host extension for context-aware raw tool execution intercepts.
 - [NemoRelayNativeLlmAsyncStream](/reference/api/rust-library-reference/nemo-relay-plugin/struct-nemorelaynativellmasyncstream): Opaque pull-based downstream LLM stream owned by the host.
 - [NemoRelayNativeLlmRequestCodec](/reference/api/rust-library-reference/nemo-relay-plugin/struct-nemorelaynativellmrequestcodec): Opaque callback-scoped request codec capability owned by the host.
 - [NemoRelayNativeLlmResponseCodec](/reference/api/rust-library-reference/nemo-relay-plugin/struct-nemorelaynativellmresponsecodec): Opaque callback-scoped response codec capability owned by the host.
@@ -113,6 +114,8 @@ This crate intentionally does not depend on the `nemo-relay` runtime crate. Nati
 - [NEMO_RELAY_NATIVE_ABI_VERSION](/reference/api/rust-library-reference/nemo-relay-plugin/constant-nemo-relay-native-abi-version): Native plugin ABI version supported by this crate.
 - [NEMO_RELAY_NATIVE_ABI_VERSION_ASYNC_MIDDLEWARE](/reference/api/rust-library-reference/nemo-relay-plugin/constant-nemo-relay-native-abi-version-async-middleware): ABI version that introduced completion-based asynchronous middleware.
 - [NEMO_RELAY_NATIVE_ABI_VERSION_LEGACY](/reference/api/rust-library-reference/nemo-relay-plugin/constant-nemo-relay-native-abi-version-legacy): Legacy native plugin ABI accepted by Relay hosts for compatibility.
+- [NEMO_RELAY_NATIVE_ABI_VERSION_RUNTIME_CONTROL](/reference/api/rust-library-reference/nemo-relay-plugin/constant-nemo-relay-native-abi-version-runtime-control): ABI version that introduced runtime diagnostics and dynamic gate control.
+- [NEMO_RELAY_NATIVE_ABI_VERSION_TOOL_EXECUTION_CONTEXT](/reference/api/rust-library-reference/nemo-relay-plugin/constant-nemo-relay-native-abi-version-tool-execution-context): ABI version that introduced context-aware raw tool execution intercepts.
 - [TOOL_EXECUTION_INTERCEPT_OUTCOME_SCHEMA](/reference/api/rust-library-reference/nemo-relay-plugin/constant-tool-execution-intercept-outcome-schema): Versioned native-plugin JSON envelope schema for [`ToolExecutionInterceptOutcome`](/reference/api/rust-library-reference/nemo-relay-plugin/struct-toolexecutioninterceptoutcome).
 - [TOOL_EXECUTION_RESULT_SCHEMA](/reference/api/rust-library-reference/nemo-relay-plugin/constant-tool-execution-result-schema): Versioned native-plugin JSON envelope schema for [`ToolExecutionResult`](/reference/api/rust-library-reference/nemo-relay-plugin/struct-toolexecutionresult).
 
@@ -165,6 +168,7 @@ This crate intentionally does not depend on the `nemo-relay` runtime crate. Nati
 - [NemoRelayNativePluginValidateFn](/reference/api/rust-library-reference/nemo-relay-plugin/type-nemorelaynativepluginvalidatefn): Native plugin validation callback.
 - [NemoRelayNativeToolConditionalCb](/reference/api/rust-library-reference/nemo-relay-plugin/type-nemorelaynativetoolconditionalcb): Native tool conditional-execution callback.
 - [NemoRelayNativeToolExecutionCb](/reference/api/rust-library-reference/nemo-relay-plugin/type-nemorelaynativetoolexecutioncb): Native tool execution intercept callback.
+- [NemoRelayNativeToolExecutionContextCb](/reference/api/rust-library-reference/nemo-relay-plugin/type-nemorelaynativetoolexecutioncontextcb): Native tool execution intercept callback receiving canonical context JSON.
 - [NemoRelayNativeToolJsonCb](/reference/api/rust-library-reference/nemo-relay-plugin/type-nemorelaynativetooljsoncb): Native JSON transform callback for tool request/response sanitizers and tool request intercepts.
 - [NemoRelayNativeToolNextFn](/reference/api/rust-library-reference/nemo-relay-plugin/type-nemorelaynativetoolnextfn): Runtime-provided continuation for tool execution intercepts.
 - [NemoRelayNativeWithScopeStackCb](/reference/api/rust-library-reference/nemo-relay-plugin/type-nemorelaynativewithscopestackcb): Native callback executed while a host scope stack is temporarily active.

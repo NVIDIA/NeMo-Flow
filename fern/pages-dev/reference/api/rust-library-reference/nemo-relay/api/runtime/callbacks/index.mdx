@@ -2,7 +2,7 @@
 title: "Module callbacks"
 sidebar-title: "callbacks"
 description: "Callback type aliases used by the runtime middleware pipeline."
-position: 51
+position: 52
 ---
 {/* SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0 */}
@@ -18,6 +18,7 @@ The public middleware registration APIs accept callback closures with the signat
 - [LlmJsonStream](/reference/api/rust-library-reference/nemo-relay/api/runtime/callbacks/struct-llmjsonstream): Stream of JSON chunks produced by the managed streaming LLM pipeline.
 - [LlmSanitizeRequestContext](/reference/api/rust-library-reference/nemo-relay/api/runtime/callbacks/struct-llmsanitizerequestcontext): Per-call codec context for LLM request sanitize guardrails.
 - [LlmSanitizeResponseContext](/reference/api/rust-library-reference/nemo-relay/api/runtime/callbacks/struct-llmsanitizeresponsecontext): Per-call codec context for LLM response sanitize guardrails.
+- [ToolExecutionContext](/reference/api/rust-library-reference/nemo-relay/api/runtime/callbacks/struct-toolexecutioncontext): Per-call context delivered to a tool execution intercept.
 
 ## Enums
 
@@ -45,7 +46,7 @@ The public middleware registration APIs accept callback closures with the signat
 - [LlmStreamExecutionFn](/reference/api/rust-library-reference/nemo-relay/api/runtime/callbacks/type-llmstreamexecutionfn): Wrap or replace streaming LLM execution.
 - [LlmStreamExecutionNextFn](/reference/api/rust-library-reference/nemo-relay/api/runtime/callbacks/type-llmstreamexecutionnextfn): Continuation type invoked by streaming LLM execution intercepts.
 - [ToolConditionalFn](/reference/api/rust-library-reference/nemo-relay/api/runtime/callbacks/type-toolconditionalfn): Decide whether a tool call is allowed to continue.
-- [ToolExecutionFn](/reference/api/rust-library-reference/nemo-relay/api/runtime/callbacks/type-toolexecutionfn): Wrap or replace tool execution.
+- [ToolExecutionFn](/reference/api/rust-library-reference/nemo-relay/api/runtime/callbacks/type-toolexecutionfn): Wrap or replace tool execution with access to the full call context.
 - [ToolExecutionNextFn](/reference/api/rust-library-reference/nemo-relay/api/runtime/callbacks/type-toolexecutionnextfn): Continuation type invoked by tool execution intercepts.
 - [ToolInterceptFn](/reference/api/rust-library-reference/nemo-relay/api/runtime/callbacks/type-toolinterceptfn): Rewrite tool arguments before execution.
 - [ToolSanitizeFn](/reference/api/rust-library-reference/nemo-relay/api/runtime/callbacks/type-toolsanitizefn): Sanitize a tool request payload before the runtime records it.
