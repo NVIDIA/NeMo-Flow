@@ -25,41 +25,180 @@ This is the Release Notes template. Document one release version per page and us
 This page contains the release notes for [NVIDIA NeMo
 Relay](/about-nemo-relay/overview).
 
-## Release 0.9
+Complete, pull-request-by-pull-request release history is available in
+[GitHub Releases](https://github.com/NVIDIA/NeMo-Relay/releases).
 
-NeMo Relay 0.9 is under development. This page will track its user-visible
-changes, compatibility updates, and fixed known issues.
+## Release 0.9.0
 
-<Warning title="Breaking change: dynamic-plugin attestation">
+NeMo Relay 0.9 is under development. These notes summarize user-visible changes
+from 0.8.4 through current main.
 
-Dynamic-plugin attestation now runs in the core host for every embedding API.
-If `[plugins.policy.defaults]` omits its policy fields, Relay requires startup
-success and a trusted artifact signature. An unsigned plugin that activated on
-0.8 can be refused on 0.9. Sign the artifact and configure
-`trusted_public_keys`, or explicitly configure a less restrictive `attestation`
-mode. See the [0.9 migration guidance](/reference/migration-guides).
+### Highlights
+
+- Managed daemon deployments share a broker across coding-agent sessions while
+  keeping each machine-user identity's plugins and runtime in a separate worker.
+- Pi joins the CLI integrations with persistent extension installation,
+  lifecycle telemetry, tool-call policy, and supported model routing.
+- Plugin initialization and validation use one core-owned host across language
+  bindings, with explicit activation ownership and resolved configuration reports.
+- Default propagation preserves trace continuity, and OpenTelemetry tool spans
+  include richer execution metadata and sanitized GenAI tool content.
+
+<Warning title="Breaking Changes">
+
+Before upgrading, migrate plugin-host callers and tool execution intercepts,
+review trace boundaries and PII redaction, and replace remote plaintext trace
+endpoints with HTTPS. OTLP/HTTP trace exporters no longer follow redirects. See the
+[Migration Guides](/reference/migration-guides) for required actions.
 
 </Warning>
 
-<Warning title="Breaking change: tool execution intercept callbacks">
+### Managed Daemon Deployments
 
-Tool execution intercept callbacks now receive `(ToolExecutionContext, next)`.
-`ToolExecutionContext` contains the tool name, incoming arguments, and optional
-`tool_call_id`.
+- `nemo-relay daemon` provides a shared route broker with authenticated MCP
+  clients, per-machine-user workers, and administrator-managed coding-agent
+  bundles for Codex, Claude Code, and Pi. Workers load system configuration.
+- MCP clients and workers use persistent WebSocket control sessions for route
+  updates, readiness, draining, and recovery. Provider and hook traffic uses
+  separate HTTP connections, with incremental response streaming.
+- Local deployments support Windows, macOS, and Linux. Remote deployments use
+  HTTPS and require the daemon to reach client workers. Platform service,
+  provisioning, upgrade, and troubleshooting guides are available under
+  [Daemon](/daemon/about).
 
-Update existing callbacks and declare a Relay 0.9-compatible plugin range before
-upgrading. See the [0.9 migration guidance](/reference/migration-guides).
+### Coding-Agent and Framework Support
 
-</Warning>
+- Use `nemo-relay install pi`, `nemo-relay pi`, and `nemo-relay doctor pi` to
+  install, launch, and diagnose the Pi extension. The integration is a proof
+  of concept verified against Pi 0.84.x. It forwards session, turn, tool, and
+  inline-shell activity and applies policy at supported hook boundaries.
+- Relay-launched Pi model requests can select named upstreams automatically.
+  Models using unsupported APIs or incompatible provider-wide endpoint layouts
+  are not redirected. See [Pi](/nemo-relay-cli/pi).
+- Standalone LangGraph `ToolNode` calls can use `create_tool_node` for managed
+  tool execution while preserving state, store, and runtime injection. Combine
+  it with `NemoRelayCallbackHandler` for graph lifecycle scopes. See
+  [LangGraph](/supported-integrations/langgraph#managed-toolnode-calls).
+- The OpenClaw plugin now targets OpenClaw 2026.9.3 and declares that version
+  as its minimum gateway version. See
+  [OpenClaw Plugin](/supported-integrations/openclaw-plugin).
 
-### Compatibility changes
+### Plugin Configuration and Caching
 
-- Python plugin-host activation now raises `ValueError` for invalid static
-  configuration and `FileNotFoundError` for unavailable plugin configuration
-  or resources. Code that caught `RuntimeError` from
-  `nemo_relay.plugin.initialize()` or `nemo_relay.plugin.activate()` must
-  update its exception handlers. Use the [0.9 migration guide](/reference/migration-guides)
-  for the recommended validation workflow.
+- `initialize` and `validate` resolve the same static and dynamic plugin
+  configuration, compatibility, and trust policy. Exact validation checks only
+  the supplied static document. Initialization returns a `PluginHostActivation`
+  that owns plugin lifetime. See
+  [Configure and Initialize Plugins](/configure-plugins/initialize-plugins).
+- Host reports include `config_paths` and a redacted `resolved_config`, making
+  inherited and programmatic configuration visible without exposing literal
+  credentials or opaque dynamic-plugin values.
+- Response caching adds `key_strategy = "logical"`. It ignores tool-description
+  changes and tool-list ordering while retaining other tool-definition
+  differences. `exact_request` remains the default; the two strategies use
+  separate cache keyspaces. See
+  [Response Cache](/configure-plugins/adaptive/response-cache#key-strategies).
+
+### Observability and Redaction
+
+- Scope-stack forks and default propagation capture preserve the Relay root
+  when one is available. Related work can continue the same OpenTelemetry
+  trace across stacks and processes. Explicit rootless capture remains available.
+- ATIF uses the propagated root for its serialized `session_id` when present.
+  `trajectory_id`, filenames, remote storage keys, and remote session headers
+  remain tied to the individual trajectory scope UUID.
+- Claude Code, Codex, and Pi supply consistent tool type and executing-agent
+  metadata, including known subagent ownership. The `gen_ai` projection adds
+  sanitized JSON-object tool arguments and successful results, plus tool
+  definition identities, by default. The `full` and `openinference` projections
+  also receive the richer instrumentation metadata. See
+  [OpenTelemetry](/configure-plugins/observability/opentelemetry).
+- Direct trace, log, and metric subscribers accept environment-backed exporter
+  headers through `header_env` (`headerEnv` in Node.js). Values are resolved
+  when the subscriber is constructed; missing or invalid values fail
+  construction without disclosing the secret.
+- The PII `trajectory_context` preset now discards opaque payloads and unknown
+  fields while retaining approved normalized analytics and trace parentage.
+  Typed metric attributes require explicitly allowed string names and values;
+  numeric, boolean, and unlisted attributes are dropped. See
+  [PII Redaction Configuration](/configure-plugins/pii-redaction/configuration).
+
+### Support Matrix and Compatibility Updates
+
+The [Support Matrix](/reference/support-matrix) is the canonical reference for
+supported platforms and architectures, worker runtimes, coding agents, and
+integrations. Go and the raw C FFI remain experimental and source-first.
+
+Migration guidance for upgrading from 0.8.x to 0.9 is available in the
+[Migration Guides](/reference/migration-guides).
+
+### Breaking Changes
+
+- Tool execution intercepts now receive `(ToolExecutionContext, next)` instead
+  of separate tool-name and argument parameters. The context includes the tool
+  name, incoming arguments, and optional `tool_call_id`. Update callbacks across
+  bindings and plugin SDKs. Context-aware native plugins use ABI v5; native and
+  worker plugins registering this surface must declare a Relay range excluding
+  0.8. See [Tool Execution Context](/reference/tool-execution-intercept-outcomes#tool-execution-context).
+- Global plugin clear/report functions and explicit dynamic activation-spec
+  APIs are removed. Retain the activation handle, read its unified report, and
+  close it during shutdown. Static diagnostics now live under `report.config`;
+  use exact validation when file discovery is not intended.
+- Dynamic-plugin attestation runs in the core host for every embedding API.
+  Omitted policy fields default to `startup = "required"` and
+  `attestation = "signature_required"`. Unsigned plugins previously accepted
+  by an embedded host can now fail startup.
+- Python plugin-host initialization and activation raise `ValueError` for
+  invalid static configuration and `FileNotFoundError` for unavailable
+  referenced configuration or resources, replacing `RuntimeError` for those
+  failures.
+- Default propagation can join traces that were previously separate. ATIF
+  consumers must distinguish a run-scoped `session_id` from the
+  trajectory-specific `trajectory_id`.
+- All trace projections require HTTPS for remote collectors with either HTTP
+  or gRPC transport. Plain HTTP is limited to localhost and loopback IPs.
+  OTLP/HTTP trace exporters reject redirects, including HTTPS redirects.
+  Log and metric exporters retain their existing transport behavior.
+- GenAI tool content is exported by default after sanitization. Review redaction
+  policy before sending the additional content to collectors.
+- The stricter `trajectory_context` preset removes previously retained opaque
+  and metric fields. Update analytics that depend on them.
+- Rust `ResponseCacheConfig.key_strategy` now uses `ResponseCacheKeyStrategy`
+  instead of `String`; the `KEY_STRATEGY_EXACT_REQUEST` constant is removed.
+
+### Fixed Known Issues in 0.9
+
+- OpenTelemetry exports create valid local roots when a parent scope is not
+  exported. Imported parent context survives asynchronous dispatch and event
+  transformations without inventing remote parents for local scopes.
+- Coding-agent LLM events preserve an explicit provider conversation ID or
+  fall back to the resolved logical harness session ID for correlation.
+- LangChain serialization preserves message boundaries, tool-call identity,
+  and provider-native content blocks across middleware. Relay headers are
+  omitted for models whose SDK rejects `extra_headers`, allowing those calls
+  to proceed.
+- Anthropic usage survives split streaming events, and gateway routing
+  normalizes upstream URLs that already end in `/v1`. Stream aggregation also
+  preserves Anthropic compaction content and encrypted content supplied in
+  `compaction_delta` events.
+- OpenAI Responses decoding preserves Codex automation tool outputs. Codex
+  launch routing also remains scoped to the launched execution.
+- Codex installation tolerates dangling marketplace registrations, and
+  `nemo-relay install codex --force` can recover Relay-owned stale registrations.
+- Generated Codex and Claude Code hook commands use private files. Pi tool
+  results preserve their original text in lifecycle telemetry.
+- PII URL masking no longer retains credentials, and overlapping PII path
+  selectors no longer remove unrelated request content.
+
+### Other Improvements
+
+- Unix and PowerShell uninstall scripts remove a script-installed CLI while
+  preserving configuration and integrations. They check active processes and
+  refuse removal while managed daemon processes use the selected binary.
+  See [Remove a Script-Installed CLI](/getting-started/installation#remove-a-script-installed-cli).
+- ATIF documentation now clarifies that metadata placeholders are sanitized
+  into individual path components; slashes in metadata values do not create
+  nested directories. See [Metadata-Based Paths](/configure-plugins/observability/atif#metadata-based-paths).
 
 ## Known Issues in 0.9
 
@@ -81,6 +220,18 @@ upgrading. See the [0.9 migration guidance](/reference/migration-guides).
   before required MCP servers start; Relay retries the request.
 - Codex 0.143 does not expose `SessionEnd`, and Codex multi-agent v2 encrypts
   delegated-task payloads that Relay cannot decrypt or reliably link.
+- Pi support is a proof of concept verified against 0.84.x. Its personal
+  extension fails open by default, later extensions can rewrite authorized
+  arguments, and unsupported provider routes produce no LLM spans. Nested Pi
+  processes appear as separate sessions, and headless SIGINT can bypass queue
+  draining. See [Pi Limitations](/nemo-relay-cli/pi#limitations).
+- Managed daemon worker activation failures can put an authenticated route into
+  pass-through until all MCP references leave. Pass-through forwards provider
+  traffic without worker plugins; MCP readiness alone does not prove policy or
+  exporter coverage. See [Daemon Operations](/daemon/operations).
+- Remote daemon deployments require bidirectional reachability to client workers
+  and WebSocket-capable proxies. Loopback control sessions have no periodic
+  ping, so an idle hung process may remain undetected until an operation times out.
 - The Node.js binding and package workflows require Node.js 24 or later.
 - OpenClaw has public hook-backed telemetry. Its security and optimization
   coverage is partial because it does not own a managed execution path.

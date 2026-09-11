@@ -1,16 +1,36 @@
 ---
 title: "Migration Guides"
-description: "Plan an upgrade to NeMo Relay 0.9."
+description: "Plan an upgrade from NeMo Relay 0.8.x to 0.9."
 position: 6
 ---
 {/* SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0 */}
 
-Use this page to plan an upgrade to NeMo Relay 0.9.
+Use this page to plan an upgrade from NeMo Relay 0.8.x to 0.9. It groups the
+actions from the release notes by the surface you operate. NeMo Relay 0.9 is
+under development; this guidance reflects current main. If you skip one or
+more releases, review the migration guides and release notes for every
+intervening release in sequence.
 
 ## Upgrade to NeMo Relay 0.9
 
-### Tool execution intercept callbacks receive context
+### Refresh Relay-Managed Coding-Agent Integrations
+
+After upgrading the CLI, refresh personal Relay-managed integrations before
+starting new sessions:
+
+```bash
+nemo-relay integrations refresh
+```
+
+For a focused Codex repair, use `nemo-relay install codex --force`. It can
+recover a dangling Relay-owned marketplace registration. These commands apply
+to personal integrations. Administrator-managed daemon bundles follow the
+[daemon upgrade workflow](/daemon/operations#upgrade-and-roll-back): close affected
+sessions, drain workers, stop the service, and replace the binary at its stable
+path while preserving identity state and immutable bundle bytes.
+
+### Pass Tool Execution Context to Intercepts
 
 Relay 0.9 changes tool execution intercept callbacks to receive a
 `ToolExecutionContext` and the continuation instead of separate tool-name,
@@ -30,27 +50,84 @@ plugins use ABI v5 for this callback registration. See
 [Tool Execution Intercept Outcomes](/reference/tool-execution-intercept-outcomes#tool-execution-context)
 for the complete binding contract and examples.
 
-### Plugin initialization and validation has unified APIs
+### Retain the Plugin Host Activation
 
-Plugin-host APIs changed in NeMo Relay 0.9. Earlier global initialization,
-validation, report, clear, and dynamic activation-spec APIs are removed.
+<Warning title="Breaking Change">
+NeMo Relay 0.9 replaces global plugin initialization, clear/report functions,
+and explicit dynamic activation-spec APIs with one owned plugin host. Update
+initialization, report consumers, and shutdown together in every embedding.
+</Warning>
+
+`initialize` now returns a `PluginHostActivation` for static and dynamic
+plugins. Keep it alive for the full plugin lifetime. Only one activation can
+exist in a process at a time; close the existing activation before starting
+another. If teardown fails, retain the handle and retry its close operation.
+
+| Binding | Initialize | Read the Report | Close |
+|---|---|---|---|
+| Rust | `nemo_relay::plugin::dynamic::initialize(config, path).await?` | `activation.report()` | `activation.close()?` |
+| Python | `await plugin.initialize(config, path)` | `activation.report` | `await activation.close()` |
+| Node.js | `await plugin.initialize(config, path)` | `activation.report` | `await activation.close()` |
+| Go | `Initialize(config, path)` | `activation.Report()` | `activation.Close()` |
+| C | `nemo_relay_plugin_initialize` | `nemo_relay_plugin_host_activation_report_json` | `nemo_relay_plugin_host_activation_close` |
+
+Python can use `async with plugin.activate(config, path)` for guaranteed
+cleanup. Node.js callers should flush queued subscribers with
+`await relay.flushSubscribers()` before closing. Replace Python `clear()` /
+`clear_async()`, Node.js `clear()`, Rust `clear_plugin_configuration()`, and
+corresponding Go/C global cleanup with activation-owned teardown. Replace
+global report reads with the activation report. Existing Node.js dynamic-handle
+consumers must also replace `active` with `isActive`. C callers must free the
+closed handle with `nemo_relay_plugin_host_activation_free` after inspecting
+its report.
+
+Move `DynamicPluginActivationSpec` lists and calls to
+`initialize_with_dynamic_plugins` / `initializeWithDynamicPlugins` into
+`[[plugins.dynamic]]` records in `plugins.toml`, and pass that file as the
+optional path instead of calling Python
+`load_dynamic_plugin_activation_specs`. Rust callers replace
+`initialize_plugins` with `nemo_relay::plugin::dynamic::initialize`.
 
 Use [Configure and Initialize Plugins](/configure-plugins/initialize-plugins)
-to migrate to `initialize`, `validate`, and exact validation. Runtimes are
-expected to keep the returned activation handle for the full plugin lifetime
-and close it during shutdown.
+for complete language examples and [Configure Discoverable
+Plugins](/configure-plugins/discoverable-plugins) for dynamic records.
 
-#### Python-specific Errors
+### Validate the Effective Plugin Configuration
+
+`validate` now resolves the same file layers, dynamic manifests, compatibility,
+and trust policy as `initialize`, without loading plugin code. An explicit
+`plugins.toml` replaces user-file discovery; Relay still merges the system file
+and then applies programmatic configuration. Check `config_paths` and the
+redacted `resolved_config` in the report to confirm the configuration used.
+
+When validation must inspect only a complete in-memory static document, switch
+to exact validation:
+
+| Binding | Exact Validation |
+|---|---|
+| Rust | `nemo_relay::plugin::dynamic::validate_exact(config)` |
+| Python | `plugin.validate_exact(config)` |
+| Node.js | `plugin.validateExact(config)` |
+| Go | `ValidateExact(config)` |
+| C | `nemo_relay_plugin_validate_exact` |
+
+Both forms return `PluginHostReport`. Update readers of top-level static
+`diagnostics` and `runtime_diagnostics` to read them under `config` instead.
+Check `dynamic_plugins` separately for manifest, compatibility, integrity,
+environment, authenticity, and policy failures. Exact validation does not
+validate dynamic plugins.
+
+#### Python-Specific Errors
 
 `nemo_relay.plugin.initialize()` and `nemo_relay.plugin.activate()` now raise
 `ValueError` when static plugin configuration is invalid, and
 `FileNotFoundError` when a referenced plugin configuration or resource is
 unavailable. Earlier releases surfaced these failures as `RuntimeError`.
-Update exception handlers accordingly. Use `nemo_relay.plugin.validate()` or
-`nemo_relay.plugin.validate_exact()` to inspect static configuration diagnostics
-without activating plugins.
+Update exception handlers while retaining `RuntimeError` handling for host
+acquisition or plugin registration failures. Use `validate` or `validate_exact`
+to inspect static configuration diagnostics without activating plugins.
 
-### Dynamic-plugin attestation is enforced by the core host
+### Satisfy Core-Host Dynamic-Plugin Attestation
 
 NeMo Relay 0.9 evaluates dynamic-plugin attestation in the core host for every
 embedding API, not only through CLI lifecycle commands. When
@@ -62,10 +139,119 @@ startup. Sign its artifact and configure `trusted_public_keys`, or explicitly
 set `attestation = "integrity_only"` or `"signature_if_present"` under
 `[plugins.policy.defaults]` when that trust posture is appropriate. Validate
 the resolved policy and artifact evidence before deployment with
-`nemo-relay plugins validate <plugin-id>`.
+`nemo-relay plugins validate <plugin-id>` and the embedding's `validate` API.
 
 `integrity_only` skips signature verification only. It still requires a valid
 `source.artifact` and matching `integrity.sha256` digest.
+
+### Choose Trace Boundaries Explicitly
+
+Default propagation capture and scope-stack forks now preserve the Relay
+observability root when available. Imported rooted contexts continue the
+parent's OpenTelemetry trace. A first local Agent scope establishes a root
+when no propagated root exists.
+
+If a receiver must start a separate trace, replace default capture with the
+explicit rootless API:
+
+| Binding | Rootless Capture |
+|---|---|
+| Rust | `capture_rootless_propagation_context()` |
+| Python | `nemo_relay.capture_rootless_propagation_context()` |
+| Node.js | `captureRootlessPropagationContext()` |
+| Go | `CaptureRootlessPropagationContext()` |
+| C | `nemo_relay_capture_rootless_propagation_context_json` |
+
+An explicit rootless context retains immediate Relay parentage; the receiver's
+first local Agent scope establishes its new root. Continue using explicit
+root capture when the application supplies a stable run UUID. Authenticate
+inbound propagation context before importing it. See
+[Scope Concepts](/about-nemo-relay/concepts/scopes).
+
+For ATIF consumers, use `trajectory_id` as the unique artifact identity. The
+serialized `session_id` now uses the propagated root when present, so several
+trajectories can share it. Filenames, remote storage keys, remote session
+headers, and the historical `{session_id}` filename placeholder still use the
+trajectory scope UUID. Update joins or uniqueness constraints that previously
+assumed `session_id` and `trajectory_id` were identical. See
+[ATIF](/configure-plugins/observability/atif#run-scoped-session-ids).
+
+### Secure Trace Export and Review Tool Content
+
+<Warning title="Breaking Change">
+All `full`, `gen_ai`, and `openinference` trace endpoints require HTTPS for
+remote collectors, for both HTTP and gRPC transport. Plain HTTP is supported
+only for localhost and loopback IP addresses. OTLP/HTTP trace exporters no
+longer follow any redirects, including HTTPS-to-HTTPS redirects.
+</Warning>
+
+Replace remote `http://` trace endpoints with the collector's final `https://`
+URL, or use a loopback collector. Remove reliance on redirecting endpoints.
+This applies to plugin-managed endpoints and direct subscribers. Redaction
+does not relax transport requirements. Log and metric exporter transport
+behavior is unchanged; the redirect change does not apply to gRPC.
+
+The `gen_ai` projection now exports sanitized JSON-object tool arguments and
+successful results as `gen_ai.tool.call.arguments` and
+`gen_ai.tool.call.result`, and tool identities as `gen_ai.tool.definitions`.
+Review collector access and redaction before upgrading. Setting
+`enable_full_payloads = false` does not disable tool-content export; that
+setting controls LLM request-history retention. Use event sanitizers or the
+PII `trajectory_context` preset when opaque tool payloads must be removed.
+See [GenAI Projection](/configure-plugins/observability/opentelemetry#genai-projection).
+
+Direct subscribers can now read credentials from `header_env` (`headerEnv` in
+Node.js). Set each referenced environment variable before construction, and
+recreate the subscriber to pick up a changed value. Do not define the same
+header in both `headers` and `header_env`; names are compared without ASCII
+case. See [Direct Subscribers](/configure-plugins/observability/opentelemetry#direct-subscribers).
+
+### Review Trajectory Redaction and Metric Dimensions
+
+The PII `trajectory_context` preset now discards opaque payloads and unknown
+fields and builds minimal provider projections only from recognized, sanitized
+normalized annotations. Runtime and opaque codecs produce empty objects.
+Application identifiers collapse to the configured redaction marker; use Relay
+lifecycle identifiers for correlation.
+
+Typed metrics retain required measurements, but their attributes are dropped
+unless an exact string name/value pair appears in
+`metric_string_attribute_allowlist`. Numeric and boolean attributes are also
+dropped under this preset. Add only fixed constants or bounded enums needed by
+your dashboards. A string array survives only when every element is allowed.
+Review consumers of custom marks, routing metadata, and pricing provenance,
+which the stricter preset also removes by default. See
+[Trajectory Context Preset](/configure-plugins/pii-redaction/configuration#trajectory-context-preset).
+
+### Update Rust Cache Configuration
+
+`ResponseCacheConfig.key_strategy` is now a `ResponseCacheKeyStrategy` enum.
+Replace string assignments and the removed `KEY_STRATEGY_EXACT_REQUEST`
+constant with `ResponseCacheKeyStrategy::ExactRequest` or
+`ResponseCacheKeyStrategy::Logical`, imported from `nemo_relay_adaptive`.
+Existing TOML and JSON `"exact_request"` values remain valid. Choosing
+`"logical"` uses a separate keyspace and ignores tool descriptions and tool
+ordering; enable it only when those changes should count as equivalent requests.
+
+### Align Coding-Agent Versions and Deployment Modes
+
+Upgrade OpenClaw to 2026.9.3 before installing the 0.9 Relay OpenClaw plugin.
+Its compatibility metadata raises the minimum gateway version to 2026.9.3.
+
+For new Pi integrations, use Pi 0.84.x and install one Relay extension copy.
+Later minor versions are accepted as unverified and need hook validation.
+Personal extension installation and administrator-managed daemon bundles use
+different setup workflows; follow [Pi](/nemo-relay-cli/pi) or
+[Daemon](/daemon/about) for the selected mode.
+
+Managed daemon deployments require system-owned configuration, a route
+credential per machine-user identity, and persistent WebSocket control paths.
+Remote deployments additionally need HTTPS and daemon-to-worker reachability.
+Configure reverse proxies to pass WebSocket upgrades and ping/pong traffic
+under `/_nemo-relay/control/`. Verify worker-backed policy or exporter output:
+an authenticated route can enter pass-through after worker activation fails.
+See [Daemon Operations](/daemon/operations) and
+[Reverse Proxy Configuration](/daemon/reference#configure-a-trusted-reverse-proxy).
 
 ## Related Release Information
 
